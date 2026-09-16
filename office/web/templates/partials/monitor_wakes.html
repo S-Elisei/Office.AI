@@ -1,0 +1,24 @@
+{% if wakes %}
+<section class="panel">
+  <header>
+    <span>Pending wakes ({{ wakes | length }})</span>
+  </header>
+  <div class="body">
+    {% for w in wakes %}
+    <div class="work-head">
+      <span class="text-faint">{{ w.due_at | fmt_time }}</span>
+      <span class="agent">{{ w.sender }}</span>
+      <span class="text-faint">&rarr;</span>
+      <span class="agent">{{ w.recipient }}</span>
+      <span class="text-faint work-task">&middot; {{ (w.body or '').strip().split('\n')[0] }}</span>
+      <form method="post" action="/monitor/wakes/{{ w.id }}/cancel"
+            hx-post="/monitor/wakes/{{ w.id }}/cancel" hx-target="#monitor-wakes" hx-swap="innerHTML"
+            style="margin: 0 0 0 auto;">
+        <button type="submit" class="danger">Cancel</button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% else %}
+{% endif %}

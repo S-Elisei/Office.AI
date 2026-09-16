@@ -1,0 +1,118 @@
+<div id="main-chat" hx-get="/fragments/main-chat{{ '?before_id=' ~ before_id if before_id else '' }}"
+     hx-trigger="office:messages[!officeShouldSkip(this)] from:body" hx-swap="outerHTML">
+{% include "partials/notice.html" %}
+{% if project_state != 'ready' %}
+{% if project_state == 'empty' %}
+<p class="form-error">
+  The office's own repository in <code>{{ office_repo }}</code> is half-built — it has no branch
+  or no donor, and a workspace cloned from it would be empty. Delete that folder and set the
+  project up again.
+</p>
+{% endif %}
+<p class="text-dim" style="margin-top: 0; font-size: 13px;">
+  Your project is
+  {% if owner_repo %}in <code>{{ owner_repo }}</code>{% else %}the folder the office keeps its
+  data in{% endif %} —
+  {% if owner_state == 'repo' %}
+  a git repository with history. The office will copy it, commits, tags, submodules and LFS
+  objects alike, into its own repository and work there.
+  {% elif owner_state == 'empty' %}
+  a git repository with no commits yet. The office will make the first one.
+  {% else %}
+  and there is no git repository there yet. The office will create one and make the first commit.
+  {% endif %}
+  Every hire is a clone of the office's own repository, so this comes first.
+</p>
+<form method="post" action="/project/init" hx-post="/project/init" hx-target="#main-chat" hx-swap="outerHTML"
+      hx-disabled-elt="find button[type='submit']"
+      data-office-required="branch{% if owner_state != 'repo' %} readme{% endif %}">
+  <div class="form-row">
+    <label for="pi-branch">Main branch</label>
+    <input id="pi-branch" name="branch" type="text" placeholder="main"
+           value="{{ form.branch or '' }}">
+    <span class="hint">
+      The branch the team delivers to, on both sides. It is the one thing the office cannot
+      work out for itself{% if owner_state == 'repo' %} — your repository has several, and which
+      of them is the main line is yours to say{% endif %}.
+    </span>
+  </div>
+  {% if owner_state != 'repo' %}
+  <div class="form-row">
+    <label for="pi-readme">README</label>
+    <textarea id="pi-readme" name="readme" rows="4"
+              placeholder="# My project&#10;&#10;What it is.">{{ form.readme or '' }}</textarea>
+    <span class="hint">
+      The text of the first commit's only file. The office writes no words of its own into
+      your project.
+    </span>
+  </div>
+  {% endif %}
+  <div class="form-actions">
+    <button type="submit" class="primary" disabled>Set up project</button>
+  </div>
+</form>
+<p class="text-faint" style="font-size: 11.5px; margin-bottom: 0;">
+  {% if office_repo %}
+  The office keeps its own copy of the project in <code>{{ office_repo }}</code>, and everything
+  the team does happens there. Merged work is sent back to your own repository, on the same branch
+  name, and setting up the project is what makes your repository able to take it. That send, one
+  line added to <code>.git/info/exclude</code> here and the one git setting
+  (<code>receive.denyCurrentBranch = updateInstead</code>) that lets delivered work land in your
+  files are the only things the office ever writes outside its own folder.
+  {% endif %}
+  Importing a large repository with submodules and LFS takes minutes — the page will wait for it.
+</p>
+{% elif director %}
+{% include "partials/thread_nav.html" %}
+{% include "partials/thread.html" %}
+<div class="composer-row">
+  <form class="composer" method="post" action="/messages/main-chat" hx-post="/messages/main-chat" hx-target="#main-chat" hx-swap="outerHTML"
+        data-office-required="body">
+    <textarea name="body" placeholder="Message {{ director.name }}…" required></textarea>
+    <button type="submit" class="primary" disabled>Send</button>
+  </form>
+  <div id="main-context" class="composer-side" hx-get="/fragments/main-context"
+       hx-trigger="office:agents[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+    {% include "partials/main_context.html" %}
+  </div>
+</div>
+{% else %}
+<p class="text-dim" style="margin-top: 0; font-size: 13px;">
+  No director yet. Hiring the director is the one staffing decision that is yours — the director
+  staffs everyone else.
+</p>
+<form method="post" action="/agents/director" hx-post="/agents/director" hx-target="#main-chat" hx-swap="outerHTML"
+      data-office-required="owner_name name runtime model">
+  <div class="form-row">
+    <label for="hd-owner">Your name</label>
+    <input id="hd-owner" name="owner_name" type="text" value="{{ form.owner_name or owner_name }}" required>
+    <span class="hint">How you appear to the team. Get it right now — renaming later hides your own history.</span>
+  </div>
+  <div class="form-row">
+    <label for="hd-name">Name</label>
+    <input id="hd-name" name="name" type="text" value="{{ form.name if form else 'Director' }}" required>
+  </div>
+  <div id="hd-model-fields"
+       hx-post="/fragments/model-fields" hx-trigger="load" hx-include="closest form"
+       hx-vals='{"prefix": "hd"}' hx-target="this" hx-swap="innerHTML">
+    <input type="hidden" name="runtime" value="{{ form.runtime or runtimes[0] }}">
+    <input type="hidden" name="model" value="{{ form.model or '' }}">
+    <input type="hidden" name="effort" value="{{ form.effort or '' }}">
+  </div>
+  <div class="form-row mb-0">
+    <label for="hd-instructions">Instructions</label>
+    <textarea id="hd-instructions" name="instructions" style="min-height: 100px;">{{ form.instructions if form else (instructions or '') }}</textarea>
+    <span class="hint">
+      The standing brief, the same one the Settings page holds — project rules and wiki are
+      injected separately.
+    </span>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="primary" disabled>Hire director</button>
+  </div>
+</form>
+<p class="text-faint" style="font-size: 11.5px; margin-bottom: 0;">
+  This clones a workspace and can take a little while — the page will wait for it.
+</p>
+{% endif %}
+</div>

@@ -1,0 +1,77 @@
+{% include "partials/notice.html" %}
+
+{# `data-office-details` keeps it open across a refresh. #}
+<details class="panel collapse-panel" data-office-details="kanban-new-task" style="margin-bottom: 14px;">
+  <summary>New task</summary>
+  <div class="body">
+    {# data-office-required: the button is dead and grey until the title has
+       something in it. #}
+    <form method="post" action="/kanban/tasks" hx-post="/kanban/tasks" hx-target="#kanban-board" hx-swap="innerHTML"
+          data-office-required="title">
+      <div class="form-row">
+        <label for="kt-title">Title</label>
+        <input id="kt-title" name="title" type="text" required>
+      </div>
+      <div class="form-row">
+        <label for="kt-body">Body</label>
+        <textarea id="kt-body" name="body" style="min-height: 70px;"></textarea>
+      </div>
+      <div class="form-row">
+        <span class="hint">New tasks land in <strong>Idea</strong>. Nobody is notified: the board is not an
+          inbox. If it should be looked at now, say so to the director in chat.</span>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="primary" disabled>Create task</button>
+      </div>
+    </form>
+  </div>
+</details>
+
+<div class="kanban-scroll">
+<div class="kanban">
+  {% for status, label in columns %}
+  <div class="kanban-col">
+    <header>
+      <span>{{ label }}</span>
+      <span class="count">{{ (by_status.get(status, [])) | length }}</span>
+    </header>
+    <div class="kanban-cards" id="kanban-cards-{{ status }}">
+      {% for t in by_status.get(status, []) %}
+      <div class="card">
+        <button type="button" class="card-open" hx-get="/fragments/kanban/task/{{ t.id }}"
+                hx-target="#task-dialog-body" hx-swap="innerHTML"
+                onclick="document.getElementById('task-dialog').showModal()">{{ t.title }}</button>
+        {% set sig = signals.works.get(t.id, []) %}
+        {% set tks = signals.tickets.get(t.id, []) %}
+        {% set blk = blocker_ids.get(t.id, []) %}
+        {% if sig or tks or blk %}
+        <div class="card-signals">
+          {% for w in sig %}
+          <span class="chip" title="work">
+            <svg class="chip-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.6 8h2.8l1.8-4.4L9 12.6l1.8-4.6h2.6"/></svg>
+            {{ w.agent }} · {{ w.status }}
+          </span>
+          {% endfor %}
+          {% for k in tks %}
+          <span class="chip{{ ' warn' if k.status == 'open' }}" title="ticket">
+            <svg class="chip-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8.4 1.8H14v5.6l-6.4 6.4a1 1 0 0 1-1.4 0L1.8 9.2a1 1 0 0 1 0-1.4z"/><circle cx="11.2" cy="4.8" r=".9"/></svg>
+            #{{ k.id }} {{ k.status }} · {{ k.addressee }}
+          </span>
+          {% endfor %}
+          {% if blk %}
+          <span class="chip warn" title="blocked by another task">
+            <svg class="chip-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.6" width="3.2" height="10.8" rx=".7"/><rect x="6.4" y="2.6" width="3.2" height="7" rx=".7"/><rect x="10.8" y="2.6" width="3.2" height="9" rx=".7"/></svg>
+            blocked by task {{ blk | map('string') | join(', ') }}
+          </span>
+          {% endif %}
+        </div>
+        {% endif %}
+      </div>
+      {% else %}
+      <div class="empty">Empty</div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+</div>

@@ -1,0 +1,3 @@
+{% if health_warnings %}
+  <div class="health-warnings">Needs your attention: {{ health_warnings | join(' · ') }}</div>
+{% endif %}

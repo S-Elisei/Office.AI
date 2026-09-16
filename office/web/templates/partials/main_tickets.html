@@ -1,0 +1,18 @@
+{% import "macros.html" as m %}
+{% if tickets %}
+<section class="panel ticket-alert">
+  <header>
+    <span>Waiting on you ({{ tickets | length }})</span>
+  </header>
+  <div class="body">
+    {% for t in tickets %}
+    <a class="ticket-alert-row" href="/tickets/{{ t.id }}">
+      {{ m.kind_badge(t.kind) }}
+      <span class="title">{{ t.title }}</span>
+      <span class="from">from {{ t.author }} &middot; {{ t.created_at | fmt_time }}</span>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% else %}
+{% endif %}

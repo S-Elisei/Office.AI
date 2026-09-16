@@ -1,0 +1,16 @@
+{# One executor's output stream, parsed back into something readable.
+
+   Rows only.
+
+   `note` and `rows` are exclusive. #}
+{% if note %}
+  <div class="empty">{{ note }}</div>
+{% else %}
+  {% for r in rows %}
+    <div class="tail-row {{ r.kind }}{{ ' started' if r.phase == 'started' }}">
+      {# The agent's own prose carries no label. Everything else is labelled. #}
+      {% if r.kind != 'text' %}<span class="tail-kind">{{ 'running' if r.phase == 'started' else r.kind }}</span>{% endif %}
+      <span class="tail-text">{{ r.text }}</span>
+    </div>
+  {% endfor %}
+{% endif %}

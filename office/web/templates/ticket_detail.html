@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ ticket.title }} — Office.AI{% endblock %}
+{% block content %}
+  <h1><a href="/tickets" class="text-dim" style="text-decoration: none;">Tickets</a> / {{ ticket.title }}</h1>
+  <p class="subtitle">Who it's addressed to, the decision, and the discussion.</p>
+
+  <div id="ticket-detail" hx-get="/fragments/tickets/{{ ticket_id }}" hx-trigger="office:tickets[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+    {% include "partials/ticket_detail.html" %}
+  </div>
+{% endblock %}

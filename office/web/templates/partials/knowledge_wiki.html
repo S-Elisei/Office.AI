@@ -1,0 +1,116 @@
+{% include "partials/notice.html" %}
+<div class="wiki-layout">
+  <nav class="wiki-nav">
+    {% for category, pages in categories %}
+    <div class="wiki-cat">
+      <h3>{{ category }}</h3>
+      {% for p in pages %}
+      <a href="/knowledge?path={{ p.path }}" class="{{ 'active' if p.path == selected_path }}">{{ p.title }}</a>
+      {% endfor %}
+    </div>
+    {% endfor %}
+    {% if not categories %}<div class="empty">Nothing written yet.</div>{% endif %}
+
+    <details class="wiki-new" data-office-details="wiki-new">
+      <summary>+ New page</summary>
+      <form method="post" action="/knowledge/wiki" hx-post="/knowledge/wiki" hx-target="#knowledge-wiki" hx-swap="innerHTML"
+            data-office-required="path category title">
+        <input type="hidden" name="expected_version" value="0">
+        <div class="form-row">
+          <label for="wn-path">Path</label>
+          <input id="wn-path" name="path" type="text" placeholder="category/page-name" required>
+        </div>
+        <div class="form-row">
+          <label for="wn-category">Category</label>
+          <input id="wn-category" name="category" type="text" required>
+        </div>
+        <div class="form-row">
+          <label for="wn-title">Title</label>
+          <input id="wn-title" name="title" type="text" required>
+        </div>
+        <div class="form-row mb-0">
+          <label for="wn-body">Body</label>
+          <textarea id="wn-body" name="body" style="min-height: 100px;"></textarea>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="primary" disabled>Create page</button>
+        </div>
+      </form>
+    </details>
+  </nav>
+
+  <div class="wiki-article">
+    {% if selected %}
+      <h2>{{ selected.title }}</h2>
+      <div class="meta">{{ selected.category }} &middot; updated {{ selected.updated_at | fmt_time }} by {{ selected.updated_by }} &middot; v{{ selected.version }}</div>
+      <div class="content md-body">{{ selected.body | markdown | safe }}</div>
+
+      <details class="wiki-edit" data-office-details="wiki-edit-{{ selected.path }}">
+        <summary>Edit</summary>
+        <form method="post" action="/knowledge/wiki" hx-post="/knowledge/wiki" hx-target="#knowledge-wiki" hx-swap="innerHTML">
+          <input type="hidden" name="path" value="{{ selected.path }}">
+          <input type="hidden" name="expected_version" value="{{ selected.version }}">
+          <div class="form-row">
+            <label>Category</label>
+            <input name="category" type="text" value="{{ selected.category }}" required>
+          </div>
+          <div class="form-row">
+            <label>Title</label>
+            <input name="title" type="text" value="{{ selected.title }}" required>
+          </div>
+          <div class="form-row mb-0">
+            <label>Body</label>
+            <textarea name="body" style="min-height: 160px;">{{ selected.body }}</textarea>
+            <span class="hint">Saved against version {{ selected.version }}. If someone else edited this page since you opened it, saving is refused, not merged.</span>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="primary">Save</button>
+          </div>
+        </form>
+      </details>
+
+      <form method="post" action="/knowledge/wiki/delete" hx-post="/knowledge/wiki/delete" hx-target="#knowledge-wiki" hx-swap="innerHTML"
+            onsubmit="return confirm('Delete this wiki page? This cannot be undone.');" style="margin-top: 10px;">
+        <input type="hidden" name="path" value="{{ selected.path }}">
+        <input type="hidden" name="expected_version" value="{{ selected.version }}">
+        <button type="submit" class="danger">Delete page</button>
+      </form>
+
+      <section class="wiki-comments">
+        <h3>Comments</h3>
+        {% if selected.comments %}
+        <div class="thread">
+          {% for c in selected.comments %}
+          <div class="msg {{ 'from-human' if c.author == owner_name }}">
+            <div class="meta">
+              <span>{{ c.author }}</span>
+              <span>{{ c.created_at | fmt_time }}</span>
+              {% if c.page_version < selected.version %}
+              <span>on v{{ c.page_version }}, page is now v{{ selected.version }}</span>
+              {% endif %}
+            </div>
+            <div class="body md-body">{{ c.body | markdown | safe }}</div>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty">No comments yet.</div>
+        {% endif %}
+        <form method="post" action="/knowledge/wiki/comments" hx-post="/knowledge/wiki/comments" hx-target="#knowledge-wiki" hx-swap="innerHTML" style="margin-top: 12px;"
+              data-office-required="body">
+          <input type="hidden" name="path" value="{{ selected.path }}">
+          <div class="form-row mb-0">
+            <label for="wc-body">Add a comment</label>
+            <textarea id="wc-body" name="body" required style="min-height: 60px;"></textarea>
+            <span class="hint">Recorded against version {{ selected.version }}, and sent to nobody.</span>
+          </div>
+          <div class="form-actions">
+            <button type="submit" disabled>Comment</button>
+          </div>
+        </form>
+      </section>
+    {% else %}
+      <div class="empty">Pick a page on the left, or create one.</div>
+    {% endif %}
+  </div>
+</div>

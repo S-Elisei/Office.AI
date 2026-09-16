@@ -1,0 +1,59 @@
+{# The rules catalogue. #}
+{% include "partials/notice.html" %}
+
+<details class="panel collapse-panel" data-office-details="knowledge-new-rule" style="margin-bottom: 14px;">
+  <summary>New rule</summary>
+  <div class="body">
+    <form method="post" action="/knowledge/rules" hx-post="/knowledge/rules" hx-target="#knowledge-rules" hx-swap="innerHTML"
+          data-office-required="title text">
+      <div class="form-row">
+        <label for="nr-title">Title</label>
+        <input id="nr-title" name="title" type="text" placeholder="No build step" required>
+        <span class="hint">The short line this rule is referred to by &mdash; a name, not a summary.</span>
+      </div>
+      <div class="form-row">
+        <label for="nr-text">Rule</label>
+        <textarea id="nr-text" name="text" style="min-height: 90px;" required></textarea>
+        <span class="hint">Goes into every agent's system prompt on every turn, verbatim. Write it as a standing
+          convention, not as an instruction for today.</span>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="primary" disabled>Add rule</button>
+      </div>
+    </form>
+  </div>
+</details>
+
+{% if rules %}
+  {% for r in rules %}
+  <details class="panel collapse-panel" data-office-details="rule-{{ r.id }}" style="margin-bottom: 8px;">
+    <summary>
+      {% if r.title %}{{ r.title }}{% else %}<span class="badge">untitled</span> {{ r.text | truncate(76, True, '…') }}{% endif %}
+    </summary>
+    <div class="body">
+      <form method="post" action="/knowledge/rules/{{ r.id }}" hx-post="/knowledge/rules/{{ r.id }}" hx-target="#knowledge-rules" hx-swap="innerHTML"
+            data-office-required="text">
+        <div class="form-row">
+          <label for="r{{ r.id }}-title">Title</label>
+          <input id="r{{ r.id }}-title" name="title" type="text" value="{{ r.title or '' }}"
+                 placeholder="{{ 'Give it one, when you know it' if not r.title }}">
+        </div>
+        <div class="form-row">
+          <label for="r{{ r.id }}-text">Rule</label>
+          <textarea id="r{{ r.id }}-text" name="text" style="min-height: 110px;" required>{{ r.text }}</textarea>
+          <span class="hint">Rule {{ r.id }} &middot; added by {{ r.created_by }} &middot; {{ r.created_at | fmt_time }}</span>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="primary" disabled>Save</button>
+        </div>
+      </form>
+      <form method="post" action="/knowledge/rules/{{ r.id }}/delete" hx-post="/knowledge/rules/{{ r.id }}/delete" hx-target="#knowledge-rules" hx-swap="innerHTML"
+            onsubmit="return confirm('Delete this rule?');" style="margin-top: 10px;">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    </div>
+  </details>
+  {% endfor %}
+{% else %}
+<div class="empty">No rules yet.</div>
+{% endif %}

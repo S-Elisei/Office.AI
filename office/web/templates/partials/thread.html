@@ -1,0 +1,23 @@
+{% if messages %}
+{# `data-office-stick` tells app.js which end of this box to show. The newest
+   page sticks to the foot; a page reached with "show older" opens at its top. #}
+{# The `data-office-seen-*` group is what lets app.js say the owner has read this
+   conversation: which conversation it is, and the newest line actually on the
+   page — the newest of THIS page.
+
+   A panel without the group reports nothing. #}
+<div class="thread" data-office-stick="{{ 'older' if before_id else 'newest' }}"
+     {% if newest_id and conv_channel and (conv_channel != 'dm' or conv_peer) %}data-office-seen-id="{{ newest_id }}" data-office-seen-channel="{{ conv_channel }}" data-office-seen-peer="{{ conv_peer }}"{% endif %}>
+  {% for m in messages %}
+  <div class="msg {{ 'from-human' if m.sender == owner_name }}">
+    <div class="meta">
+      <span>{{ m.sender }}</span>
+      <span>{{ m.created_at | fmt_time }}</span>
+    </div>
+    <div class="body md-body">{{ m.body | markdown | safe }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">{{ empty_text | default("No messages yet.") }}</div>
+{% endif %}

@@ -1,0 +1,102 @@
+{% import "macros.html" as m %}
+{% include "partials/notice.html" %}
+{% set resolve_hint = ("Resolving sends nothing — and this ticket is your own, so there is nobody to tell.")
+   if ticket.author == owner_name
+   else ("Resolving sends nothing — " ~ ticket.author ~ " learns the decision when you write to them.") %}
+<section class="panel ticket-detail">
+  <header>
+    <span>{{ ticket.title }}</span>
+    <span>{{ m.kind_badge(ticket.kind) }} {{ m.status_badge(ticket.status) }}</span>
+  </header>
+  <div class="body">
+    <div class="addressee-line">
+      <span class="arrow">&rarr;</span>
+      <span class="addressee {{ 'you' if ticket.addressee == owner_name }}">{{ ticket.addressee }}{{ " (you)" if ticket.addressee == owner_name }}</span>
+      <span class="text-faint">&middot; opened by {{ ticket.author }} &middot; {{ ticket.created_at | fmt_time }}</span>
+      {% if ticket.task_id %}<span class="text-faint">&middot; linked to task #{{ ticket.task_id }}</span>{% endif %}
+    </div>
+    <div class="body-text md-body">{{ ticket.body | markdown | safe }}</div>
+
+    {% if ticket.status == 'resolved' %}
+    <div class="resolution-box">
+      <div class="label">Resolution</div>
+      <div class="text md-body">{{ ticket.resolution | markdown | safe }}</div>
+      <div class="who">resolved by {{ ticket.resolved_by }} &middot; {{ ticket.resolved_at | fmt_time }}</div>
+    </div>
+    {% elif ticket.addressee != owner_name %}
+    <div class="waiting-note">Waiting on {{ ticket.addressee }} to resolve.</div>
+    {% endif %}
+  </div>
+</section>
+
+{% if can_resolve %}
+<section class="panel resolve-panel">
+  <header>Resolve this ticket</header>
+  <div class="body">
+    <form method="post" action="/tickets/{{ ticket.id }}/resolve" hx-post="/tickets/{{ ticket.id }}/resolve" hx-target="#ticket-detail" hx-swap="innerHTML"
+          data-office-required="resolution">
+      <div class="form-row mb-0">
+        <label for="t-resolution">Resolution</label>
+        <textarea id="t-resolution" name="resolution" required placeholder="Write the decision the team should act on..."></textarea>
+        <span class="hint">{{ resolve_hint }}</span>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="primary" disabled>Resolve ticket</button>
+      </div>
+    </form>
+  </div>
+</section>
+{% elif can_override_resolve %}
+<details class="panel resolve-panel-override">
+  <summary>Resolve on {{ ticket.addressee }}'s behalf</summary>
+  <div class="body">
+    <p class="text-dim" style="margin-top: 0; font-size: 12.5px;">
+      This ticket is addressed to <strong>{{ ticket.addressee }}</strong>, not you. As owner you can still
+      resolve it yourself — e.g. if they're no longer around — but this bypasses the normal path, so use it
+      deliberately.
+    </p>
+    <form method="post" action="/tickets/{{ ticket.id }}/resolve" hx-post="/tickets/{{ ticket.id }}/resolve" hx-target="#ticket-detail" hx-swap="innerHTML"
+          data-office-required="resolution">
+      <div class="form-row mb-0">
+        <label for="t-resolution-override">Resolution</label>
+        <textarea id="t-resolution-override" name="resolution" required placeholder="Write the decision the team should act on..."></textarea>
+        <span class="hint">{{ resolve_hint }}</span>
+      </div>
+      <div class="form-actions">
+        <button type="submit" disabled>Resolve as owner</button>
+      </div>
+    </form>
+  </div>
+</details>
+{% endif %}
+
+<section class="panel">
+  <header>Comments</header>
+  <div class="body">
+    {% if comments %}
+    <div class="thread">
+      {% for c in comments %}
+      <div class="msg {{ 'from-human' if c.author == owner_name }}">
+        <div class="meta">
+          <span>{{ c.author }}</span>
+          <span>{{ c.created_at | fmt_time }}</span>
+        </div>
+        <div class="body md-body">{{ c.body | markdown | safe }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No comments yet.</div>
+    {% endif %}
+    <form method="post" action="/tickets/{{ ticket.id }}/comments" hx-post="/tickets/{{ ticket.id }}/comments" hx-target="#ticket-detail" hx-swap="innerHTML" style="margin-top: 12px;"
+          data-office-required="body">
+      <div class="form-row mb-0">
+        <label for="tc-body">Add a comment</label>
+        <textarea id="tc-body" name="body" required style="min-height: 60px;"></textarea>
+      </div>
+      <div class="form-actions">
+        <button type="submit" disabled>Comment</button>
+      </div>
+    </form>
+  </div>
+</section>

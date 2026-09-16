@@ -1,0 +1,25 @@
+{# The plate: critical system notices the owner has not dismissed (core.plate_notices). #}
+{% if plate_notices %}
+<div class="plate">
+  <div class="plate-body">
+    {% for n in plate_notices %}
+    <div class="plate-line">
+      <span class="plate-when">{{ n.created_at | fmt_time }}</span>{{ n.text }}
+    </div>
+    {% endfor %}
+    {% if plate_more %}
+    <div class="plate-line plate-rest">
+      and {{ plate_more }} more like this — <a href="/notices">system notices</a>
+    </div>
+    {% endif %}
+    <div class="plate-hint">
+      Nothing is re-sent automatically — send your message again if it still matters.
+      Dismissing this keeps it in the <a href="/notices">system notices</a> log.
+    </div>
+  </div>
+  <form method="post" action="/notices/dismiss" hx-post="/notices/dismiss"
+        hx-target="#main-plate" hx-swap="innerHTML">
+    <button type="submit" class="plate-dismiss" title="Dismiss">&times;</button>
+  </form>
+</div>
+{% endif %}

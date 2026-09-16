@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Main — Office.AI{% endblock %}
+{% block content %}
+
+  <div id="main-tickets" hx-get="/fragments/main-tickets" hx-trigger="office:tickets[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+    {% include "partials/main_tickets.html" %}
+  </div>
+
+  {# Bus.health()'s warnings.
+     agents and settings cover a hire, a runtime being pointed somewhere else, a codex session that starts reporting its occupancy.
+     "no quota reading yet for [...]" is the one warning whose condition clears on a reading arriving and on nothing else.
+     `office:project` is not an SSE kind. That route answers with an HX-Trigger header instead. #}
+  <div id="main-health" hx-get="/fragments/main-health"
+       hx-trigger="office:agents[!officeShouldSkip(this)] from:body, office:settings[!officeShouldSkip(this)] from:body, office:quota[!officeShouldSkip(this)] from:body, office:project[!officeShouldSkip(this)] from:body"
+       hx-swap="innerHTML">
+    {% include "partials/main_health.html" %}
+  </div>
+
+  <div class="grid-2">
+    <section class="panel">
+      <header>
+        <span>{{ director.name if director else 'Director' }}</span>
+        {% if director %}{{ m.status_badge(director.status) }}{% endif %}
+      </header>
+      <div class="body">
+        {# The panel brings its own #main-chat wrapper (hx-get, hx-trigger and
+           the page cursor together) — see partials/main_chat_panel.html. Every
+           other element on this page is its own region with its own hx-get and
+           its own collector. #}
+        {% include "partials/main_chat_panel.html" %}
+
+        {% include "partials/main_stop.html" %}
+
+        {# Renders to nothing at all when there is nothing critical standing. #}
+        <div id="main-plate" hx-get="/fragments/main-plate"
+             hx-trigger="office:notices[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+          {% include "partials/main_plate.html" %}
+        </div>
+      </div>
+    </section>
+
+    <div>
+      <section class="panel">
+        {# Every number below is remaining_fraction. #}
+        <header>Quota left</header>
+        <div class="body" id="main-quota" hx-get="/fragments/main-quota" hx-trigger="office:quota[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+          {% include "partials/quota.html" %}
+        </div>
+      </section>
+
+      {# The inbound half of delivery. Not a region with a refresh of its own:
+         nothing but the button changes what it says, and the button's own
+         answer is swapped into this body. It renders at all only while there is
+         a folder recorded to take from. #}
+      {% if intake %}
+      <section class="panel">
+        <header>Your repository</header>
+        <div class="body" id="main-intake">
+          {% include "partials/main_intake.html" %}
+        </div>
+      </section>
+      {% endif %}
+
+    </div>
+  </div>
+{% endblock %}

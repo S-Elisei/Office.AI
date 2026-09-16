@@ -1,0 +1,12 @@
+{% if threads %}
+<div class="thread-list">
+  {% for t in threads %}
+  <a href="/dm/{{ t.peer }}" class="{{ 'active' if t.peer == peer }}">
+    <div class="name">{{ t.peer }}</div>
+    <div class="preview">{{ t.preview }}</div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">No conversations yet.</div>
+{% endif %}

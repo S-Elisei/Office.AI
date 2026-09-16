@@ -1,0 +1,39 @@
+{% import "macros.html" as m %}
+{% include "partials/notice.html" %}
+{% if prs %}
+  {% for p in prs %}
+  <div class="panel pr-card">
+    <div class="pr-title">{{ p.title }} {{ m.status_badge(p.status) }}</div>
+    <div class="pr-branches">{{ p.source_branch }} &rarr; {{ p.target_branch }}</div>
+    {% if p.body %}<div class="md-body text-dim" style="margin-top:6px; font-size:12.5px;">{{ p.body | markdown | safe }}</div>{% endif %}
+    <div class="pr-meta">opened by {{ p.author_name }} &middot; {{ p.created_at | fmt_time }} &middot; {{ p.comment_count }} comment{{ '' if p.comment_count == 1 else 's' }}</div>
+
+    {% set comments = comments_by_pr.get(p.id, []) %}
+    {% if comments %}
+    <div class="thread" style="max-height: none; margin-top: 10px;">
+      {% for c in comments %}
+      <div class="msg {{ 'from-human' if c.author == owner_name }}">
+        <div class="meta">
+          <span>{{ c.author }}</span>
+          <span>{{ c.created_at | fmt_time }}</span>
+        </div>
+        <div class="body md-body">{{ c.body | markdown | safe }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <form method="post" action="/prs/{{ p.id }}/comments" hx-post="/prs/{{ p.id }}/comments" hx-target="#prs-list" hx-swap="innerHTML" style="margin-top: 10px;"
+          data-office-required="body">
+      <div class="form-row mb-0">
+        <textarea name="body" placeholder="Comment on this PR&hellip;" style="min-height: 54px;" required></textarea>
+      </div>
+      <div class="form-actions">
+        <button type="submit" disabled>Comment</button>
+      </div>
+    </form>
+  </div>
+  {% endfor %}
+{% else %}
+  <div class="empty">No open pull requests.</div>
+{% endif %}

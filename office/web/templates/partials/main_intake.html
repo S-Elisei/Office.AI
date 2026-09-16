@@ -1,0 +1,15 @@
+{% include "partials/notice.html" %}
+{% if intake %}
+<p class="text-dim" style="margin-top: 0; font-size: 12.5px;">
+  Commits you make yourself in <code>{{ intake.repo }}</code> on
+  {% if intake.branch %}<code>{{ intake.branch }}</code>{% else %}the main branch{% endif %}
+  reach the team when you press this. Until you do, everyone goes on working against the state
+  the office last saw, and the office tells the room as soon as the branch moves.
+</p>
+<form method="post" action="/project/take" hx-post="/project/take"
+      hx-target="#main-intake" hx-swap="innerHTML">
+  <div class="form-actions">
+    <button type="submit">Take my changes</button>
+  </div>
+</form>
+{% endif %}

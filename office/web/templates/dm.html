@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Direct messages — Office.AI{% endblock %}
+{% block content %}
+  <p class="subtitle">Anyone can write to the human — this is not director-only.</p>
+
+  <div class="dm-layout">
+    <section class="panel">
+      <header>Threads</header>
+      <div class="body" style="padding-bottom: 0;">
+        <form method="get" action="/dm/open" class="inline-form">
+          <select name="peer" required>
+            <option value="" disabled selected>Message someone new&hellip;</option>
+            {% for name in agent_names %}
+            <option value="{{ name }}">{{ name }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit">Open</button>
+        </form>
+      </div>
+      <div id="dm-threads" hx-get="/fragments/dm-threads" hx-trigger="office:messages[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+        {% include "partials/dm_thread_list.html" %}
+      </div>
+    </section>
+
+    <section class="panel">
+      <header>{{ peer if peer else "Select a thread" }}</header>
+      <div class="body">
+        {% if peer %}
+          {% include "partials/dm_thread_panel.html" %}
+        {% else %}
+          <div class="empty">
+            {{ "No direct messages yet." if not threads else "Pick a thread on the left." }}
+          </div>
+        {% endif %}
+      </div>
+    </section>
+  </div>
+{% endblock %}

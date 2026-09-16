@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Kanban — Office.AI{% endblock %}
+{% block content %}
+
+  <div id="kanban-board" hx-get="/fragments/kanban" hx-trigger="office:tasks[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+    {% include "partials/kanban_board.html" %}
+  </div>
+
+  <dialog id="task-dialog" class="task-dialog">
+    <div id="task-dialog-body"></div>
+  </dialog>
+{% endblock %}

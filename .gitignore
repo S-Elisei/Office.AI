@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Local agent definitions and harness settings
+.claude/
+
+# The office's own data directory, wherever it is pointed
+.office-data/
+
+# Everyone keeps their own QA log
+ISSUES.md

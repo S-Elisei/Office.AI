@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}System notices — Office.AI{% endblock %}
+{% block content %}
+  <p class="subtitle">
+    What the office has to tell you and nowhere else would. The loud ones also appear under
+    the director chat; dismissing one there never removes the line here.
+  </p>
+
+  <section class="panel">
+    <div class="body" id="notices-list" hx-get="/fragments/notices"
+         hx-trigger="office:notices[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+      {% include "partials/notices_list.html" %}
+    </div>
+  </section>
+{% endblock %}

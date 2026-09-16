@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000000"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"mcp_tool_call","server":"probe","tool":"always_fails","arguments":{"what":"test"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"mcp_tool_call","server":"probe","tool":"always_fails","arguments":{"what":"test"},"result":{"content":[{"type":"text","text":"probe: disk quota exceeded on /srv/data"}],"structured_content":null},"error":null,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"probe","tool":"protocol_error","arguments":{},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"probe","tool":"protocol_error","arguments":{},"result":null,"error":{"message":"tool call error: tool call failed for `probe/protocol_error`\n\nCaused by:\n    Mcp error: -32000: probe: the tool refused at protocol level"},"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"DONE"}}
+{"type":"turn.completed","usage":{"input_tokens":57546,"cached_input_tokens":42496,"cache_write_input_tokens":0,"output_tokens":85,"reasoning_output_tokens":11}}

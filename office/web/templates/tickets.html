@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Tickets — Office.AI{% endblock %}
+{% block content %}
+  <p class="subtitle">Questions and decisions with an addressee — nothing moves until they're resolved.</p>
+
+  <div id="tickets-list" hx-get="/fragments/tickets" hx-trigger="office:tickets[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+    {% include "partials/tickets_list.html" %}
+  </div>
+{% endblock %}

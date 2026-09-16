@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Settings — Office.AI{% endblock %}
+{% block content %}
+
+  <section class="panel">
+    <div class="body" id="settings-form" hx-get="/fragments/settings" hx-trigger="office:settings[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+      {% include "partials/settings_form.html" %}
+    </div>
+  </section>
+
+  <section class="panel">
+    <header>Finished work</header>
+    <div class="body" id="settings-project" hx-get="/fragments/delivery" hx-trigger="office:settings[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+      {% include "partials/settings_delivery.html" %}
+    </div>
+  </section>
+{% endblock %}

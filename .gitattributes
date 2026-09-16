@@ -1,0 +1,4 @@
+* text=auto
+
+# Verbatim captures of vendor output. Stored byte for byte.
+tests/fixtures/streams/*.jsonl -text

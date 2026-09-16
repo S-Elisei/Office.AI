@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Knowledge — Office.AI{% endblock %}
+{% block content %}
+  <p class="subtitle">Wiki and the rules catalog — the same for humans and agents.</p>
+
+  <section class="panel">
+    <header>Wiki</header>
+    <div class="body" id="knowledge-wiki" hx-get="/fragments/knowledge-wiki?path={{ selected_path or '' }}" hx-trigger="office:wiki[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+      {% include "partials/knowledge_wiki.html" %}
+    </div>
+  </section>
+
+  <section class="panel">
+    <header>Rules</header>
+    <div class="body" id="knowledge-rules" hx-get="/fragments/knowledge-rules" hx-trigger="office:rules[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+      {% include "partials/knowledge_rules.html" %}
+    </div>
+  </section>
+{% endblock %}

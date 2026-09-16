@@ -1,0 +1,15 @@
+<div id="chat-thread" hx-get="/fragments/chat{{ '?before_id=' ~ before_id if before_id else '' }}"
+     hx-trigger="office:messages[!officeShouldSkip(this)] from:body" hx-swap="outerHTML">
+  {% include "partials/notice.html" %}
+  {% include "partials/thread_nav.html" %}
+  {% include "partials/thread.html" %}
+  <form method="post" action="/chat/messages" hx-post="/chat/messages" hx-target="#chat-thread" hx-swap="outerHTML" style="margin-top: 10px;"
+        data-office-required="body">
+    <div class="form-row mb-0">
+      <textarea name="body" placeholder="Say something to everyone…" required style="min-height: 60px;"></textarea>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="primary" disabled>Send</button>
+    </div>
+  </form>
+</div>

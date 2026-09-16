@@ -1,0 +1,69 @@
+{# One task in full.
+
+   This is where the body, the result, a work's brief, a ticket's title and a blocking
+   task's name are read. #}
+<header class="task-dialog-head">
+  <div>
+    <div class="task-dialog-title">{{ task.title }}</div>
+    <div class="text-faint" style="font-size: 11.5px;">
+      task {{ task.id }} · {{ task.status }} · created {{ task.created_at | fmt_time }}{% if task.updated_at %} · last change {{ task.updated_at | fmt_time }}{% endif %}
+    </div>
+  </div>
+  <form method="dialog"><button type="submit" class="small">Close</button></form>
+</header>
+
+{% if task.body %}<div class="md-body" style="margin-top: 12px;">{{ task.body | markdown | safe }}</div>{% endif %}
+
+{% if task.result %}
+<div class="task-result" style="margin-top: 14px;">
+  <span class="badge ok">result</span>
+  <div class="md-body">{{ task.result | markdown | safe }}</div>
+</div>
+{% endif %}
+
+{% if works %}
+<h4 class="task-dialog-section">Work</h4>
+{% for w in works %}
+<div class="task-dialog-item">
+  <div><strong>{{ w.agent }}</strong> · {{ w.status }} · branch <code>{{ w.branch }}</code>{% if w.fail_reason %} · {{ w.fail_reason }}{% elif w.pause_reason %} · {{ w.pause_reason }}{% endif %}</div>
+  {% if w.brief %}<div class="md-body text-dim" style="font-size: 12px;">{{ w.brief | markdown | safe }}</div>{% endif %}
+</div>
+{% endfor %}
+{% endif %}
+
+{% if tickets %}
+<h4 class="task-dialog-section">Tickets</h4>
+{% for t in tickets %}
+<div class="task-dialog-item">
+  <a href="/tickets/{{ t.id }}">#{{ t.id }} {{ t.title }}</a>
+  <span class="text-faint">· {{ t.kind }} · {{ t.status }} · waiting on {{ t.addressee }}</span>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if blocked_by or blocks %}
+<h4 class="task-dialog-section">Dependencies</h4>
+{% for t in blocked_by %}
+<div class="task-dialog-item"><span class="badge warn">blocked by</span> task {{ t.id }} — {{ t.title }} <span class="text-faint">({{ t.status }})</span></div>
+{% endfor %}
+{% for t in blocks %}
+<div class="task-dialog-item"><span class="badge">blocks</span> task {{ t.id }} — {{ t.title }} <span class="text-faint">({{ t.status }})</span></div>
+{% endfor %}
+{% endif %}
+
+<h4 class="task-dialog-section">Edit</h4>
+{# data-office-required: Save is dead and grey whenever the title box is empty. #}
+<form method="post" action="/kanban/tasks/{{ task.id }}" hx-post="/kanban/tasks/{{ task.id }}"
+      hx-target="#kanban-board" hx-swap="innerHTML" data-office-required="title">
+  <div class="form-row">
+    <label for="dlg-title-{{ task.id }}">Title</label>
+    <input id="dlg-title-{{ task.id }}" name="title" type="text" value="{{ task.title }}" required>
+  </div>
+  <div class="form-row mb-0">
+    <label for="dlg-body-{{ task.id }}">Body</label>
+    <textarea id="dlg-body-{{ task.id }}" name="body" style="min-height: 120px;">{{ task.body or '' }}</textarea>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="primary" disabled>Save</button>
+  </div>
+</form>

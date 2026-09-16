@@ -1,0 +1,40 @@
+{% import "macros.html" as m %}
+{% if project_state is defined and project_state != 'ready' and not agents %}
+<div class="empty">
+  The project is not set up yet ({{ project_state }}), so nobody can be hired — hiring clones
+  the project repository. Set it up on the <a href="/">main page</a>.
+</div>
+{% elif agents %}
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Role</th>
+      <th>Runtime</th>
+      <th>Model</th>
+      <th>Effort</th>
+      <th>Status</th>
+      <th>Context fill</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in agents %}
+    <tr>
+      <td>{{ a.name }}</td>
+      <td>{{ a.kind }}</td>
+      <td>{{ a.runtime }}</td>
+      <td>{{ a.model }}</td>
+      <td>{{ a.effort or "—" }}</td>
+      <td>{{ m.status_badge(a.status) }}</td>
+      <td>
+        <div class="context-cell">
+          {{ m.context_bar(a.context_used, a.context_limit) }}
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No agents yet. Nobody has been hired.</div>
+{% endif %}

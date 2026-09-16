@@ -1,0 +1,23 @@
+{% for runtime, buckets in quota %}
+  {% if buckets %}
+    {% for bucket in buckets %}
+      {% set frac = bucket.remaining_fraction %}
+      <div class="bar-row">
+        <div class="bar-label">{{ runtime }} &middot; {{ bucket.label }}</div>
+        <div class="bar-track">
+          <div class="bar-fill {{ 'danger' if frac < 0.15 else ('warn' if frac < 0.4 else '') }}"
+               style="width: {{ (frac * 100) | round(0, 'floor') }}%"></div>
+        </div>
+        <div class="bar-value">{{ (frac * 100) | round(0, 'floor') | int }}%</div>
+        <div class="bar-meta">resets {{ bucket.reset_time | fmt_time if bucket.reset_time else 'unknown' }}</div>
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="bar-row">
+      <div class="bar-label">{{ runtime }}</div>
+      <div class="bar-track"></div>
+      <div class="bar-value bar-unknown">no data</div>
+      <div class="bar-meta">not reported yet</div>
+    </div>
+  {% endif %}
+{% endfor %}

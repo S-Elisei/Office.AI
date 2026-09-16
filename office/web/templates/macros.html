@@ -1,0 +1,29 @@
+{% macro context_bar(used, limit) %}
+  {% set p = used | pct(limit) %}
+  {% if p is none %}
+    <span class="bar-unknown">no data</span>
+  {% else %}
+    <div class="bar-track">
+      <div class="bar-fill {{ 'danger' if p >= 90 else ('warn' if p >= 75 else '') }}"
+           style="width: {{ [p, 100] | min }}%"></div>
+    </div>
+    <span class="bar-value">{{ p }}%</span>
+  {% endif %}
+{% endmacro %}
+
+{% macro status_badge(status) %}
+  {# An unlisted status still renders, unstyled. #}
+  {% set cls = {
+    'running': 'ok', 'idle': '', 'ready': '', 'provisioning': 'warn',
+    'done': 'ok', 'paused': 'warn', 'failed': 'danger',
+    'waiting': '', 'reported': 'warn',
+    'open': 'ok',
+    'in_progress': 'ok', 'needs_clarification': 'warn',
+    'resolved': 'ok',
+  } %}
+  <span class="badge {{ cls.get(status, '') }}">{{ status | replace('_', ' ') }}</span>
+{% endmacro %}
+
+{% macro kind_badge(kind) %}
+  <span class="badge {{ 'danger' if kind == 'bug' else '' }}">{{ kind }}</span>
+{% endmacro %}

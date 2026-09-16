@@ -1,0 +1,48 @@
+{% include "partials/notice.html" %}
+
+<form method="post" action="/settings" hx-post="/settings" hx-target="#settings-form" hx-swap="innerHTML">
+  <div class="form-row mb-0">
+    <label for="s-owner-name">Owner name</label>
+    <input id="s-owner-name" name="owner_name" type="text" value="{{ owner_name }}" required>
+    <span class="hint">How you appear to agents in chat.</span>
+  </div>
+  <div class="form-row mb-0" style="margin-top: 16px;">
+    <label for="s-silence-minutes">Silence notice, minutes</label>
+    <input id="s-silence-minutes" name="silence_minutes" type="number" min="0" step="1"
+           value="{{ silence_minutes }}">
+    <span class="hint">
+      How long an agent may print nothing before the office mentions it to the director.
+      It only tells the director — nothing is stopped and nothing is killed.
+      Enter <strong>0</strong> to never report; clear the box to go back to the default.
+    </span>
+  </div>
+  <div class="form-row mb-0" style="margin-top: 16px;">
+    <label for="s-instructions">Instructions</label>
+    <textarea id="s-instructions" name="instructions">{{ instructions or '' }}</textarea>
+    <span class="hint">Project rules and wiki are injected separately — this is the standing brief.</span>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="primary">Save</button>
+  </div>
+</form>
+
+<hr style="border: none; border-top: 1px solid var(--border); margin: 22px 0;">
+
+{% if not director %}
+  <div class="empty">No director hired yet — hire one from the Main page to get started.</div>
+{% else %}
+<p class="text-dim" style="margin-top: 0; font-size: 12.5px;">
+  Replacing the director happens here, in place.
+</p>
+<form method="post" action="/settings/director-model" hx-post="/settings/director-model" hx-target="#settings-form" hx-swap="innerHTML">
+  <div id="s-model-fields">{% include "partials/model_fields.html" %}</div>
+
+  <div class="form-actions">
+    <button type="submit" class="primary">Apply</button>
+  </div>
+</form>
+<p class="text-faint" style="font-size: 11.5px; margin-bottom: 0;">
+  The director cannot change its own model; only you can.
+</p>
+{% endif %}
+

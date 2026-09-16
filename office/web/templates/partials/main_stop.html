@@ -1,0 +1,31 @@
+{# The stop control for the director's turn, under the chat it belongs to. #}
+<div id="main-stop" hx-get="/fragments/main-stop"
+     hx-trigger="office:agents[!officeShouldSkip(this)] from:body{% if director_turn %}, every 10s{% endif %}"
+     hx-swap="outerHTML">
+{% include "partials/notice.html" %}
+{% if director_turn %}
+<div class="turn-stop">
+  <span class="live-dot" aria-hidden="true"></span>
+  <span class="text-faint">turn running {{ director_turn.running_for | fmt_duration }}</span>
+  <span class="{{ 'badge warn' if director_turn.quiet_for >= 300 else 'text-faint' }}">
+    silent {{ director_turn.quiet_for | fmt_duration }}
+  </span>
+  <form method="post" action="/agents/director/stop" hx-post="/agents/director/stop"
+        hx-target="#main-stop" hx-swap="outerHTML">
+    <button type="submit" class="danger">Stop turn</button>
+  </form>
+</div>
+{# What the director is doing at this moment: the newest line of its own output stream. #}
+{% if director_activity %}
+<div class="turn-activity tail-row {{ director_activity.kind }}{{ ' started' if director_activity.phase == 'started' }}">
+  {% if director_activity.kind != 'text' %}
+  <span class="tail-kind">{{ 'running' if director_activity.phase == 'started' else director_activity.kind }}</span>
+  {% endif %}
+  <span class="tail-text" title="{{ director_activity.text }}">{{ director_activity.text }}</span>
+</div>
+{% endif %}
+<div class="turn-stop-hint">
+  Ends the turn now. Nothing is re-sent — send your message again if it still matters.
+</div>
+{% endif %}
+</div>

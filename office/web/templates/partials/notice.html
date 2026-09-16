@@ -1,0 +1,18 @@
+{# The contract is two names, and a context sets at most one of them:
+   `notice_error` for a refusal, `notice_ok` for a confirmation. A name left
+   unset reads the same as an empty one. #}
+{% if request.headers.get("hx-request") and request.method == "POST" %}
+<div id="office-notices" hx-swap-oob="innerHTML">
+  {% if notice_error %}
+  <div class="notice error" data-office-notice="error">
+    <div class="text">{{ notice_error }}</div>
+    <button type="button" class="notice-close" data-office-notice-close aria-label="Dismiss">&times;</button>
+  </div>
+  {% elif notice_ok %}
+  <div class="notice ok" data-office-notice="ok">
+    <div class="text">{{ notice_ok }}</div>
+    <button type="button" class="notice-close" data-office-notice-close aria-label="Dismiss">&times;</button>
+  </div>
+  {% endif %}
+</div>
+{% endif %}

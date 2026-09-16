@@ -1,0 +1,77 @@
+{% import "macros.html" as m %}
+{% include "partials/notice.html" %}
+
+{# `data-office-details` keeps it open across a refresh (office/web/static/app.js). #}
+<details class="panel collapse-panel" data-office-details="tickets-new">
+  <summary>New ticket</summary>
+  <div class="body">
+    {# data-office-required: the button is dead and grey until there is a title
+       and somebody to address it to (office/web/static/app.js). #}
+    <form method="post" action="/tickets" hx-post="/tickets" hx-target="#tickets-list" hx-swap="innerHTML"
+          data-office-required="title addressee">
+      <div class="form-row">
+        <label for="nt-title">Title</label>
+        <input id="nt-title" name="title" type="text" required>
+      </div>
+      <div class="form-row">
+        <label for="nt-body">Body</label>
+        <textarea id="nt-body" name="body" style="min-height: 80px;"></textarea>
+      </div>
+      <div class="form-row">
+        <label for="nt-kind">Kind</label>
+        <select id="nt-kind" name="kind">
+          <option value="question" selected>question</option>
+          <option value="bug">bug</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="nt-addressee">Addressed to</label>
+        <select id="nt-addressee" name="addressee" required>
+          <option value="" disabled selected>choose an agent&hellip;</option>
+          {% for name in agent_names %}
+          <option value="{{ name }}">{{ name }}</option>
+          {% endfor %}
+        </select>
+        <span class="hint">Who this gates on. It's a decision addressed to them, not just a note.</span>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="primary" disabled>Create ticket</button>
+      </div>
+    </form>
+  </div>
+</details>
+
+<div class="ticket-section-title">Open ({{ open_tickets | length }})</div>
+{% if open_tickets %}
+  {% for t in open_tickets %}
+  <a class="panel ticket-card" href="/tickets/{{ t.id }}">
+    <div class="addressee-line">
+      <span class="arrow">&rarr;</span>
+      <span class="addressee {{ 'you' if t.addressee == owner_name }}">{{ t.addressee }}{{ " (you)" if t.addressee == owner_name }}</span>
+      {{ m.kind_badge(t.kind) }}
+    </div>
+    <div class="title">{{ t.title }}</div>
+    <div class="meta">from {{ t.author }} &middot; {{ t.created_at | fmt_time }}</div>
+  </a>
+  {% endfor %}
+{% else %}
+  <div class="empty">No open tickets.</div>
+{% endif %}
+
+<div class="ticket-section-title">Resolved ({{ resolved_tickets | length }})</div>
+{% if resolved_tickets %}
+  {% for t in resolved_tickets %}
+  <a class="panel ticket-card" href="/tickets/{{ t.id }}">
+    <div class="addressee-line">
+      <span class="arrow">&rarr;</span>
+      <span class="addressee">{{ t.addressee }}</span>
+      {{ m.kind_badge(t.kind) }}
+      {{ m.status_badge(t.status) }}
+    </div>
+    <div class="title">{{ t.title }}</div>
+    <div class="meta">from {{ t.author }} &middot; resolved {{ t.resolved_at | fmt_time }} by {{ t.resolved_by }}</div>
+  </a>
+  {% endfor %}
+{% else %}
+  <div class="empty">No resolved tickets yet.</div>
+{% endif %}

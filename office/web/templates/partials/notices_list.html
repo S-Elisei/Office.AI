@@ -1,0 +1,26 @@
+{% if notices %}
+<table>
+  <thead>
+    <tr><th>When</th><th>Severity</th><th>What happened</th></tr>
+  </thead>
+  <tbody>
+    {% for n in notices %}
+    <tr>
+      <td class="nowrap text-dim">{{ n.created_at | fmt_time }}</td>
+      <td><span class="badge {{ 'danger' if n.severity == 'critical' else '' }}">{{ n.severity }}</span></td>
+      <td class="notice-text">{{ n.text }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if notices | length >= 200 %}
+<p class="text-faint" style="font-size: 11.5px; margin-bottom: 0;">
+  The most recent 200. Older notices are kept in the database; this page has no way back
+  to them yet.
+</p>
+{% endif %}
+{% else %}
+<div class="empty">
+  Nothing yet. A failed turn, a quota wall, a compaction, a restart — each leaves one line here.
+</div>
+{% endif %}

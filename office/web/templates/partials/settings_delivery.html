@@ -1,0 +1,49 @@
+{% include "partials/notice.html" %}
+{% if delivery %}
+<p class="text-dim" style="margin-top: 0; font-size: 12.5px;">
+  The office keeps its own copy of the project in <code>{{ delivery.office_repo }}</code>, and
+  everything the team does happens there. Every merge into
+  {% if delivery.branch %}<code>{{ delivery.branch }}</code>{% else %}the main branch{% endif %} is sent to
+  your own repository, on the same branch name, before the office records it — so a merge that
+  went through is a merge you have.
+</p>
+
+<div class="form-row">
+  <label>Your repository</label>
+  {% if delivery.repo %}<div><code>{{ delivery.repo }}</code></div>{% endif %}
+  <span class="hint">
+    Not a setting and nothing to correct: the office keeps its data inside your project, so this
+    is the folder that data directory is in.
+    {% if delivery.not_a_repo %}There is no git repository there now, so a merge is refused until
+    there is one again.{% endif %}
+  </span>
+</div>
+
+{% if delivery.repo and not delivery.configured %}
+<form method="post" action="/settings/project/configure" hx-post="/settings/project/configure"
+      hx-target="#settings-project" hx-swap="innerHTML" style="margin-top: 14px;">
+  <p class="text-dim" style="font-size: 12.5px; margin-bottom: 6px;">
+    The repository in {{ delivery.repo }} does not carry
+    <code>receive.denyCurrentBranch = updateInstead</code>, which is what lets the office send
+    work to a branch you have open there and have git write the new files into that folder as
+    well as the history. Setting the project up puts that line there; it is missing now, so a
+    delivery would be refused. The button puts it back and changes nothing else in your
+    repository, now or later. To remove it again, run
+    <code>git config --unset receive.denyCurrentBranch</code> in that folder.
+  </p>
+  <div class="form-actions">
+    <button type="submit">Set up delivery</button>
+  </div>
+</form>
+{% endif %}
+
+{% if delivery.last and delivery.last.at %}
+<p class="text-faint" style="font-size: 11.5px; margin-top: 10px; margin-bottom: 0;">
+  {{ delivery.last.at | fmt_time }} —
+  {% if delivery.last.status == 'delivered' %}delivered{% if delivery.last.branch %} to
+    <code>{{ delivery.last.branch }}</code>{% endif %}.
+  {% else %}{{ delivery.last.detail }}
+  {% endif %}
+</p>
+{% endif %}
+{% endif %}

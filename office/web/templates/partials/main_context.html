@@ -1,0 +1,23 @@
+{% if applied_note %}<div class="resolution-box"><div class="text">{{ applied_note }}</div></div>{% endif %}
+{% if director %}
+{% set p = director.context_used | pct(director.context_limit) %}
+<div class="ctx-gauge" title="Director context{{ ': ' ~ p ~ '% of the window in use' if p is not none else ': no reading yet' }}">
+  {% if p is none %}
+    <span class="ctx-none">?</span>
+  {% else %}
+    <svg viewBox="0 0 44 44" aria-hidden="true">
+      <circle class="ctx-track" cx="22" cy="22" r="18"></circle>
+      <circle class="ctx-fill {{ 'danger' if p >= 90 else ('warn' if p >= 75 else '') }}"
+              cx="22" cy="22" r="18" transform="rotate(-90 22 22)"
+              stroke-dasharray="{{ ((([p, 100] | min) * 1.131) | round(1)) }} 113.1"></circle>
+    </svg>
+    <span class="ctx-value">{{ p }}%</span>
+  {% endif %}
+</div>
+<form method="post" action="/agents/director/compact" hx-post="/agents/director/compact"
+      hx-target="#main-context" hx-swap="innerHTML">
+  <button type="submit" class="small"
+          title="{{ compact_blocker if compact_blocker else 'Sums up the session in place, for before a heavy task.' }}"
+          {% if compact_blocker %}disabled{% endif %}>Compact</button>
+</form>
+{% endif %}

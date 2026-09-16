@@ -1,0 +1,83 @@
+{% import "macros.html" as m %}
+{% include "partials/notice.html" %}
+{% if project_state != 'ready' %}
+  <div class="empty">
+    The project is not set up yet ({{ project_state }}) — nobody can be hired, so nothing runs.
+    Set it up on the <a href="/">main page</a>.
+  </div>
+{% elif works %}
+  {% for w in works %}
+  {% set turn = live.get(w.agent_name) %}
+  <div class="panel work-card">
+    <div class="work-head">
+      <span class="agent">{{ w.agent_name }}</span>
+      <span class="text-faint work-runtime">&middot; {{ w.agent_runtime }}/{{ w.agent_model }}</span>
+      {{ m.status_badge(w.derived_status) }}
+      <span class="branch">{{ w.branch }}</span>
+      {% if w.task_title %}<span class="text-faint work-task">&middot; {{ w.task_title }}</span>{% endif %}
+      <span class="text-faint work-started">started {{ w.started_at | fmt_time }}</span>
+    </div>
+    {% if w.derived_status in ('running', 'waiting', 'reported') %}
+      <div class="work-live">
+        {% if turn %}
+          <span class="badge ok">turn in flight</span>
+          <span class="text-faint">running {{ turn.running_for | fmt_duration }}</span>
+          <span class="{{ 'badge warn' if turn.quiet_for >= 300 else 'text-faint' }}">
+            silent {{ turn.quiet_for | fmt_duration }}
+          </span>
+          <form method="post" action="/monitor/stop/{{ w.agent_name }}"
+                hx-post="/monitor/stop/{{ w.agent_name }}" hx-target="#monitor-list" hx-swap="innerHTML"
+                style="margin: 0 0 0 auto;">
+            <button type="submit" class="danger">Stop turn</button>
+          </form>
+        {% elif w.derived_status == 'reported' %}
+          <span class="badge warn">waiting on the director</span>
+          <span class="work-live-why">
+            {{ w.agent_name }} has reported this work and is <strong>{{ w.agent_status }}</strong>.
+            Nothing is running on it and nothing will: the report went to the director as a message,
+            and the work stays on the books until the director closes it — or sends it back, which
+            is a message to {{ w.agent_name }} and starts them again. The output below is the last
+            thing they wrote.
+          </span>
+        {% else %}
+          <span class="badge warn">nobody is running</span>
+          <span class="work-live-why">
+            {{ w.agent_name }} is <strong>{{ w.agent_status }}</strong> and the hub holds no turn for it.
+            A work stays on the books until it is reported and then closed, so this is either an
+            executor between turns — waiting to be sent something — or one that stopped without
+            reporting. The output below is the last thing it wrote.
+          </span>
+        {% endif %}
+      </div>
+    {% endif %}
+    <div class="bar-row" style="padding: 0 0 4px;">
+      <div class="bar-label">Context fill</div>
+      {{ m.context_bar(w.context_used, w.context_limit) }}
+    </div>
+    {% set brief_preview = (w.brief or '').strip().split('\n')[0].lstrip('#*->+ ') %}
+    <details class="work-brief" data-office-details="work-{{ w.id }}-brief">
+      <summary><span class="work-brief-label">brief</span> {{ brief_preview }}</summary>
+      <div class="md-body work-brief-body">{{ w.brief | markdown | safe }}</div>
+    </details>
+    {% if w.status == 'paused' and w.pause_reason %}
+      <div class="badge warn" style="margin-bottom: 8px;">{{ w.pause_reason | replace('_', ' ') }}</div>
+      {% if w.resume_after %}
+        <div class="hint">Earliest resume {{ w.resume_after | fmt_time }} — nothing is waiting on it; the director decides whether to wait, move the workspace to another runtime, or re-cut the job.</div>
+      {% endif %}
+    {% endif %}
+    {% if w.status == 'failed' and w.fail_reason %}
+      <div class="badge danger" style="margin-bottom: 8px;">{{ w.fail_reason | replace('_', ' ') }}</div>
+    {% endif %}
+    <details class="work-output" data-office-details="work-{{ w.id }}-output">
+      <summary>Output — what this executor last wrote</summary>
+      <div class="hint work-output-hint">
+        The current turn only, last 200 lines. Nothing is kept.
+      </div>
+      <div class="tail-view" id="work-{{ w.id }}-tail" hx-preserve="true"
+           data-office-lazy hx-get="/fragments/monitor/tail/{{ w.id }}"></div>
+    </details>
+  </div>
+  {% endfor %}
+{% else %}
+  <div class="empty">No works on the books. Nothing is running, waiting to be closed, paused, or stuck.</div>
+{% endif %}
