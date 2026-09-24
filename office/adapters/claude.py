@@ -137,6 +137,8 @@ class ClaudeAdapter:
             "SendMessage", "ListAgents", "Task",
             "CronCreate", "CronDelete", "CronList", "Monitor",
             "Artifact", "ArtifactComments", "ArtifactData",
+            "RemoteTrigger", "PushNotification", "ScheduleWakeup", "DesignSync",
+            "EnterWorktree", "ExitWorktree",
         ]
         if office_url:
             # Exactly one server, "office". --strict-mcp-config keeps any other
