@@ -136,6 +136,7 @@ class ClaudeAdapter:
             "--disallowedTools",
             "SendMessage", "ListAgents", "Task",
             "CronCreate", "CronDelete", "CronList", "Monitor",
+            "Artifact", "ArtifactComments", "ArtifactData",
         ]
         if office_url:
             # Exactly one server, "office". --strict-mcp-config keeps any other

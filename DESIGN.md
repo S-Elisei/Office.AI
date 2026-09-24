@@ -502,7 +502,7 @@ agy's `thinking_tokens` and codex's reasoning tokens are not counted.
 
 The denominator: claude reports it in `result.modelUsage[].contextWindow`, codex
 in `info.model_context_window`, agy not at all. Until the CLI reports one, a table
-by model is used (claude: haiku 200 000, sonnet and opus 1 000 000; agy: gemini
+by model is used (claude: haiku 200 000, sonnet, opus and fable 1 000 000; agy: gemini
 1 048 576; codex has no entry). An unknown model gets the smallest window its
 runtime offers.
 
