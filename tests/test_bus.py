@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from office import core, db
+from office import mcp as office_mcp
 from office.adapters import shared
 from office.adapters.claude import ClaudeAdapter
 import office.bus as busmod
@@ -243,6 +244,115 @@ def test_turn_drain_spawns_a_real_process_and_delivers_the_message(conn, config,
     updated = get_agent(conn, "exec1")
     assert updated["session_id"]
     assert (updated["last_seen_message_id"] or 0) >= message_id
+
+
+# --------------------------------------------------------------------------- a service's message lost with a turn
+
+
+def test_a_service_message_lost_with_a_stopped_turn_rides_the_next_turn_and_buys_none(
+    conn, config, monkeypatch, tmp_path
+):
+    agent_id = make_agent(conn, "exec1")
+    make_workspace(config, conn, agent_id, "ws-lost")
+    make_agent(conn, "director1", kind="director")
+    bus = Bus(conn, config)
+    monkeypatch.setattr(
+        busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter(sleep=TURN_SECONDS)
+    )
+
+    expectation = core.open_expectation(conn, "exec1", "the first job", 3600)
+    core.answer_expectation(conn, expectation["token"], "assetfactory", "job j-1 succeeded")
+    start_turn(bus, conn, "exec1")
+    assert bus.stop_agent("exec1", "director1")["ok"]
+    finish_turn(bus, "exec1")
+
+    assert not tick_until(
+        bus, lambda: bus._state("exec1").turn is not None, busmod.COALESCE_SECONDS * 2
+    )
+
+    # Control: a direct message does buy a turn from the same ticks.
+    dump = tmp_path / "next.txt"
+    monkeypatch.setattr(
+        busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter(dump_path=dump)
+    )
+    core.send_message(conn, "director1", "exec1", "carry on")
+    assert tick_until(
+        bus, lambda: bus._state("exec1").turn is not None, busmod.COALESCE_SECONDS * 4
+    )
+    finish_turn(bus, "exec1")
+
+    prompt = dump.read_text(encoding="utf-8")
+    assert "job j-1 succeeded" in prompt
+    assert "assetfactory" in prompt
+
+
+# --------------------------------------------------------------------------- expectations
+
+
+def test_an_expectation_nobody_answers_wakes_its_agent(conn, config, monkeypatch, tmp_path):
+    agent_id = make_agent(conn, "exec1")
+    make_workspace(config, conn, agent_id, "ws-expect")
+    bus = Bus(conn, config)
+    dump = tmp_path / "dump.txt"
+    monkeypatch.setattr(
+        busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter(dump_path=dump)
+    )
+
+    # Control: an expectation still inside its time wakes nobody.
+    core.open_expectation(conn, "exec1", "the long render", 3600)
+    assert not tick_until(
+        bus, lambda: bus._state("exec1").turn is not None, busmod.COALESCE_SECONDS * 2
+    )
+
+    core.open_expectation(conn, "exec1", "the portrait batch", 0)
+    assert tick_until(
+        bus, lambda: bus._state("exec1").turn is not None, busmod.COALESCE_SECONDS * 4
+    )
+    finish_turn(bus, "exec1")
+
+    assert "the portrait batch" in dump.read_text(encoding="utf-8")
+
+
+def test_a_remind_or_an_expectation_set_in_a_turn_is_speech_for_that_turn_only(
+    conn, config, monkeypatch
+):
+    agent_id = make_agent(conn, "exec1")
+    make_workspace(config, conn, agent_id, "ws-speech")
+    make_agent(conn, "director1", kind="director")
+    bus = Bus(conn, config)
+    monkeypatch.setattr(
+        busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter(sleep=TURN_SECONDS)
+    )
+
+    def office_messages_to(name):
+        return db.query_one(
+            conn,
+            "SELECT COUNT(*) AS n FROM messages WHERE channel = 'dm' AND sender = ? "
+            "AND recipient = ?",
+            (core.OFFICE_SENDER, name),
+        )["n"]
+
+    def a_turn(during):
+        core.send_message(conn, "director1", "exec1", "the next step")
+        start_turn(bus, conn, "exec1")
+        during()
+        finish_turn(bus, "exec1")
+
+    a_turn(lambda: office_mcp._h_expect(
+        conn, config, "exec1", "executor", {"about": "the batch", "within_seconds": 3600}
+    ))
+    assert office_messages_to("exec1") == 0
+
+    # Control: a turn that does neither is nudged, the expectation still open from
+    # the turn before notwithstanding.
+    a_turn(lambda: None)
+    assert office_messages_to("exec1") == 1
+
+    a_turn(lambda: office_mcp._h_remind(
+        conn, config, "exec1", "executor", {"to": "exec1", "text": "look again", "in_seconds": 3600}
+    ))
+    assert office_messages_to("exec1") == 1
+    assert office_messages_to("director1") == 0
 
 
 # --------------------------------------------------------------------------- no double delivery

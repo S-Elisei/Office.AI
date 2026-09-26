@@ -16,7 +16,7 @@
   </thead>
   <tbody>
     {% for s in stages %}
-    <tr{% if s.reason %} class="stage-with-reason"{% endif %}>
+    <tr{% if s.reason %} class="has-sub-row"{% endif %}>
       <td>{{ s.name }}</td>
       <td>
         <div class="stage-cell">
@@ -37,7 +37,7 @@
       <td class="stage-prepare">{% if s.prepare %}<code>{{ s.prepare }}</code>{% else %}—{% endif %}</td>
     </tr>
     {% if s.reason %}
-    <tr class="stage-reason-row">
+    <tr class="sub-row">
       <td colspan="5">
         <details class="work-brief" data-office-details="stage-{{ s.name }}-reason">
           <summary><span class="work-brief-label">reason</span> {{ s.reason.strip().split('\n')[0] }}</summary>

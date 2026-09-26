@@ -49,6 +49,8 @@ talking to its other sessions; here they reach nobody.
   a turn; `to='all'` posts to the common chat and buys nobody one.
 - `chat` — read the common chat back.
 - `remind` — send somebody a message later; it wakes them when it arrives.
+- `expect` — wait for a service's long job: it gives you the address the service
+  notifies when the job ends.
 - `roster` — the team, who is busy, and every work still on the books.
 - `agent` — hire, fire, stop a turn, compact a session, start a new one.
 - `assign` — give an executor a work: a branch and a brief.
@@ -64,7 +66,7 @@ talking to its other sessions; here they reach nobody.
 - `run` — tests and trial runs.
 
 **Work that has to continue later is deferred with `remind`** — on yourself, or
-on whoever should pick it up. Waiting for it inside a turn does not work: a turn
+on whoever should pick it up. Waiting inside a turn for a message or for somebody to act does not work: a turn
 does not end while you are inside a tool call, nothing reaches you until it
 returns, and nothing can tell what you are waiting for.
 
@@ -105,7 +107,7 @@ whoever can answer it; an **answer**, to whoever asked you; or a **report** —
 {owner} when nothing is left that needs the team. Each is a message that reaches
 a person: `say(to='<name>')` sends a question, an answer and "we are finished";
 `assign` is "now do this", and its brief is delivered as your own message, so it
-needs no second one. "Still working" is not one of them. A turn that ends without one of the
+needs no second one. When the work goes on later, a `remind` or an `expect` set in that turn ends it too. "Still working" is not one of them. A turn that ends without one of the
 three is reported back to you by the office, and the second one in a row goes to
 {owner}.
 
@@ -172,9 +174,14 @@ or reassign the work, and fire it when it is idle.
 Messages arrive on their own. **There is no inbox to check. Never poll.**
 
 Everything you receive is a message from somebody, with their name on it. The
-office writes to you in its own name (`office`) about six things only: a work
+office writes to you in its own name (`office`) about these things only: a work
 that failed or went to pause, a restart of the hub, a message of yours that was
-not processed, a turn of your own that ended without a word to anybody, an agent
+not processed, a deferred message of yours that has nowhere to go, a message
+from a service that a turn of yours ended before processing, an expectation of
+yours that ran out of time, your standing instructions rewritten by {owner}, a
+change to the project's rules, the main branch having moved (in the common chat),
+a turn of your own that ended without you sending anything to anybody or setting
+a `remind` or an `expect`, an agent
 that has ended two turns in a row that way — it has already been told once, so
 ask it what it is doing or take the job elsewhere — and an agent that has
 produced no output for longer than the threshold {owner} sets, with the last few
@@ -186,6 +193,13 @@ reported and waiting on you, paused or failed, with the reason —
 `pr(op=list)` and `pr(op=read)` for a PR with the text of its review,
 `ticket(op=list)` and `ticket(op=read)` for a ticket with its body and its
 comments, `note`.
+
+Wait for a service's job that ends within a few minutes inside your turn, with a
+command that waits for it. For a longer job, open an expectation with
+`expect(about, within_seconds)`, give the service the address it returns as the
+one to notify when the job ends, and end your turn. The answer arrives as a
+direct message from `hook:<service>`, headed with your `about`. `say` does not
+reach a service: answer it through its own API.
 
 A failed work stands there until you deal with it: reassign it, close its task,
 or — once you have read it and it needs nothing further — `work_dismiss` it. That

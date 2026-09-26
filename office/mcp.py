@@ -145,6 +145,17 @@ def _h_remind(conn, config, agent_name, role, args) -> str:
     return f"queued for {wake['recipient']}, sends {_fmt_stamp(wake['due_at'])}"
 
 
+def _h_expect(conn, config, agent_name, role, args) -> str:
+    """An answer awaited from a local service, and the address it is posted to."""
+    _require(args, "about", "within_seconds")
+    expectation = core.open_expectation(conn, agent_name, args["about"], args["within_seconds"])
+    return (
+        f"expecting '{expectation['about']}' until {_fmt_stamp(expectation['due_at'])}. "
+        "Give the service this address to notify: "
+        f"http://127.0.0.1:{config.port}/hooks/{expectation['token']}"
+    )
+
+
 def _h_task(conn, config, agent_name, role, args) -> str:
     op = args.get("op")
     if op == "create":
@@ -790,16 +801,25 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
             continue
         ctx = f"{a['context_used']}/{a['context_limit']}" if a["context_limit"] else "n/a"
         lines.append(f"  {a['name']} ({a['kind']}/{a['runtime']}/{a['model']}) status={a['status']} context={ctx}")
-    # Above the role split: this is the one block both roles have business
-    # with. An executor's own wakes are the only record anywhere of what it
-    # arranged to be told later. What differs is reach — the director sees
-    # the office's, an executor sees the ones it set itself.
+    # Above the role split: wakes and expectations are for both roles. What
+    # differs is reach — the director sees the office's, an executor sees its
+    # own.
     wakes = core.scheduled_messages(conn, sender=None if role == "director" else agent_name)
     if wakes:
         lines.append("Pending wakes:")
         for w in wakes:
             lines.append(
                 f"  {_fmt_stamp(w['due_at'])}: from {w['sender']} to {w['recipient']} — {_first_line(w['body'])}"
+            )
+    expectations = [
+        e for e in core.open_expectations(conn) if role == "director" or e["agent"] == agent_name
+    ]
+    if expectations:
+        lines.append("Open expectations:")
+        for e in expectations:
+            lines.append(
+                f"  {e['agent']}: {e['about']} — opened {_fmt_stamp(e['opened_at'])}, "
+                f"due {_fmt_stamp(e['due_at'])}"
             )
     lines.extend(_stage_lines(conn, config, role))
     if role != "director":
@@ -1114,7 +1134,9 @@ def _h_work_dismiss(conn, config, agent_name, role, args) -> str:
     )
 
 
-_SHARED_TOOL_NAMES = ("say", "chat", "remind", "task", "work", "pr", "note", "ticket", "run", "roster")
+_SHARED_TOOL_NAMES = (
+    "say", "chat", "remind", "expect", "task", "work", "pr", "note", "ticket", "run", "roster",
+)
 # roster is shared and answers differently by role (_h_roster): the team to
 # everybody, and to the director everything staffing turns on besides. It is
 # the only place any of that is said — none of it is printed into a system
@@ -1125,6 +1147,7 @@ _HANDLERS = {
     "say": _h_say,
     "chat": _h_chat,
     "remind": _h_remind,
+    "expect": _h_expect,
     "task": _h_task,
     "work": _h_work,
     "pr": _h_pr,
@@ -1201,6 +1224,31 @@ _TOOLS: dict[str, types.Tool] = {
                 },
             },
             "required": ["to", "text", "in_seconds"],
+        },
+    ),
+    "expect": types.Tool(
+        name="expect",
+        description="Wait for a local service's job that takes longer than a few minutes. A job "
+        "that ends within a few minutes is waited for inside your turn instead, with a command "
+        "that waits for it, under your own shell or `run`. For a longer one: call this, give the "
+        "service the address it returns as the one to notify when the job ends, and end your "
+        "turn. What the service sends there reaches you as a direct message from hook:<service>, "
+        "headed with `about`. If nothing arrives within within_seconds, the address closes and "
+        "the office tells you. within_seconds counts forward from now, at most "
+        f"{core.MAX_WAKE_SECONDS}.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "about": {
+                    "type": "string",
+                    "description": "What you are waiting for — the job or the batch.",
+                },
+                "within_seconds": {
+                    "type": "integer",
+                    "description": f"How long to wait, in seconds. 0 to {core.MAX_WAKE_SECONDS}.",
+                },
+            },
+            "required": ["about", "within_seconds"],
         },
     ),
     "task": types.Tool(

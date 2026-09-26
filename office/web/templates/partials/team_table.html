@@ -19,7 +19,8 @@
   </thead>
   <tbody>
     {% for a in agents %}
-    <tr>
+    {% set awaits = expectations | selectattr("agent", "equalto", a.name) | list %}
+    <tr{% if awaits %} class="has-sub-row"{% endif %}>
       <td>{{ a.name }}</td>
       <td>{{ a.kind }}</td>
       <td>{{ a.runtime }}</td>
@@ -32,6 +33,18 @@
         </div>
       </td>
     </tr>
+    {% if awaits %}
+    <tr class="sub-row">
+      <td colspan="7">
+        {% for e in awaits %}
+        <div class="expectation">
+          <span class="work-brief-label">awaits</span> {{ e.about }}
+          <span class="text-faint">&middot; since {{ e.opened_at | fmt_time }} &middot; due {{ e.due_at | fmt_time }}</span>
+        </div>
+        {% endfor %}
+      </td>
+    </tr>
+    {% endif %}
     {% endfor %}
   </tbody>
 </table>

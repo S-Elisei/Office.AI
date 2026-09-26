@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 from pathlib import Path
 
@@ -23,6 +24,10 @@ DIRECTOR_INSTRUCTIONS_SETTING = "director_instructions"
 
 # The office's own name in the participant namespace.
 OFFICE_SENDER = "office"
+
+# The sender of a message a local service posts through the hub is this prefix
+# plus the service's name.
+HOOK_SENDER_PREFIX = "hook:"
 
 
 # --------------------------------------------------------------------------- events
@@ -155,24 +160,42 @@ def send_message(conn, sender: str, recipient: str, body: str, actor: str | None
     channel = "all" if recipient == "all" else "dm"
     recipient_col = None if channel == "all" else recipient
     if channel == "dm":
-        known = recipient_col == get_owner_name(conn) or db.query_one(
-            conn, "SELECT 1 FROM agents WHERE name = ?", (recipient_col,)
-        )
-        if not known:
-            raise ValueError(f"no participant named '{recipient_col}' — check the name and try again")
+        _check_participant(conn, recipient_col)
     with db.transaction(conn):
-        cur = db.execute(
-            conn,
-            "INSERT INTO messages (channel, sender, recipient, body) VALUES (?, ?, ?, ?)",
-            (channel, sender, recipient_col, body),
-        )
-        message_id = cur.lastrowid
-        _emit(
-            conn, "messages", "message", message_id,
-            {"channel": channel, "sender": sender, "recipient": recipient_col},
-            actor=actor if actor is not None else sender,
+        message_id = _write_message(
+            conn, channel, sender, recipient_col, body, actor if actor is not None else sender
         )
     return _row(conn, "messages", "id", message_id)
+
+
+def _write_message(conn, channel: str, sender: str, recipient: str | None, body: str,
+                   actor: str) -> int:
+    """Insert one message and emit it. Call inside db.transaction()."""
+    cur = db.execute(
+        conn,
+        "INSERT INTO messages (channel, sender, recipient, body) VALUES (?, ?, ?, ?)",
+        (channel, sender, recipient, body),
+    )
+    _emit(
+        conn, "messages", "message", cur.lastrowid,
+        {"channel": channel, "sender": sender, "recipient": recipient},
+        actor=actor,
+    )
+    return cur.lastrowid
+
+
+def _check_participant(conn, recipient: str) -> None:
+    """Refuse a direct-message recipient that is not the owner or an agent."""
+    if recipient.startswith(HOOK_SENDER_PREFIX):
+        raise ValueError(
+            f"'{recipient}' is a service, not a participant, and no message reaches it — "
+            "answer it through its own API"
+        )
+    known = recipient == get_owner_name(conn) or db.query_one(
+        conn, "SELECT 1 FROM agents WHERE name = ?", (recipient,)
+    )
+    if not known:
+        raise ValueError(f"no participant named '{recipient}' — check the name and try again")
 
 
 CHAT_PAGE_SIZE = 30
@@ -247,26 +270,13 @@ def schedule_message(conn, sender: str, recipient: str, body: str, in_seconds: i
 
     `due_at` is computed here, by SQLite's own clock and in SQLite's own format.
     """
-    if isinstance(in_seconds, bool) or not isinstance(in_seconds, (int, float)) or in_seconds != int(in_seconds):
-        raise ValueError(f"in_seconds must be a whole number of seconds, not '{in_seconds}'")
-    in_seconds = int(in_seconds)
-    if in_seconds < 0:
-        raise ValueError("in_seconds cannot be negative — a wake is set forward from now")
-    if in_seconds > MAX_WAKE_SECONDS:
-        raise ValueError(
-            f"in_seconds is at most {MAX_WAKE_SECONDS} (seven days); {in_seconds} is further off than "
-            "the office will hold a message"
-        )
+    in_seconds = _seconds_ahead("in_seconds", in_seconds)
     if recipient == "all":
         raise ValueError(
             "'all' is the common chat and it wakes nobody, so a deferred post to it would arrive "
             "and do nothing — name the participant who should be woken"
         )
-    known = recipient == get_owner_name(conn) or db.query_one(
-        conn, "SELECT 1 FROM agents WHERE name = ?", (recipient,)
-    )
-    if not known:
-        raise ValueError(f"no participant named '{recipient}' — check the name and try again")
+    _check_participant(conn, recipient)
     with db.transaction(conn):
         cur = db.execute(
             conn,
@@ -281,6 +291,22 @@ def schedule_message(conn, sender: str, recipient: str, body: str, in_seconds: i
             actor=sender,
         )
     return _row(conn, "scheduled_messages", "id", wake_id)
+
+
+def _seconds_ahead(arg: str, value) -> int:
+    """`value` as a whole number of seconds from 0 to MAX_WAKE_SECONDS. Raises
+    ValueError naming `arg` otherwise."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):
+        raise ValueError(f"{arg} must be a whole number of seconds, not '{value}'")
+    value = int(value)
+    if value < 0:
+        raise ValueError(f"{arg} cannot be negative — it counts forward from now")
+    if value > MAX_WAKE_SECONDS:
+        raise ValueError(
+            f"{arg} is at most {MAX_WAKE_SECONDS} (seven days); {value} is further off than "
+            "the office will hold it"
+        )
+    return value
 
 
 def due_scheduled_messages(conn) -> list[dict]:
@@ -319,6 +345,125 @@ def scheduled_messages(conn, sender: str | None = None) -> list[dict]:
             conn, "SELECT * FROM scheduled_messages WHERE sender = ? ORDER BY due_at, id", (sender,)
         )
     return [dict(r) for r in rows]
+
+
+# --------------------------------------------------------------------------- expectations
+#
+# An answer an agent waits for from a local service. The `expect` tool opens
+# one, office/web/routes/hooks.py takes the answer, and office/bus.py's tick
+# closes one whose due time has passed.
+#
+# The only write path into `expectations`.
+
+_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+
+
+def open_expectation(conn, agent: str, about: str, within_seconds) -> dict:
+    """expect(about, within_seconds): an open expectation for `agent`, due
+    `within_seconds` from now.
+
+    Returns the row. Its `token` is the last segment of the address the answer
+    is posted to.
+    """
+    if not isinstance(about, str) or not about.strip():
+        raise ValueError("about must name what you are waiting for — the job or the batch")
+    within_seconds = _seconds_ahead("within_seconds", within_seconds)
+    with db.transaction(conn):
+        agent_id = db.query_one(conn, "SELECT id FROM agents WHERE name = ?", (agent,))["id"]
+        cur = db.execute(
+            conn,
+            "INSERT INTO expectations (token, agent_id, about, due_at) "
+            "VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?))",
+            (secrets.token_urlsafe(24), agent_id, about.strip(), f"+{within_seconds} seconds"),
+        )
+        expectation_id = cur.lastrowid
+        _emit(conn, "agents", "expectation", expectation_id, {"agent": agent, "state": "open"},
+              actor=agent)
+    return _row(conn, "expectations", "id", expectation_id)
+
+
+def answer_expectation(conn, token: str, service: str, text: str) -> dict | None:
+    """Take a service's answer at `token`: close the expectation and send `text`
+    to its agent as a direct message from `hook:<service>`, headed with the
+    expectation's `about`. One transaction.
+
+    Returns None, writing nothing, when no expectation is open at `token`.
+    """
+    sender = HOOK_SENDER_PREFIX + service
+    with db.transaction(conn):
+        row = db.query_one(
+            conn,
+            "SELECT e.id, e.about, a.name FROM expectations e JOIN agents a ON a.id = e.agent_id "
+            f"WHERE e.token = ? AND e.closed_at IS NULL AND e.due_at > {_NOW}",
+            (token,),
+        )
+        if row is None:
+            return None
+        db.execute(conn, f"UPDATE expectations SET closed_at = {_NOW} WHERE id = ?", (row["id"],))
+        _emit(conn, "agents", "expectation", row["id"], {"agent": row["name"], "state": "answered"},
+              actor=sender)
+        message_id = _write_message(
+            conn, "dm", sender, row["name"], f"[about: {row['about']}]\n{text}", sender
+        )
+    return _row(conn, "messages", "id", message_id)
+
+
+def due_expectations(conn) -> list[dict]:
+    """Every open expectation whose due time has passed, soonest first, with its
+    agent's name."""
+    return [
+        dict(r)
+        for r in db.query(
+            conn,
+            "SELECT e.id, e.about, a.name AS agent FROM expectations e "
+            "JOIN agents a ON a.id = e.agent_id "
+            f"WHERE e.closed_at IS NULL AND e.due_at <= {_NOW} ORDER BY e.due_at, e.id",
+        )
+    ]
+
+
+def expire_expectation(conn, expectation_id: int, notice: str) -> None:
+    """Close one expectation whose due time has passed and send `notice` to its
+    agent as a direct message from `office`. One transaction.
+
+    Writes nothing when the row is gone: its agent was fired.
+    """
+    with db.transaction(conn):
+        row = db.query_one(
+            conn,
+            "SELECT a.name FROM expectations e JOIN agents a ON a.id = e.agent_id "
+            "WHERE e.id = ? AND e.closed_at IS NULL",
+            (expectation_id,),
+        )
+        if row is None:
+            return
+        db.execute(conn, f"UPDATE expectations SET closed_at = {_NOW} WHERE id = ?",
+                   (expectation_id,))
+        _emit(conn, "agents", "expectation", expectation_id,
+              {"agent": row["name"], "state": "expired"}, actor=OFFICE_SENDER)
+        _write_message(conn, "dm", OFFICE_SENDER, row["name"], notice, OFFICE_SENDER)
+
+
+def drop_closed_expectations(conn, agent: str) -> None:
+    """Delete `agent`'s closed expectations."""
+    db.execute(
+        conn,
+        "DELETE FROM expectations WHERE closed_at IS NOT NULL "
+        "AND agent_id = (SELECT id FROM agents WHERE name = ?)",
+        (agent,),
+    )
+
+
+def open_expectations(conn) -> list[dict]:
+    """Every open expectation, oldest first."""
+    return [
+        dict(r)
+        for r in db.query(
+            conn,
+            "SELECT a.name AS agent, e.about, e.opened_at, e.due_at FROM expectations e "
+            "JOIN agents a ON a.id = e.agent_id WHERE e.closed_at IS NULL ORDER BY e.id",
+        )
+    ]
 
 
 # --------------------------------------------------------------------------- notices
@@ -1687,16 +1832,7 @@ def tell_quietly(conn, recipient: str, body: str) -> None:
     common-chat post is, and read by nobody else.
     """
     with db.transaction(conn):
-        cur = db.execute(
-            conn,
-            "INSERT INTO messages (channel, sender, recipient, body) VALUES ('all', ?, ?, ?)",
-            (OFFICE_SENDER, recipient, body),
-        )
-        _emit(
-            conn, "messages", "message", cur.lastrowid,
-            {"channel": "all", "sender": OFFICE_SENDER, "recipient": recipient},
-            actor=OFFICE_SENDER,
-        )
+        _write_message(conn, "all", OFFICE_SENDER, recipient, body, OFFICE_SENDER)
 
 
 def announce_intake(conn, intake: git.Intake | None) -> None:

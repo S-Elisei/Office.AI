@@ -124,6 +124,20 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+-- An answer an agent waits for from a local service, reached at the address
+-- /hooks/<token>. A row with `closed_at` NULL is open. `closed_at` is set when
+-- the answer is taken or `due_at` passes; a closed row is deleted when its
+-- agent's turn ends.
+CREATE TABLE IF NOT EXISTS expectations (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    token     TEXT NOT NULL UNIQUE,
+    agent_id  INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    about     TEXT NOT NULL,
+    opened_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    due_at    TEXT NOT NULL,
+    closed_at TEXT
+);
+
 -- One row per mutation: what changed, and who changed it. Nothing reads this
 -- table back. Writing a row is the signal: core's `_notify` pushes it to the
 -- browser, and a page element then re-reads its own data from the tables that

@@ -518,10 +518,10 @@ def run_turn(
     prompt: str,
     agent: str,
     effort: str | None = None,
-    office_url: str | None = None,
+    *,
+    office_url: str,
     session_id: str | None = None,
     resume: bool = False,
-    env: dict[str, str] | None = None,
     tail_path: Path | None = None,
 ) -> AgentTurn:
     """Start one turn.
@@ -532,18 +532,17 @@ def run_turn(
     `office_url` is this agent's own office MCP endpoint. `agent` goes into
     the child's environment as OFFICE_AGENT.
 
-    The adapter's own `child_env()` goes in first, under everything the
-    caller passes. Each runtime states its own timeout explicitly.
+    The adapter's own `child_env()` goes in first, under the office's own
+    variables. Each runtime states its own timeout explicitly.
     """
     cmd = adapter.build_command(ws, model, effort, office_url, session_id, resume)
     identity = dict(getattr(adapter, "child_env", dict)())
     identity[shared.AGENT_ENV] = agent
     if session_id:
         identity["OFFICE_SESSION"] = session_id
-    if office_url:
-        identity["OFFICE_MCP_URL"] = office_url
+    identity["OFFICE_MCP_URL"] = office_url
     turn = AgentTurn(adapter, cmd, ws, prompt, agent,
-                     env={**identity, **(env or {})},
+                     env=identity,
                      tail_path=tail_path,
                      context_limit=context_limit_for(adapter.runtime, model))
     turn.start()

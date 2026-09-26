@@ -67,6 +67,11 @@ class _AgentState:
     # MAX(messages.id) as this agent's current turn spawned. Everything the agent
     # writes after that gets a higher id.
     speech_floor: int = 0
+    # MAX(scheduled_messages.id) and MAX(expectations.id), read before this
+    # agent's current turn spawned. Both tables are AUTOINCREMENT: a row written
+    # after that gets a higher id.
+    wake_floor: int = 0
+    expectation_floor: int = 0
     # True once this turn's silence has been reported to the director
     # (_report_silent_turn); cleared when the next turn is installed.
     silence_reported: bool = False
@@ -364,6 +369,10 @@ class Bus:
             self._send_due_wakes()
         except Exception:
             _log.exception("could not send due wakes")
+        try:
+            self._expire_due_expectations()
+        except Exception:
+            _log.exception("could not close due expectations")
         # One read for the whole pass. One maximum, over `messages`: that is what
         # "caught up" is measured against.
         head = db.query_one(
@@ -469,6 +478,17 @@ class Bus:
                 sender, wake["recipient"],
             )
 
+    def _expire_due_expectations(self) -> None:
+        """Close every expectation whose due time has passed, telling its agent.
+
+        One that came due while the hub was down closes on the first tick after
+        it starts.
+        """
+        for expectation in core.due_expectations(self.conn):
+            core.expire_expectation(
+                self.conn, expectation["id"], _expired_expectation_notice(expectation["about"])
+            )
+
     # -- reading the queue -------------------------------------------------
 
     def _undelivered(self, agent: dict) -> "_Pending":
@@ -572,12 +592,14 @@ class Bus:
                     "UPDATE agents SET turn_start_message_id = NULL WHERE id = ?",
                     (agent["id"],),
                 )
+            core.drop_closed_expectations(self.conn, name)
 
     def _report_undelivered(self, name: str, runtime: str, reason: str, handed: list) -> None:
         """One notice per sender whose direct message died with `name`'s turn.
 
                 Three kinds of sender are never told: the office itself, a sender that
-                has since been fired, and the agent itself.
+                has since been fired, and the agent itself. A service's message is
+                given back to `name` instead, whole, as a quiet line.
 
                 One sender's notice failing does not cost the others theirs.
         """
@@ -598,6 +620,15 @@ class Bus:
                 continue
             lost.setdefault(sender, []).append(row["body"])
         for sender, bodies in lost.items():
+            if sender.startswith(core.HOOK_SENDER_PREFIX):
+                for body in bodies:
+                    try:
+                        core.tell_quietly(self.conn, name, _lost_hook_notice(sender, body))
+                    except Exception:
+                        _log.exception(
+                            "could not give %s back the message from %s", name, sender
+                        )
+                continue
             if sender == owner:
                 _log.info(
                     "%d message(s) from the owner died with %s's turn (%s) — the owner is "
@@ -622,15 +653,19 @@ class Bus:
                 )
 
     def _spoke_this_turn(self, name: str, state: "_AgentState") -> bool:
-        """Did this agent send a direct message since its current turn spawned?
+        """Did this agent speak since its current turn spawned?
 
-                Speech is a direct message and nothing else: a common-chat post buys
-                nobody a turn.
+                Speech is a direct message sent, a deferred message set, or an
+                expectation opened. A common-chat post buys nobody a turn and is not
+                speech.
         """
         return db.query_one(
             self.conn,
-            "SELECT 1 FROM messages WHERE sender = ? AND channel = 'dm' AND id > ? LIMIT 1",
-            (name, state.speech_floor),
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM messages WHERE sender = ? AND channel = 'dm' "
+            "AND id > ?) OR EXISTS (SELECT 1 FROM scheduled_messages WHERE sender = ? AND id > ?) "
+            "OR EXISTS (SELECT 1 FROM expectations e JOIN agents a ON a.id = e.agent_id "
+            "WHERE a.name = ? AND e.id > ?)",
+            (name, state.speech_floor, name, state.wake_floor, name, state.expectation_floor),
         ) is not None
 
     def _clear_nudge_if_it_spoke(self, name: str) -> None:
@@ -838,6 +873,11 @@ class Bus:
                 # is discharged, not deferred.
                 return True
             state.wake_times.append(time.monotonic())
+            floors = db.query_one(
+                self.conn,
+                "SELECT (SELECT COALESCE(MAX(id), 0) FROM scheduled_messages) AS wakes, "
+                "(SELECT COALESCE(MAX(id), 0) FROM expectations) AS expectations",
+            )
 
             try:
                 # No SQLite transaction is open here, deliberately: everything the
@@ -871,6 +911,8 @@ class Bus:
             # The same write fixes the floor this turn's own speech has to stand
             # above.
             state.speech_floor = agent["last_seen_message_id"] or 0
+            state.wake_floor = floors["wakes"]
+            state.expectation_floor = floors["expectations"]
             self._set_status(agent["id"], "running")
             threading.Thread(target=self._watch, args=(name, turn), daemon=True).start()
             return True
@@ -1654,13 +1696,14 @@ def _ending_nudge() -> str:
         word to anybody (_report_turn_ended_without_a_word).
     """
     return (
-        "[office] Your last turn ended without you sending anything to anybody. That is "
-        "against your instructions: every turn ends with one of three things — a question to "
-        "whoever can answer it, an answer to whoever asked you, or a report handing the work "
-        "on. Nothing here wakes by itself, so a turn that ends silently stops the office until "
-        "a human notices. Decide which of the three your last turn was and send it now: a "
-        "question or an answer goes with `say(to='<name>')`, and a report is `assign` or "
-        "`work(op=finish)`, whichever side of a work you are on. A message reaches somebody "
+        "[office] Your last turn ended without you sending anything to anybody and without "
+        "setting a `remind` or an `expect`. That is against your instructions: every turn ends with one of "
+        "three things — a question to whoever can answer it, an answer to whoever asked you, or "
+        "a report handing the work on — or, when the work goes on later, with a `remind` or an "
+        "`expect`. Nothing here wakes by itself, so a turn that ends silently "
+        "stops the office until a human notices. Decide which of these your last turn was and "
+        "do it now: a question or an answer goes with `say(to='<name>')`, and a report is "
+        "`assign` or `work(op=finish)`, whichever side of a work you are on. A message reaches somebody "
         "only when it goes through the office — text you merely printed reached nobody. If you "
         "genuinely were not finished, that is a question or a report of where you have got "
         "to — not a reason to say nothing."
@@ -1673,7 +1716,8 @@ def _wordless_turn_notice(agent_name: str) -> str:
     """
     return (
         f"[office] {agent_name} has ended two turns in a row without sending anything to "
-        f"anybody — no question, no answer, no report. {agent_name} was told after the first "
+        "anybody — no question, no answer, no report — and without setting a `remind` or an "
+        f"`expect`. {agent_name} was told after the first "
         "one and it happened again, so nothing further will be said to it. Nobody else has "
         f"been told anything either: this is all there is. Ask {agent_name} what it is doing, "
         "look at what is on its branch, or take the job elsewhere."
@@ -1763,7 +1807,8 @@ def _wordless_turn_journal(agent_name: str) -> str:
     """
     return (
         f"{agent_name} has ended two turns in a row without sending anything to anybody — no "
-        "question, no answer, no report. It was told after the first one and it happened "
+        "question, no answer, no report — and without setting a `remind` or an `expect`. It "
+        "was told after the first one and it happened "
         "again. Nothing is running and nothing will start by itself: write to it."
     )
 
@@ -1787,6 +1832,20 @@ def _undelivered_notice(recipient: str, reason: str, resume_after, bodies: list[
     ]
     lines.extend(f"  - {_excerpt(body)}" for body in bodies)
     return "\n".join(lines)
+
+
+def _lost_hook_notice(sender: str, body: str) -> str:
+    """A service's message that died with a turn, as the quiet line that gives it
+    back to the agent it was for."""
+    return f"[office] A turn of yours ended before it processed this message from {sender}:\n{body}"
+
+
+def _expired_expectation_notice(about: str) -> str:
+    """The office's message to an agent whose expectation came due unanswered."""
+    return (
+        f"[office] Nothing came about '{about}' within the time you gave, and the address you "
+        "handed out for it is closed. Look at the job through the service's own API."
+    )
 
 
 def _lost_wake_notice(wake: dict) -> str:

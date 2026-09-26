@@ -658,10 +658,18 @@ tr:last-child td { border-bottom: none; }
 
 .stage-prepare { overflow-wrap: anywhere; }
 
-/* No border between a broken stage's row and the row under it holding its reason. */
-.stage-with-reason td { border-bottom: none; }
-.stage-reason-row td { padding-top: 0; }
-.stage-reason-row .work-brief { margin-bottom: 0; }
+/* No border between a table row and the row under it that continues it. */
+.has-sub-row td { border-bottom: none; }
+.sub-row td { padding-top: 0; }
+.sub-row .work-brief { margin-bottom: 0; }
+
+/* ---------- expectations ---------- */
+
+.expectation {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
 
 .stage-reason {
   margin: 8px 0 0;
@@ -988,6 +996,10 @@ select, textarea, input[type="text"] {
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   padding: 7px 9px;
+}
+
+input[pattern]:invalid {
+  border-color: var(--danger);
 }
 
 select:disabled, textarea:disabled, input:disabled {

@@ -85,8 +85,8 @@
       data-office-required="owner_name name runtime model">
   <div class="form-row">
     <label for="hd-owner">Your name</label>
-    <input id="hd-owner" name="owner_name" type="text" value="{{ form.owner_name or owner_name }}" required>
-    <span class="hint">How you appear to the team. Get it right now — renaming later hides your own history.</span>
+    <input id="hd-owner" name="owner_name" type="text" value="{{ form.owner_name or owner_name }}" required pattern="[^:]*">
+    <span class="hint">How you appear to the team. Get it right now — renaming later hides your own history. A name may not contain a colon.</span>
   </div>
   <div class="form-row">
     <label for="hd-name">Name</label>

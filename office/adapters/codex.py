@@ -290,7 +290,7 @@ class CodexAdapter:
         ws: str,
         model: str,
         effort: str | None,
-        office_url: str | None,
+        office_url: str,
         session_id: str | None,
         resume: bool = False,
     ) -> list[str]:
@@ -319,12 +319,11 @@ class CodexAdapter:
         cmd += ["-c", f"model_context_window={REMOTE_CONTEXT_CAP}"]
         # One server, written out directly. There is no loop and no
         # url-versus-command branching.
-        if office_url:
-            cmd += [
-                "-c", f'mcp_servers.office.url="{office_url}"',
-                "-c", f"mcp_servers.office.tool_timeout_sec={MCP_TOOL_TIMEOUT_SEC}",
-                "-c", f"mcp_servers.office.startup_timeout_sec={MCP_STARTUP_TIMEOUT_SEC}",
-            ]
+        cmd += [
+            "-c", f'mcp_servers.office.url="{office_url}"',
+            "-c", f"mcp_servers.office.tool_timeout_sec={MCP_TOOL_TIMEOUT_SEC}",
+            "-c", f"mcp_servers.office.startup_timeout_sec={MCP_STARTUP_TIMEOUT_SEC}",
+        ]
         cmd.append("-")  # read the prompt from stdin
         return cmd
 

@@ -109,7 +109,7 @@ class AgyAdapter:
         ws: str,
         model: str,
         effort: str | None,
-        office_url: str | None,
+        office_url: str,
         session_id: str | None,
         resume: bool = False,
     ) -> list[str]:

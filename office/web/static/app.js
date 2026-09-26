@@ -281,13 +281,14 @@
     if (notice) notice.remove();
   });
 
-  // data-office-required names the fields that must have something in them before the form can be sent.
+  // data-office-required names the fields that must have something in them, and pass their own
+  // constraints, before the form can be sent.
   function syncRequired(form) {
     if (!form || !form.dataset || !form.dataset.officeRequired) return;
     const names = form.dataset.officeRequired.split(/\s+/).filter(Boolean);
     const ready = names.every((name) => {
       const field = form.elements[name];
-      return field && typeof field.value === "string" && field.value.trim() !== "";
+      return field && typeof field.value === "string" && field.value.trim() !== "" && field.checkValidity();
     });
     for (const button of form.querySelectorAll("button[type=submit]")) {
       button.disabled = !ready;

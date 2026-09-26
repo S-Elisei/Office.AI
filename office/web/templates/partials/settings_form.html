@@ -1,14 +1,15 @@
 {% include "partials/notice.html" %}
 
-<form method="post" action="/settings" hx-post="/settings" hx-target="#settings-form" hx-swap="innerHTML">
+<form method="post" action="/settings" hx-post="/settings" hx-target="#settings-form" hx-swap="innerHTML"
+      data-office-required="owner_name">
   <div class="form-row mb-0">
     <label for="s-owner-name">Owner name</label>
-    <input id="s-owner-name" name="owner_name" type="text" value="{{ owner_name }}" required>
-    <span class="hint">How you appear to agents in chat.</span>
+    <input id="s-owner-name" name="owner_name" type="text" value="{{ owner_name }}" required pattern="[^:]*">
+    <span class="hint">How you appear to agents in chat. A name may not contain a colon.</span>
   </div>
   <div class="form-row mb-0" style="margin-top: 16px;">
     <label for="s-silence-minutes">Silence notice, minutes</label>
-    <input id="s-silence-minutes" name="silence_minutes" type="number" min="0" step="1"
+    <input id="s-silence-minutes" name="silence_minutes" type="number" step="any"
            value="{{ silence_minutes }}">
     <span class="hint">
       How long an agent may print nothing before the office mentions it to the director.
@@ -22,7 +23,7 @@
     <span class="hint">Project rules and wiki are injected separately — this is the standing brief.</span>
   </div>
   <div class="form-actions">
-    <button type="submit" class="primary">Save</button>
+    <button type="submit" class="primary" disabled>Save</button>
   </div>
 </form>
 

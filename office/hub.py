@@ -10,9 +10,10 @@ import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from office import core, db, git, marks, mcp, stages
@@ -122,8 +123,44 @@ async def lifespan(app: FastAPI):
     conn.close()
 
 
+#: The names the office answers to. It listens on 127.0.0.1 only.
+_LOOPBACK = frozenset({"127.0.0.1", "localhost"})
+
+#: Methods that change nothing.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _refusal(scope) -> str | None:
+    """Why a request is refused, or None: it is addressed to another name, or it
+    changes something and a page of another origin sent it."""
+    headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+    host = headers.get("host", "")
+    if urlsplit(f"//{host}").hostname not in _LOOPBACK:
+        return "The office answers only at 127.0.0.1 or localhost. Open it at one of those."
+    origin = headers.get("origin")
+    if scope["method"] not in _SAFE_METHODS and origin is not None and origin != f"http://{host}":
+        return "Refused: a page of another site sent this request."
+    return None
+
+
+class _OnlyThisMachine:
+    """Refuses what _refusal refuses, before any route, mount or stream sees it."""
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            refusal = _refusal(scope)
+            if refusal is not None:
+                await PlainTextResponse(refusal, status_code=403)(scope, receive, send)
+                return
+        await self.inner(scope, receive, send)
+
+
 app = FastAPI(title="Office.AI", lifespan=lifespan)
 
+app.add_middleware(_OnlyThisMachine)
 app.include_router(web_router)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "web" / "static")), name="static")
 
@@ -182,5 +219,5 @@ if __name__ == "__main__":
 
     _config = load_config()
     uvicorn.run(
-        "office.hub:app", host="0.0.0.0", port=_config.port, timeout_graceful_shutdown=5
+        "office.hub:app", host="127.0.0.1", port=_config.port, timeout_graceful_shutdown=5
     )

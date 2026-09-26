@@ -106,7 +106,7 @@ class ClaudeAdapter:
         ws: str,
         model: str,
         effort: str | None,
-        office_url: str | None,
+        office_url: str,
         session_id: str | None,
         resume: bool = False,
     ) -> list[str]:
@@ -140,14 +140,13 @@ class ClaudeAdapter:
             "RemoteTrigger", "PushNotification", "ScheduleWakeup", "DesignSync",
             "EnterWorktree", "ExitWorktree",
         ]
-        if office_url:
-            # Exactly one server, "office". --strict-mcp-config keeps any other
-            # server out of the context.
-            cmd += [
-                "--mcp-config",
-                json.dumps({"mcpServers": {"office": {"type": "http", "url": office_url}}}),
-                "--strict-mcp-config",
-            ]
+        # Exactly one server, "office". --strict-mcp-config keeps any other
+        # server out of the context.
+        cmd += [
+            "--mcp-config",
+            json.dumps({"mcpServers": {"office": {"type": "http", "url": office_url}}}),
+            "--strict-mcp-config",
+        ]
         settings = shared.office_dir(ws) / "claude-settings.json"
         if Path(settings).exists():
             cmd += ["--settings", str(settings)]

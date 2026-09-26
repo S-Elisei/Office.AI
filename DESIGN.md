@@ -39,12 +39,16 @@ past the tools lives as a line in the executor's system prompt.
 
 Every participant's name lives in one namespace; there are no role constants. The
 owner is a named participant like any other — the setting `owner_name`, default
-`human`. `say(to=…)` takes a participant's name or `all`. The name `office`
+`Owner`. `say(to=…)` takes a participant's name or `all`. The name `office`
 belongs to the office itself.
 
 Two names are refused when hiring: the owner's and `office`. A name is an
 identity, and taking either would hand an agent the other's authority. A name may
 not contain a colon.
+
+A local service is not a participant. It answers an agent's expectation (section
+4), and its message arrives from `hook:<service>`, a sender no participant can be.
+`say` and `remind` refuse a `hook:` recipient.
 
 **The owner hires the director**, on the main page, once — it is the only hire
 control in the interface. Afterwards the owner changes the director's runtime,
@@ -356,7 +360,7 @@ the process in the machine's code page, and everything crossing them is prose.
   arrives inside it; if not, it rides the prompt of whatever turn happens next.
 
 There is no third kind of delivery. Everything an agent receives is a message from
-a participant, `office` included.
+a participant, `office` included, or from a local service answering an expectation.
 
 A third shape rides the common channel: **a quiet line**, a common-channel row that
 names one recipient. It buys no turn, rides the next one, and is shown to nobody
@@ -373,6 +377,28 @@ A single delivery always carries everything accumulated. Wakes coalesce over a
 3-second window; the bus ticks once a second; the fuse allows at most 6 wakes per
 agent in 300 seconds, with extras collapsing while the queue keeps growing. The
 environment never interrupts a turn that has started.
+
+### Expectations
+
+`expect(about, within_seconds)` records an open expectation — a random token, the
+agent, `about` and the due time — and returns `http://127.0.0.1:<port>/hooks/<token>`,
+which the agent hands to a local service as the address to notify when its job
+ends. The ceiling on `within_seconds` is `remind`'s.
+
+`POST /hooks/<token>` with the JSON `{"from": "<service>", "text": "<message>"}`
+closes the expectation and puts `[about: <about>]` and the text
+into the agent's queue as a direct message from `hook:<from>`, in one transaction:
+stored, delivered and buying a turn like any other. `from` matches
+`[a-z0-9][a-z0-9-]{0,39}`. The answer is `202`; `404` for any token with no open
+expectation — unknown, answered, past its due time, or its agent fired; `400` for a
+body that is not a JSON object, a `from` that is not a service name, or a missing or
+blank `text`. Each answer carries one sentence.
+There is no authentication.
+
+The bus tick closes an expectation whose due time has passed and tells its agent;
+one that came due while the hub was down closes on the first tick after startup.
+Firing an agent deletes its expectations. A closed expectation is deleted when its
+agent's turn ends. Nothing goes from the office to a service.
 
 ### What is guaranteed
 
@@ -411,7 +437,7 @@ and merging PRs, moving tasks, hiring and firing send nothing: they come in
 batches, the decision of when to wake somebody belongs to their author, and the
 state is readable through the tools in section 14.
 
-**In its own name the office says seven things**, all of them messages from the
+**In its own name the office says eight things**, all of them messages from the
 participant `office`:
 
 | Occasion | Told to | Buys a turn |
@@ -421,13 +447,15 @@ participant `office`:
 | Your message was not processed | the sender | yes |
 | A deferred message has nowhere to go (the recipient was fired) | the sender | yes |
 | Your turn ended without a word to anybody | that agent | yes |
+| Your expectation ran out of time: nothing came, and its address is closed | that agent | yes |
 | The same agent did it a second time in a row | the director (for an executor); the owner's plate and journal (for the director) | yes |
 | A running agent has said nothing for the owner's silence threshold | the director | yes |
 
 **Every turn ends with one of three things: a question to whoever can answer it,
 an answer to whoever asked, or a report handing the work on.** Nothing in this
 office wakes by itself, so a turn that ends having said nothing ends the day. The
-check is on speech, not on work: speech means a direct message. A common-chat
+check is on speech, not on work: speech means a direct message sent, a `remind`
+set, or an expectation opened, in that turn. A common-chat
 post, a ticket, a PR, a comment, a wiki page and a moved task all count for
 nothing here, because each of them announces itself to nobody.
 
@@ -443,11 +471,13 @@ means twenty minutes; zero or less means never. The director's own silence is no
 reported — the only recipient would be the director itself, and the owner already
 has `quiet_for` live on the main page.
 
-A message from `office` that dies with a turn is lost silently. The compensation
+A message from a service that dies with a turn is given back, whole, to the agent
+whose turn it was, as a quiet line. A message from `office` that dies with a turn
+is lost silently. The compensation
 is observability, which is the rule the whole tool surface obeys: **no state may
 be knowable only from a message that was received.**
 
-Four more things the office says buy nobody a turn:
+Five more things the office says buy nobody a turn:
 
 | Occasion | Told to | Shape |
 |---|---|---|
@@ -455,6 +485,7 @@ Four more things the office says buy nobody a turn:
 | The project's rules have changed | every agent but the one who changed them | quiet line |
 | The owner has rewritten the director's standing instructions | the director | quiet line |
 | The work you did has been closed | the executor who did it | quiet line |
+| A service's message died with your turn | the agent whose turn it was | quiet line |
 
 The first three exist because a system prompt is fixed when a session is created, on
 every runtime: a rule or an instruction written today is invisible to every session
@@ -1209,6 +1240,11 @@ This is deliberately not a general shell. It is for tests and trial runs — thi
 that can hang. Reading and editing files and ordinary quick commands stay on the
 agent's own tools.
 
+A command runs with the environment section 3 gives an agent's processes, without
+the turn's identity: it carries the agent's mark, the push-closing variables and
+`GIT_CEILING_DIRECTORIES`, and no `OFFICE_AGENT`, `OFFICE_SESSION` or
+`OFFICE_MCP_URL`.
+
 `run(op=start, stage=<name>)` runs the command on a stage instead of in the
 workspace (section 12).
 
@@ -1338,8 +1374,8 @@ the stage.
    fails fails the run; the stage stays `ready`.
 5. **Artifacts.** `<root>/scratch/<workspace-id>/stage/<stage>/` is emptied and
    passed to the command as `OFFICE_ARTIFACTS`.
-6. **Command.** It runs in the stage's tree, through the shell `run` uses, with the
-   agent's environment (section 3), the run's mark and `OFFICE_ARTIFACTS`.
+6. **Command.** It runs in the stage's tree, through the shell `run` uses, with a
+   `run` command's environment (section 11), the run's mark and `OFFICE_ARTIFACTS`.
 7. **Clearing.** However the run ended — the command exited, it was stopped, the
    turn ended — the office sweeps by the run's mark and waits until those processes
    are dead, then removes every lock file git left in the superproject and in its
@@ -1405,6 +1441,7 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | How far the owner has read each conversation | Not recoverable from anywhere else |
 | Settings | |
 | Stages: name, preparation command, state, reason | Not recoverable |
+| Open expectations: token, agent, what is awaited, when opened, due time | A service answers across a hub restart |
 
 | Not stored | What replaces it |
 |---|---|
@@ -1415,6 +1452,7 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | Full stdout logs | A ring buffer in memory; only the tail on disk |
 | Wiki edit history beyond one step | The version and the version check on write |
 | A stage's queue, a pending reset or delete, the history of stage runs | Nothing; runs die with the hub |
+| A closed expectation, once its agent's turn has ended | The message it produced |
 
 The `events` table is a record of a mutation and the trigger to redraw a page
 region. Nothing reads it back and no participant has a reading position in it. The
@@ -1466,6 +1504,7 @@ Shared by everyone:
 say(to, text)                    # to = "all" | a participant's name
 chat(before_id?)                 # the common chat, newest page first, cursor backwards
 remind(to, text, in_seconds)     # the same message, sent later; wakes the addressee
+expect(about, within_seconds)    # an address a service notifies; its answer or the due time wakes you
 task(op, ...)                    # create | update | move | link (link with remove=true drops it)
 work(op, ...)                    # show — your brief and branch
                                  # finish — your report to the director, with a PR if you like
@@ -1501,7 +1540,8 @@ work that is not finished (running, paused, reported or failed, with the reason 
 stopped and, for a pause, the earliest it could resume), remaining quota per
 runtime with its reset time, tasks that look ready but whose dependency is not
 done, the model catalogue, directories under `ws/` the office did not create, and
-workspaces that belong to nobody. Both get the stages, as section 12 lists. None of that is in any system prompt: a prompt is
+workspaces that belong to nobody. Both get the stages, as section 12 lists. Each
+agent gets its own open expectations, and the director everybody's. None of that is in any system prompt: a prompt is
 fixed when the session is created.
 
 `remind` is the only alarm in the system. A turn is bought by a message and by
@@ -1604,7 +1644,8 @@ All times are shown local and stored UTC.
    works are the deferred messages the office is holding, and cancelling one is the
    owner's alone.
 5. **Common chat** — paginated.
-6. **Team** — who exists, on what, how much context; under them the stages: each
+6. **Team** — who exists, on what, how much context, and under each agent what it
+   awaits from a service, since when and until when; under them the stages: each
    one's state with its timers while preparing, the run in progress with its timers,
    who is waiting, a pending reset or delete, the preparation command, and the reason
    for a broken one. No hiring or firing here, and no control over stages.
@@ -1658,7 +1699,8 @@ the sentence goes to an alert, so the owner's text stays in the box.
 
 Upstream of that, a form names its required fields with `data-office-required`: the
 submit button renders disabled and JavaScript enables it only once every named field
-is non-empty after trimming. `required` alone admits a single space, and htmx runs
+is non-empty after trimming and passes its own constraints — the owner's name,
+for one, may not contain a colon. `required` alone admits a single space, and htmx runs
 `checkValidity` and stops before opening the request, which is a click that does
 nothing and says nothing.
 
@@ -1689,7 +1731,7 @@ stays where the reader left it.
 ### settings keys
 
 ```
-owner_name              the owner's name (default "human")
+owner_name              the owner's name (default "Owner")
 director_instructions   the standing brief for the director
 silence_notice_minutes  the silence threshold; 0 or less means never report
 delivery_last           the outcome of the last delivery (JSON), for the settings page
@@ -1725,7 +1767,13 @@ whoever is looking from outside.
 Python 3.12 · FastAPI · SQLite (WAL) · Jinja2 + HTMX + SSE · python-markdown. No npm
 and no build step.
 
-One process: the web UI, MCP over HTTP at `/mcp/<agent>`, and the process supervisor.
+One process: the web UI, MCP over HTTP at `/mcp/<agent>`, the hook at
+`/hooks/<token>`, and the process supervisor.
+It listens on `127.0.0.1` only, and before any route sees a request it refuses
+one addressed to any name but `127.0.0.1` or `localhost`, and one that changes
+something — any method but `GET`, `HEAD` and `OPTIONS` — and carries an `Origin`
+other than the address it was sent to. A request with no `Origin`, as a service
+sends it, passes. Nothing authenticates a request.
 All state in one SQLite file.
 
 Hard rules of the single process:
