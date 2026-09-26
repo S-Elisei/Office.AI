@@ -21,10 +21,7 @@
       <div class="work-live">
         {% if turn %}
           <span class="badge ok">turn in flight</span>
-          <span class="text-faint">running {{ turn.running_for | fmt_duration }}</span>
-          <span class="{{ 'badge warn' if turn.quiet_for >= 300 else 'text-faint' }}">
-            silent {{ turn.quiet_for | fmt_duration }}
-          </span>
+          {{ m.timers(turn.running_for, turn.quiet_for) }}
           <form method="post" action="/monitor/stop/{{ w.agent_name }}"
                 hx-post="/monitor/stop/{{ w.agent_name }}" hx-target="#monitor-list" hx-swap="innerHTML"
                 style="margin: 0 0 0 auto;">

@@ -1,8 +1,13 @@
 """Where the two repositories stand after a merge the owner's repository refuses,
-and after one it takes."""
+and after one it takes.
+
+The repositories are invented: a README, a text file, and two files under an LFS
+pattern whose bytes are made up.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import stat
 import subprocess
 from pathlib import Path
@@ -12,6 +17,9 @@ from office import git
 MAIN = "main"
 BRANCH = "feature-x"
 ADDED = "added.txt"
+#: A large file already in the owner's history, and one the branch adds.
+OLD_LARGE, OLD_BYTES = "old.bin", bytes(range(256)) * 50
+NEW_LARGE, NEW_BYTES = "new.bin", bytes(reversed(range(256))) * 50
 
 
 def _git(args, cwd):
@@ -31,8 +39,9 @@ def _write(path, text):
 
 
 def _owner_with_history(path, outside, monkeypatch):
-    """The owner's repository, with one commit on `MAIN`, in the shape a plain
-    clone leaves it in: a CRLF working tree against an LF index.
+    """The owner's repository, with one commit on `MAIN` holding OLD_LARGE under
+    LFS, in the shape a plain clone leaves it in: a CRLF working tree against an
+    LF index.
 
     `core.autocrlf` sits above the repository, where an owner-path call cannot
     read it, and the machine's own configuration is out of reach of every git
@@ -48,6 +57,10 @@ def _owner_with_history(path, outside, monkeypatch):
     _git(["config", "user.email", "owner@example.com"], path)
     _write(path / "README.md", "start\n")
     _git(["-c", "core.autocrlf=false", "add", "README.md"], path)
+    _write(path / ".gitattributes", "*.bin filter=lfs diff=lfs merge=lfs -text\n")
+    (path / OLD_LARGE).write_bytes(OLD_BYTES)
+    _git(["-c", "filter.lfs.process=git-lfs filter-process", "-c", "filter.lfs.required=true",
+          "add", ".gitattributes", OLD_LARGE], path)
     _git(["commit", "-m", "start"], path)
 
     (path / "README.md").unlink()
@@ -56,11 +69,13 @@ def _owner_with_history(path, outside, monkeypatch):
 
 
 def _publish_a_branch(config):
-    """A branch in the office repository that adds one file to `MAIN`."""
+    """A branch in the office repository that adds a text file and a large file to
+    `MAIN`, published from a workspace that never pulled OLD_LARGE's content."""
     tree = Path(git.create_workspace(config, "exec1").path)
     _git(["switch", "-c", BRANCH], tree)
     _write(tree / ADDED, "payload\n")
-    _git(["add", ADDED], tree)
+    (tree / NEW_LARGE).write_bytes(NEW_BYTES)
+    _git(["add", ADDED, NEW_LARGE], tree)
     _git(["commit", "-m", "add a file"], tree)
     git.publish(config, tree)
 
@@ -94,6 +109,7 @@ def test_a_merge_the_owners_repository_refuses_moves_neither_repository(
     assert _head_of(project, MAIN) == office_before
     assert _head_of(owner, MAIN) == owner_before
     assert not (owner / ADDED).exists()
+    assert not (owner / NEW_LARGE).exists()
 
     hook.unlink()
     git.merge(config, BRANCH, MAIN)
@@ -102,3 +118,29 @@ def test_a_merge_the_owners_repository_refuses_moves_neither_repository(
     assert delivered != owner_before
     assert _head_of(project, MAIN) == delivered
     assert "payload" in (owner / ADDED).read_text(encoding="utf-8")
+    assert (owner / NEW_LARGE).read_bytes() == NEW_BYTES
+
+
+def test_a_merge_is_delivered_after_the_owner_committed_two_versions_between_intakes(
+    config, tmp_path_factory, monkeypatch
+):
+    owner = git.owner_repo(config)
+    _owner_with_history(owner, tmp_path_factory.mktemp("outside"), monkeypatch)
+    git.init_project(config, branch=MAIN)
+    between, last = bytes([1]) * 12_800, bytes([2]) * 12_800
+    for version in (between, last):
+        (owner / OLD_LARGE).write_bytes(version)
+        _git(["add", OLD_LARGE], owner)
+        _git(["commit", "-m", "a new version"], owner)
+    _publish_a_branch(config)
+
+    # The version between the two intakes is in the owner's store and not the office's.
+    stored = hashlib.sha256(between).hexdigest()
+    assert not (git.project_git(config) / "lfs" / "objects" / stored[:2] / stored[2:4]
+                / stored).exists()
+
+    git.merge(config, BRANCH, MAIN)
+
+    assert _head_of(owner, MAIN) == _head_of(git.project_git(config), MAIN)
+    assert (owner / NEW_LARGE).read_bytes() == NEW_BYTES
+    assert (owner / OLD_LARGE).read_bytes() == last

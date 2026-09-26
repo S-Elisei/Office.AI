@@ -20,9 +20,16 @@
     'open': 'ok',
     'in_progress': 'ok', 'needs_clarification': 'warn',
     'resolved': 'ok',
+    'preparing': 'warn', 'broken': 'danger',
   } %}
   <span class="badge {{ cls.get(status, '') }}">{{ status | replace('_', ' ') }}</span>
 {% endmacro %}
+
+{# The running and silent counters, side by side. #}
+{% macro timers(running_for, quiet_for) %}
+  <span class="text-faint">running {{ running_for | fmt_duration }}</span>
+  <span class="{{ 'badge warn' if quiet_for >= 300 else 'text-faint' }}">silent {{ quiet_for | fmt_duration }}</span>
+{%- endmacro %}
 
 {% macro kind_badge(kind) %}
   <span class="badge {{ 'danger' if kind == 'bug' else '' }}">{{ kind }}</span>

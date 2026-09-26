@@ -52,6 +52,11 @@ class Config:
         """Output lines per agent."""
         return self.root / "tails"
 
+    @property
+    def stages_dir(self) -> Path:
+        """One working tree per stage, its preparation log beside it, and `.trash/`."""
+        return self.root / "stages"
+
     def ensure_layout(self) -> None:
         for path in (
             self.root,
@@ -61,6 +66,7 @@ class Config:
             self.lfs_dir,
             self.scratch_dir,
             self.tails_dir,
+            self.stages_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -77,8 +83,13 @@ def _detect_cli(env_var: str, which_name: str, fallback: Path | None) -> str | N
     return None
 
 
+def data_root() -> Path:
+    """The office's data directory, <root>. Its parent is the owner's repository."""
+    return Path(os.environ.get("OFFICE_ROOT", str(PROJECT_ROOT / ".office-data"))).resolve()
+
+
 def load_config() -> Config:
-    root = Path(os.environ.get("OFFICE_ROOT", str(PROJECT_ROOT / ".office-data"))).resolve()
+    root = data_root()
     port = int(os.environ.get("OFFICE_PORT", "7777"))
 
     local_app_data = os.environ.get("LOCALAPPDATA")

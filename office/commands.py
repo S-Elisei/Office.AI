@@ -114,6 +114,38 @@ def _shell_argv(command: str) -> list[str]:
     return [exe, "-c", command]
 
 
+def popen_shell(command: str, cwd: Path, env: dict[str, str]) -> subprocess.Popen:
+    """`command` through the shell, in `cwd`, with stdout and stderr on one text pipe."""
+    # start_new_session puts the shell in a process group of its own.
+    #
+    # On Windows the flags buy the same isolation from a console Ctrl-C
+    # aimed at the hub, and no console window of the command's own.
+    if _IS_WINDOWS:
+        kwargs = {
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        }
+    else:
+        kwargs = {"start_new_session": True}
+    return subprocess.Popen(
+        _shell_argv(command),
+        cwd=str(cwd),
+        env=env,
+        # DEVNULL, not a pipe: a command that asks a question gets EOF
+        # and fails now. Nothing here is interactive.
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        # One pipe for both streams: the reader gets the output in the
+        # order the command actually produced it.
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        shell=False,  # the shell is argv[0]
+        **kwargs,
+    )
+
+
 # ---------------------------------------------------------------- one command
 
 
@@ -125,8 +157,8 @@ class Command:
     reader, collects the exit code and wakes whoever is waiting). Both daemon.
     The reaper ends when the process does — it waits on that one thing without a
     bound. A command whose tree survived its kill is reported as running and
-    stays that way. The READER may not end at all; see _reap, whose wait on the
-    reader is bounded.
+    stays that way. The READER may not end at all; see _wait_process, whose wait
+    on the reader is bounded.
     """
 
     def __init__(
@@ -169,69 +201,37 @@ class Command:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        argv = _shell_argv(self.command)
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._log = open(self.log_path, "w", encoding="utf-8", errors="replace", newline="")
-        header = f"$ {self.command}\n"
-        self._log.write(header)
-        self._log.flush()
-        self._file_chars = len(header)
-
-        # start_new_session puts the shell in a process group of its own.
-        #
-        # On Windows the flags buy the same isolation from a console Ctrl-C
-        # aimed at the hub, and no console window of the command's own.
-        if _IS_WINDOWS:
-            kwargs = {
-                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-            }
-        else:
-            kwargs = {"start_new_session": True}
-
+        self._open_log(f"$ {self.command}\n")
         try:
-            self._proc = subprocess.Popen(
-                argv,
-                cwd=str(self.workspace),
-                env=_child_env(None, self.agent),
-                # DEVNULL, not a pipe: a command that asks a question gets EOF
-                # and fails now. Nothing here is interactive.
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                # One pipe for both streams: the agent reads the output in the
-                # order the command actually produced it.
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                shell=False,  # the shell is argv[0] above
-                **kwargs,
-            )
-        except OSError:
+            self._spawn(self.workspace, _child_env(None, self.agent))
+        except (OSError, ValueError):
             self._close_log()
             raise
 
         with _registry_lock:
             _live.add(self)
 
+        threading.Thread(target=self._reap, daemon=True, name=f"office-reap-{self.handle}").start()
+
+    def _open_log(self, header: str) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log = open(self.log_path, "w", encoding="utf-8", errors="replace", newline="")
+        self._log.write(header)
+        self._log.flush()
+        self._file_chars = len(header)
+
+    def _spawn(self, cwd: Path, env: dict[str, str]) -> None:
+        """Start the shell running self.command in `cwd`, and the reader on its output."""
+        self._proc = popen_shell(self.command, cwd, env)
         self._reader = threading.Thread(
             target=self._read, daemon=True, name=f"office-run-{self.handle}")
         self._reader.start()
-        threading.Thread(target=self._reap, daemon=True, name=f"office-reap-{self.handle}").start()
 
     def _read(self) -> None:
         stream = self._proc.stdout
         try:
             for line in iter(stream.readline, ""):
-                with self._lock:
-                    self.last_output_at = time.monotonic()
-                    self._tail.append(line)
-                    self._tail_chars += len(line)
-                    while self._tail_chars > RESULT_TAIL_CHARS and len(self._tail) > 1:
-                        gone = self._tail.popleft()
-                        self._tail_chars -= len(gone)
-                        self._dropped_chars += len(gone)
-                    self._write_log(line)
+                self._append(line)
         except (OSError, ValueError):
             # The pipe was torn out from under the read. The reaper is already
             # on its way to the exit code.
@@ -242,19 +242,41 @@ class Command:
             except OSError:
                 pass
 
+    def _append(self, line: str) -> None:
+        """One line of output: into the tail ring and the log file."""
+        with self._lock:
+            self.last_output_at = time.monotonic()
+            self._tail.append(line)
+            self._tail_chars += len(line)
+            while self._tail_chars > RESULT_TAIL_CHARS and len(self._tail) > 1:
+                gone = self._tail.popleft()
+                self._tail_chars -= len(gone)
+                self._dropped_chars += len(gone)
+            self._write_log(line)
+
     def _reap(self) -> None:
-        # The process, then the reader, and the reader wait is BOUNDED.
+        self._finish(self._wait_process())
+
+    def _wait_process(self) -> int:
+        """The process's exit code, once it and then the reader are done.
+
+        The wait on the reader is BOUNDED.
+        """
         code = self._proc.wait()
         self._reader.join(_READER_JOIN_SECONDS)
-        stuck = self._reader.is_alive()
-        if stuck:
+        if self._reader.is_alive():
             _log.error(
                 "%s: %s exited but something it started still holds its output pipe; "
                 "the end of its output may be missing", self.agent, self.handle,
             )
+            with self._lock:
+                self._reader_stuck = True
+        return code
+
+    def _finish(self, code: int | None) -> None:
+        """Record the exit code, close the log and wake whoever waits on this command."""
         with self._lock:
             self.exit_code = code
-            self._reader_stuck = stuck
             self._close_log()
         self._finished.set()
         with self._lock:
@@ -423,6 +445,18 @@ def _new_handle() -> str:
         return f"run-{_next_handle}"
 
 
+def _admit(agent: str) -> None:
+    """Refuse a new command for an agent at MAX_RUNNING_PER_AGENT. Call with the lock held."""
+    running = [c for c in _commands.values() if c.agent == agent and c.running]
+    if len(running) >= MAX_RUNNING_PER_AGENT:
+        names = ", ".join(c.handle for c in running)
+        raise ValueError(
+            f"you already have {len(running)} commands running ({names}) and the limit is "
+            f"{MAX_RUNNING_PER_AGENT}. Stop one you no longer need — run(op=stop, "
+            f"handle='{running[0].handle}') — before starting another."
+        )
+
+
 def start(agent: str, workspace: Path | str, command: str) -> Command:
     """Spawn `command` in `workspace` on `agent`'s behalf. Never waits."""
     # Counting, spawning and registering under ONE hold of the lock. The lock is
@@ -432,14 +466,7 @@ def start(agent: str, workspace: Path | str, command: str) -> Command:
     # turn ending now either sees this command fully registered and kills it, or
     # runs entirely before it exists.
     with _registry_lock:
-        running = [c for c in _commands.values() if c.agent == agent and c.running]
-        if len(running) >= MAX_RUNNING_PER_AGENT:
-            names = ", ".join(c.handle for c in running)
-            raise ValueError(
-                f"you already have {len(running)} commands running ({names}) and the limit is "
-                f"{MAX_RUNNING_PER_AGENT}. Stop one you no longer need — run(op=stop, "
-                f"handle='{running[0].handle}') — before starting another."
-            )
+        _admit(agent)
         # Inside the hold: a refused start does not consume a handle number
         # (_new_handle takes the same reentrant lock).
         cmd = Command(_new_handle(), agent, command, Path(workspace))
@@ -447,6 +474,29 @@ def start(agent: str, workspace: Path | str, command: str) -> Command:
         _commands[cmd.handle] = cmd
     _log.info("%s started %s: %s", agent, cmd.handle, command)
     return cmd
+
+
+def enroll(agent: str, make) -> Command:
+    """Register the command `make(handle)` builds, under the same count as start().
+
+    `make` runs with the registry lock held and must not block. The command is
+    registered and live from here on: kill_agent and shutdown_all reach it, and
+    it counts towards MAX_RUNNING_PER_AGENT until it finishes.
+    """
+    with _registry_lock:
+        _admit(agent)
+        cmd = make(_new_handle())
+        _commands[cmd.handle] = cmd
+        _live.add(cmd)
+    _log.info("%s enrolled %s: %s", agent, cmd.handle, cmd.command)
+    return cmd
+
+
+def discard(cmd: Command) -> None:
+    """Forget a finished command whose start was refused after it was enrolled."""
+    with _registry_lock:
+        _commands.pop(cmd.handle, None)
+        _live.discard(cmd)
 
 
 def get(agent: str, handle: str) -> Command:

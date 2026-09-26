@@ -10,8 +10,8 @@ This document states how the system is built.
 
 ## 1. Scope
 
-The office provides workspaces, git, communication, a board, knowledge, visible
-quota and context figures, and the mechanics that wake an agent.
+The office provides workspaces, git, stages, communication, a board, knowledge,
+visible quota and context figures, and the mechanics that wake an agent.
 
 The office does not impose a method. It does not require review, does not block a
 merge and does not decide for the director. Behaviour is set by text — the
@@ -56,7 +56,7 @@ resolving tickets addressed to him), conversation (common chat, direct messages,
 comments) and observation. Of planning he has only filing a task into the "idea"
 column and editing titles and bodies: the board is the director's instrument.
 Merging, assigning work, hiring executors and moving cards do not exist in the
-interface. The exceptions are in section 15.
+interface. The exceptions are in section 16.
 
 The message bus restricts nobody: any participant may write to any other.
 
@@ -165,10 +165,18 @@ Vendor session variables are stripped (`CLAUDE_CODE_*`, `CLAUDE_SESSION*`,
 `OFFICE_AGENT`, `OFFICE_SESSION`, `OFFICE_MCP_URL`, `OFFICE_MARK`, and the
 variables that close outbound push (section 8).
 
+**Every git the office starts — an agent's process at any depth and the hub's own
+calls — runs with `GIT_CEILING_DIRECTORIES` naming the owner's repository**, written
+last. From a directory under `<root>` that is not inside a clone, git finds no
+repository; in a clone it finds the clone, and in the owner's repository itself it
+finds his.
+
 `OFFICE_MARK` is an origin stamp of the form `<office id>:<agent>:<turn>`. An
 environment is copied into every child at creation at any depth and survives the
 death of every intermediary, so any process this turn started can be recognised
-by the mark, orphans included. The office id is a short hash of the data
+by the mark, orphans included. A run on a stage extends its agent's mark with
+`:<handle>:`; a stage's preparation is marked `<office id>:office:<stage>:`
+(section 12). The office id is a short hash of the data
 directory: two offices on one machine do not touch each other's processes.
 
 Processes are cleared in two passes and neither replaces the other. The first is
@@ -184,6 +192,9 @@ The second pass has its own blind spot: a process whose environment was built
 fresh rather than inherited — a service, a scheduled task, a `Win32_Process.Create`
 launch — carries no mark. That is what the first pass is for.
 
+On Windows, an MSYS program started by another MSYS program carries no mark in
+its Windows environment either. Once its parent has died, neither pass reaches it.
+
 The sweep is silent when there is nothing to clear, writes a line to the office
 log when something was cleared, and reaches the owner only for what survived the
 kill or could not be touched. Every live turn is taken down at interpreter exit.
@@ -197,17 +208,18 @@ At startup the hub:
 
 1. sweeps by mark everything left from this office's previous life — before
    recovery, and before anything is started;
-2. moves every `running` work to `failed` with reason `hub_restart` and attaches
+2. recovers the stages (section 12);
+3. moves every `running` work to `failed` with reason `hub_restart` and attaches
    the output tails spilled to disk;
-3. closes the turn of every agent carrying a turn-start marker: drops the marker
+4. closes the turn of every agent carrying a turn-start marker: drops the marker
    and tells the senders whose messages that turn consumed that they were not
    processed (section 4);
-4. moves agents from `running` to `idle`;
-5. sends the director a message from `office` listing the interrupted works;
-6. writes a line to the owner's journal; if the restart killed the director's
+5. moves agents from `running` to `idle`;
+6. sends the director a message from `office` listing the interrupted works;
+7. writes a line to the owner's journal; if the restart killed the director's
    turn the line is critical and raises the plate.
 
-Step 5 is required: there is no autonomous heartbeat in the system. A turn is bought
+Step 6 is required: there is no autonomous heartbeat in the system. A turn is bought
 by a message and by nothing else, so a restart that told nobody would leave the
 office standing still.
 
@@ -397,7 +409,7 @@ wrote it.** Assigning work sends the brief as the director's message; finishing
 work sends the report as the executor's message. Tickets, PR comments, opening
 and merging PRs, moving tasks, hiring and firing send nothing: they come in
 batches, the decision of when to wake somebody belongs to their author, and the
-state is readable through the tools in section 13.
+state is readable through the tools in section 14.
 
 **In its own name the office says seven things**, all of them messages from the
 participant `office`:
@@ -709,11 +721,20 @@ and so is computed rather than stored or entered.
 <root>/repo/seed/              an ordinary clone --recurse-submodules — the object donor
 <root>/ws/<workspace-id>/      workspaces
 <root>/scratch/<workspace-id>/ the agent's sandbox — outside every git tree
+<root>/stages/<name>/          stages (section 12)
+<root>/stages/<name>.prepare.log
+<root>/stages/.<handle>.index  a snapshot's temporary index
+<root>/stages/.trash/          stage trees waiting to be deleted
 <root>/lfs/                    the shared LFS store
 <root>/tails/<agent>.log       output tails
 <root>/office.db               all state
 <root>/office.log              the office's own log
 ```
+
+`<root>/lfs` is the shared store: workspaces, the donor and stages read and write
+their large files there, and new objects are written there first. `project.git`
+keeps its own store: what the import and the owner's intakes brought, and what
+every publish sent. `<root>/lfs` fills from it on demand.
 
 The donor is an ordinary clone, not bare: a bare repository has no working tree,
 `.git/modules/<name>` never appears, and a submodule's alternates have nothing to
@@ -728,7 +749,7 @@ One wrapper per module. On every call: `LC_ALL=C` (refusals are matched against
 git's English text), `protocol.file.allow=always` (the donor, `project.git` and the
 owner's repository are local paths), `GIT_CLONE_PROTECTION_ACTIVE=false` (git-lfs
 installs a `post-checkout` hook and git refuses to run a hook that arrived with the
-clone) and `GIT_TERMINAL_PROMPT=0`.
+clone), `GIT_TERMINAL_PROMPT=0` and `GIT_CEILING_DIRECTORIES` (section 3).
 
 Every path that becomes an address for git is written with forward slashes. A path
 with mixed separators is read by git-lfs as an scp address.
@@ -744,9 +765,15 @@ created" — and shows the fields that case reads.
 
 | What is at the path | What the office does | Fields |
 | --- | --- | --- |
-| a repository with commits | clones into `project.git`, drops the copy's remote, pushes LFS objects across | branch |
+| a repository with commits | clones into `project.git`, drops the copy's remote, pushes the LFS objects the owner's repository holds | branch |
 | a repository with no commits | an empty bare and a first commit | branch, README |
 | no repository | `git init` in the owner's folder, then the same | branch, README |
+
+The import sends every large file of the history that the owner's repository
+holds, and leaves out those it holds only as pointers. Every large file of the main
+branch's tip must arrive. If one does not, the import is undone and the refusal
+names the files: the owner pulls their content into his clone and presses the
+button again.
 
 **The branch name is always read**, and it is the one thing the office cannot work
 out for itself. A clone brings a foreign `HEAD`, so afterwards the repository's
@@ -841,9 +868,15 @@ hang there would stall the recording of work already delivered.
 ### Publishing
 
 `publish()` is the only place a branch enters `project.git`. The branch name comes
-from the working copy; a detached HEAD is refused with an explanation. One push
-with `--recurse-submodules=no`, then `git lfs push` of that branch's objects. A
-non-zero code from the object upload fails the publish.
+from the working copy; a detached HEAD is refused with an explanation.
+
+The branch's large files go first: `git lfs push origin <branch>` into
+`project.git`, which sends the objects of the commits no remote-tracking ref of
+`origin` reaches. The branch goes only if they all arrived; an object missing from
+the shared store refuses the publish by name. Then one push with
+`--recurse-submodules=no`, run with none of the workspace's hooks —
+`core.hooksPath` points at a path that cannot be created. `project.git`'s own
+`pre-receive` still runs on that push.
 
 **Publishing to the main branch is rejected**, separately by `project.git`'s
 `pre-receive` hook: an agent has a real shell, and its workspace's `origin` is
@@ -926,16 +959,18 @@ commit built without his would be rejected as non-fast-forward.
 One helper, three calls:
 
 ```
-git fetch <owner's path> <branch>         → refs/office/owner
-git lfs fetch file:///<owner's git-dir>   refs/office/owner
+git fetch <owner's path> <branch>         → refs/remotes/owner/<branch>
+git lfs fetch file:///<owner's git-dir>   refs/remotes/owner/<branch>
 the office's branch is an ancestor of what arrived → fast-forward onto it
 what arrived is an ancestor of the office's        → nothing new
 neither                                            → diverged
 ```
 
-`refs/office/owner` is outside `refs/heads/`, so it is not a branch anybody can
-clone, publish to or merge. The LFS fetch runs only where the branch is about to
-move, and its failure stops the move: pointers would otherwise be in every
+`refs/remotes/owner/<branch>` is outside `refs/heads/`, so it is not a branch
+anybody can clone, publish to or merge, and neither a workspace's clone nor the
+donor's refresh fetches it. It is also what tells git-lfs which commits the owner's
+repository already has. The large-file fetch takes the objects of the branch's tip.
+The LFS fetch runs only where the branch is about to move, and its failure stops the move: pointers would otherwise be in every
 workspace with the objects nowhere.
 
 Intake runs in three places:
@@ -977,10 +1012,12 @@ points nowhere.
 
 The cap is a minute for everything except object transfer.
 
-**LFS objects go before the branch, or the branch does not go at all.**
-`git lfs push file:///<owner's git-dir> refs/heads/<source>` from `project.git` —
-the merge commit and the source branch share one tree. A non-zero code is a
-refusal: a pointer to an object the owner does not have would send his own filter
+**LFS objects go before the branch, or the branch does not go at all.** From
+`project.git`, `git lfs push owner refs/heads/<source>`, with the remote `owner`
+given for that one call as the owner's path and its `file:///` git directory — the
+merge commit and the source branch share one tree. It sends the objects of the
+commits `refs/remotes/owner/<branch>` does not reach; the intake before every merge
+has just moved that ref. A non-zero code is a refusal: a pointer to an object the owner does not have would send his own filter
 out to the network for it.
 
 `receive.denyCurrentBranch=updateInstead` in the owner's repository is what makes a
@@ -1024,7 +1061,7 @@ digest of its comments into the history.
 ### What the layer does not do
 
 It does not host submodules, publish into them or deliver work in them. It keeps no
-build tree. It does not check gitlinks and does not extract commits from dead
+build tree; stages (section 12) are outside this layer. It does not check gitlinks and does not extract commits from dead
 workspaces. It does not look for the owner's hooks and filters and keeps no
 snapshot of his environment. It knows no revert levels, no delivery switch and no
 "send now" button. It does not resolve conflicts and never meets one. It does not
@@ -1172,13 +1209,186 @@ This is deliberately not a general shell. It is for tests and trial runs — thi
 that can hang. Reading and editing files and ordinary quick commands stay on the
 agent's own tools.
 
+`run(op=start, stage=<name>)` runs the command on a stage instead of in the
+workspace (section 12).
+
 Nothing here runs on the event loop or on the bus thread. Spawning, reading and
 killing happen on this module's own threads, and the MCP handler waits for the
 deadline with an awaitable that holds no thread.
 
 ---
 
-## 12. Storage
+## 12. Stages
+
+A **stage** is a working tree the office owns and agents use one at a time. It holds
+what is expensive to build and cannot be used by two processes at once. An agent
+runs a command on a stage with its own work applied to it, and gets back what the
+command changed.
+
+```
+Stage { name, prepare, state, reason }
+```
+
+`state` is `preparing` · `ready` · `broken`. `reason` is set only for `broken`: the
+output of the step that failed and what to do next, or the sentence that the hub
+restarted while the stage was being prepared.
+
+The office knows nothing about what runs on a stage. What a project's stages are
+for, and which command does what on them, is written in its rules and wiki.
+
+### Lifecycle
+
+The director creates, resets and deletes stages with `stage(op=create|reset|delete)`.
+No other participant has these operations; the owner sees stages and does not
+manage them.
+
+`create(name, prepare)`: the name is unique and matches `[a-z0-9][a-z0-9-]{0,39}`;
+`prepare` is one shell command line and may be empty. The call writes the row as
+`preparing` and returns at once, and the preparation runs on a thread of its own.
+
+**A preparation** is, in order: the clone (on `create` only), the configuration,
+the switch to the main branch's tip, the fill, and `prepare`. Every line git and
+`prepare` print, progress included, counts as output for the preparation's
+`quiet_for`. Everything it starts carries the mark `<office id>:office:<stage>:`,
+and what is left running under that mark is swept when the preparation ends,
+however it ended.
+
+`prepare` runs in the stage's tree through the shell `run` uses, with the variables
+that close outbound push (section 8). Exit code 0 makes the stage `ready`; anything
+else makes it `broken`, with the exit code and the last 200 lines of output. The
+full output is `<root>/stages/<name>.prepare.log`.
+
+A clone that fails, or a tree that is not a usable clone, makes the stage `broken`
+with git's output and the sentence that the stage has to be deleted and created
+again. A configuration, switch or fill that fails makes it `broken` with git's
+output and the sentence that it has to be reset again.
+
+`reset` runs a preparation in the tree the stage already has.
+
+`delete` moves the tree aside and removes the row, the stage's refs in
+`project.git` and its preparation log. Moving aside is a rename to
+`<root>/stages/.trash/<name>-<n>`, followed by deletion on a background thread. A
+rename that fails is refused with the operating system's sentence; a delete that was
+pending, or that had killed a preparation, leaves the stage `broken` with that
+sentence. A stage that has to start cold is deleted and created again.
+
+On a stage where no run is running, `reset` and `delete` take effect at once, and a
+preparation in progress is killed first; a preparation that has not ended ten
+seconds after its kill refuses the operation, with a sentence that sends the
+director to the owner. On a stage where a run is running they wait for that run to
+end: until then the stage refuses new runs, naming the pending operation, and the
+runs waiting in its queue are answered at once.
+
+### The tree
+
+The clone is a workspace's (section 8), pointers and all. **The configuration** is
+a workspace's too, with the LFS filters in their ordinary mode, in the superproject
+and in every submodule. **The fill** runs `git lfs pull` in the superproject and in
+every submodule: large files in a stage are content, not pointers. Commits the
+stage writes are signed `office`, passed per command.
+
+**The switch** puts the tree at a commit: it removes every lock file git left in the
+superproject and its submodules, then `fetch` from `project.git`,
+`checkout --force`, `submodule update --init --recursive --force`, and `clean -fd`
+in the superproject and in every submodule. Ignored files are never removed.
+
+**Every git call the office makes for a stage — in the stage, in an agent's
+repository and in `project.git` — runs with hooks switched off**: `core.hooksPath`
+points at a path that cannot be created.
+
+The queue serialises the office's own runs and nothing else.
+
+### Running on a stage
+
+`run(op=start, command, stage=<name>)`. Everything section 11 says about `run`
+holds: the deadline never kills, the end of the agent's turn stops the run and takes
+it out of the queue, the whole process tree is killed, and the log is
+`<ws>/.office/runs/<handle>.log`. A stage run counts towards `MAX_RUNNING_PER_AGENT`
+from the moment it is enrolled. The deadline counts from the call, the snapshot
+included.
+
+Every process of a stage run — the office's git calls for it and the command alike —
+carries the agent's mark extended by `:<handle>:`, which the sweep over the agent
+still covers.
+
+A workspace has at most one run per stage, running or waiting. A second is refused
+with the handle of the first.
+
+At the call:
+
+1. **State.** A `preparing` stage refuses the call with how long the preparation has
+   run and how long ago it last printed; a `broken` one with its reason; a stage
+   with a pending reset or delete with that operation.
+2. **Snapshot.** The agent's working tree as it stands — tracked changes and
+   untracked files that are not ignored — becomes commit S whose parent is the
+   agent's HEAD. It is built on a temporary index that starts as a copy of the
+   agent's own. It writes objects into the agent's repository and new large files
+   into `<root>/lfs`, and touches no index, HEAD or file of the agent's. S is
+   force-pushed to `project.git` as `refs/office/stage/<stage>/<workspace-id>`,
+   outside `refs/heads/`: nothing clones, publishes or merges it.
+3. **Queue.** The state is checked again, and the request joins the stage's queue,
+   first come first served.
+
+When the request reaches the head of the queue, the run is these steps, and stopping
+it or ending its turn kills whichever step is in progress. A run that has not ended
+ten seconds after its kill is given up on: it stays reported as running and keeps
+the stage.
+
+4. **Switch** to S. git's output counts for the run's `quiet_for`. A switch that
+   fails fails the run; the stage stays `ready`.
+5. **Artifacts.** `<root>/scratch/<workspace-id>/stage/<stage>/` is emptied and
+   passed to the command as `OFFICE_ARTIFACTS`.
+6. **Command.** It runs in the stage's tree, through the shell `run` uses, with the
+   agent's environment (section 3), the run's mark and `OFFICE_ARTIFACTS`.
+7. **Clearing.** However the run ended — the command exited, it was stopped, the
+   turn ended — the office sweeps by the run's mark and waits until those processes
+   are dead, then removes every lock file git left in the superproject and in its
+   submodules.
+8. **Changes.** Only after a command that exited on its own, whatever its exit
+   code: `add -A` and `write-tree` on the stage's own index. A tree that differs from
+   S's becomes commit C with parent S, force-pushed to the same ref.
+9. A pending reset or delete takes effect; otherwise the next request is taken.
+
+The result is `run`'s, plus:
+
+- while waiting: how many requests are ahead, and who has had the stage for how long;
+- S's oid;
+- a step before the command that failed, with its output;
+- after the command: C's oid; the number of changed files, the first 20 paths
+  outside LFS and every path under LFS; and the commands that bring C into the
+  working copy — fetch the ref; write the diff from S to C, LFS paths excluded, to
+  `<root>/scratch/<workspace-id>/stage/<stage>.patch` and `git apply` it, or
+  `git add` the files it touches and `git apply --3way` it where plain `apply`
+  refuses; `restore --source=C` the LFS paths with the ordinary LFS filter. Or that
+  the command changed nothing;
+- the artifacts folder and how many files it holds, once step 5 has emptied it.
+
+The ref is overwritten by that workspace's next run on the same stage and removed
+with the stage.
+
+### Visibility
+
+`roster()` gives everyone each stage's name and state, who is running on it and for
+how long, and who is waiting. The director additionally gets `prepare`, `reason`, a
+pending operation, and the free space on the drive holding `<root>`. The Team page
+lists the stages (section 15).
+
+### Hub restart
+
+Runs die with their turns, and a pending reset or delete is forgotten. A stage in
+`preparing` becomes `broken`; `reset` resumes it in the tree it has. After the
+startup sweep, every lock file git left in a stage is removed, and so are the
+snapshots' temporary indexes. Everything under `.trash` is deleted on a background
+thread.
+
+### What a stage does not do
+
+It does not gate a merge, does not run by itself, and is reached by nothing but
+`run`. It keeps no history of runs. It has no approval step.
+
+---
+
+## 13. Storage
 
 | Stored | Why |
 |---|---|
@@ -1194,6 +1404,7 @@ deadline with an awaitable that holds no thread.
 | Owner notices | The record of what happened while he was not looking |
 | How far the owner has read each conversation | Not recoverable from anywhere else |
 | Settings | |
+| Stages: name, preparation command, state, reason | Not recoverable |
 
 | Not stored | What replaces it |
 |---|---|
@@ -1203,6 +1414,7 @@ deadline with an awaitable that holds no thread.
 | Quota history | The current snapshot |
 | Full stdout logs | A ring buffer in memory; only the tail on disk |
 | Wiki edit history beyond one step | The version and the version check on write |
+| A stage's queue, a pending reset or delete, the history of stage runs | Nothing; runs die with the hub |
 
 The `events` table is a record of a mutation and the trigger to redraw a page
 region. Nothing reads it back and no participant has a reading position in it. The
@@ -1238,7 +1450,7 @@ The system does not answer "who worked on this task a month ago".
 
 ---
 
-## 13. The agent tool surface
+## 14. The agent tool surface
 
 Identity is the path `/mcp/<agent>/` and nothing else. The role is read from
 `agents.kind` on every call; an unknown name gets the executor role.
@@ -1261,7 +1473,7 @@ pr(op, ...)                      # create | comment | merge | close | list | rea
 note(op, kind, ...)              # wiki: list | read | comment | write | undo | delete
                                  # rule: create | update | delete  (director only)
 ticket(op, ...)                  # create | comment | list | read | resolve | link
-run(op, ...)                     # start | wait | stop | list
+run(op, ...)                     # start | wait | stop | list; start takes stage=
 roster()                         # the team; for the director, everything staffing turns on
 ```
 
@@ -1274,6 +1486,7 @@ assign(agent, brief, task_id, branch)
 work_close(work, summary)        # accept a reported work: the row goes, the result lands on the task
 work_dismiss(work)               # write off a failed work together with its tail
 work_reassign(work, to_agent, workspace)   # workspace = inherit | fresh
+stage(op, ...)   # create | reset | delete (section 12)
 ```
 
 `task(op=move, status=done)` requires `result` and closes the task entirely: the
@@ -1288,7 +1501,7 @@ work that is not finished (running, paused, reported or failed, with the reason 
 stopped and, for a pause, the earliest it could resume), remaining quota per
 runtime with its reset time, tasks that look ready but whose dependency is not
 done, the model catalogue, directories under `ws/` the office did not create, and
-workspaces that belong to nobody. None of that is in any system prompt: a prompt is
+workspaces that belong to nobody. Both get the stages, as section 12 lists. None of that is in any system prompt: a prompt is
 fixed when the session is created.
 
 `remind` is the only alarm in the system. A turn is bought by a message and by
@@ -1350,7 +1563,7 @@ operation.
 
 ---
 
-## 14. The owner's interface
+## 15. The owner's interface
 
 The menu has eleven items with icons; the icons are drawn in the markup, as there is
 no icon font and no external source in the system. Five items carry counters and
@@ -1391,8 +1604,10 @@ All times are shown local and stored UTC.
    works are the deferred messages the office is holding, and cancelling one is the
    owner's alone.
 5. **Common chat** — paginated.
-6. **Team** — the agent list only: who exists, on what, how much context. No hiring
-   or firing here.
+6. **Team** — who exists, on what, how much context; under them the stages: each
+   one's state with its timers while preparing, the run in progress with its timers,
+   who is waiting, a pending reset or delete, the preparation command, and the reason
+   for a broken one. No hiring or firing here, and no control over stages.
 7. **Knowledge** — wiki and rules.
 8. **Pull requests** — the list and comments. There is no merge button.
 9. **System notices** — the journal: turns that died, quota exhausted and returned,
@@ -1453,7 +1668,7 @@ nothing and says nothing.
 
 ```
 agents · works · tasks · messages · prs · quota · wiki · rules · settings ·
-tickets · notices
+tickets · notices · stages
 ```
 
 `app.js` subscribes to all of them and re-dispatches each as the DOM event
@@ -1482,7 +1697,7 @@ delivery_last           the outcome of the last delivery (JSON), for the setting
 
 ---
 
-## 15. Operations in the owner's interface
+## 16. Operations in the owner's interface
 
 There are five; everything else is observation and conversation.
 
@@ -1505,7 +1720,7 @@ whoever is looking from outside.
 
 ---
 
-## 16. Stack
+## 17. Stack
 
 Python 3.12 · FastAPI · SQLite (WAL) · Jinja2 + HTMX + SSE · python-markdown. No npm
 and no build step.

@@ -229,6 +229,16 @@ CREATE TABLE IF NOT EXISTS models (
     PRIMARY KEY (runtime, model_id)
 );
 
+-- A working tree the office owns and agents run commands on one at a time
+-- (office/stages.py). `reason` is set only while `state` is 'broken'. The queue,
+-- a pending reset or delete and the run in progress live in memory.
+CREATE TABLE IF NOT EXISTS stages (
+    name TEXT PRIMARY KEY,
+    prepare TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('preparing', 'ready', 'broken')),
+    reason TEXT
+);
+
 -- The chat and DM views read one page of history at a time, newest-first with a
 -- LIMIT and an `id <` cursor; the bus scans for undelivered rows by id.
 CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel, id);

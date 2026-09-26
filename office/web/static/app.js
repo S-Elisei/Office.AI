@@ -4,7 +4,7 @@
   // Must match the kinds office/core.py emits.
   const KINDS = [
     "agents", "works", "tasks", "messages", "prs", "quota", "wiki", "rules", "settings",
-    "tickets", "notices",
+    "tickets", "notices", "stages",
   ];
 
   document.addEventListener("htmx:beforeSwap", function (evt) {

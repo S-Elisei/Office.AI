@@ -1,0 +1,55 @@
+{% import "macros.html" as m -%}
+{% set timing = stages | selectattr("running") | list or stages | selectattr("state", "equalto", "preparing") | list -%}
+<div id="team-stages" hx-get="/fragments/team/stages"
+     hx-trigger="office:stages[!officeShouldSkip(this)] from:body{% if timing %}, every 10s{% endif %}"
+     hx-swap="outerHTML">
+{% if stages %}
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>State</th>
+      <th>Run</th>
+      <th>Waiting</th>
+      <th>Preparation command</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in stages %}
+    <tr{% if s.reason %} class="stage-with-reason"{% endif %}>
+      <td>{{ s.name }}</td>
+      <td>
+        <div class="stage-cell">
+          {{ m.status_badge(s.state) }}
+          {% if s.state == 'preparing' %}{{ m.timers(s.preparing_for, s.preparing_quiet_for) }}{% endif %}
+          {% if s.pending %}<span class="badge warn">{{ s.pending }} pending</span>{% endif %}
+        </div>
+      </td>
+      <td>
+        {% if s.running %}
+        <div class="stage-cell">
+          <strong>{{ s.running.agent }}</strong>
+          {{ m.timers(s.running.running_for, s.running.quiet_for) }}
+        </div>
+        {% else %}—{% endif %}
+      </td>
+      <td>{{ s.waiting | join(", ") or "—" }}</td>
+      <td class="stage-prepare">{% if s.prepare %}<code>{{ s.prepare }}</code>{% else %}—{% endif %}</td>
+    </tr>
+    {% if s.reason %}
+    <tr class="stage-reason-row">
+      <td colspan="5">
+        <details class="work-brief" data-office-details="stage-{{ s.name }}-reason">
+          <summary><span class="work-brief-label">reason</span> {{ s.reason.strip().split('\n')[0] }}</summary>
+          <pre class="stage-reason">{{ s.reason }}</pre>
+        </details>
+      </td>
+    </tr>
+    {% endif %}
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No stages.</div>
+{% endif %}
+</div>

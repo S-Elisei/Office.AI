@@ -58,14 +58,17 @@ def _child_env(
     overrides: dict[str, str] | None,
     agent: str,
     turn_id: str | None = None,
+    *,
+    mark: str | None = None,
 ) -> dict[str, str]:
     """The environment for a process the office spawns on an agent's behalf.
 
     `agent` puts office.marks' mark into it. `turn_id` rides along so a log
-    line can name the turn; nothing matches on it.
+    line can name the turn; nothing matches on it. `mark` replaces the mark
+    `agent` and `turn_id` would make.
 
-    The mark and git.block_outbound_push() are written LAST, after the
-    caller's overrides: neither is a value a caller may replace.
+    The mark, git.block_outbound_push() and git.ceiling() are written LAST,
+    after the caller's overrides: none of them is a value a caller may replace.
     """
     env = {
         key: value
@@ -75,7 +78,8 @@ def _child_env(
     if overrides:
         env.update(overrides)
     git.block_outbound_push(env)
-    env[marks.MARK_ENV] = marks.mark_for(agent, turn_id)
+    env["GIT_CEILING_DIRECTORIES"] = git.ceiling()
+    env[marks.MARK_ENV] = mark or marks.mark_for(agent, turn_id)
     return env
 
 _turn_id_lock = threading.Lock()

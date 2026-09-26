@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 from datetime import datetime, timezone
 
 import mcp.types as types
@@ -10,7 +11,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.concurrency import run_in_threadpool
 
-from office import commands, core, db
+from office import commands, core, db, stages
 
 # --------------------------------------------------------------------------- the free drain seam
 
@@ -540,12 +541,12 @@ def _h_ticket(conn, config, agent_name, role, args) -> str:
 # no part of this runs on the event loop or the bus thread.
 
 
-def _workspace_for(conn, agent_name: str) -> str:
+def _workspace_for(conn, agent_name: str) -> dict:
     me = _agent_row(conn, agent_name)
     ws = core.workspace_of(conn, me["id"])
     if ws is None:
         raise ValueError("you have no workspace, so there is nowhere to run a command")
-    return ws["path"]
+    return ws
 
 
 def _run_seconds(args: dict) -> float:
@@ -583,14 +584,20 @@ def _run_result(cmd) -> str:
     """
     tail, dropped = cmd.output()
     file_chars, file_dropped = cmd.log_state()
+    on_stage = isinstance(cmd, stages.StageRun)
+    waiting = cmd.waiting() if on_stage else None
     lines = []
     if cmd.killed_by is not None:
         lines.append(f"{cmd.handle} was stopped ({cmd.killed_by}) after {cmd.elapsed:.0f}s.")
+    elif waiting:
+        lines.append(waiting)
     elif cmd.running:
         lines.append(
             f"{cmd.handle} is STILL RUNNING after {cmd.elapsed:.0f}s — the deadline passed, "
             f"nothing was killed. Last output {cmd.quiet_for:.0f}s ago."
         )
+    elif on_stage and cmd.exit_code is None:
+        lines.append(f"{cmd.handle} ended after {cmd.elapsed:.0f}s without running the command.")
     else:
         lines.append(f"{cmd.handle} finished after {cmd.elapsed:.0f}s, exit code {cmd.exit_code}.")
     # This result must never send a reader to a file for "the whole of it"
@@ -615,6 +622,8 @@ def _run_result(cmd) -> str:
             "output above is missing, and so is the end of the file below. What is there is "
             "real; there was more.]"
         )
+    if on_stage:
+        lines.extend(cmd.report())
     if cmd.running:
         lines.append(
             f"run(op=wait, handle='{cmd.handle}') waits again; run(op=stop, "
@@ -639,15 +648,21 @@ def _run_list(cmds: list) -> str:
         return "you have not run anything this turn. run(op=start, command=...) starts one."
     lines = []
     for cmd in cmds:
+        on_stage = isinstance(cmd, stages.StageRun)
         if cmd.killed_by is not None:
             state = f"stopped ({cmd.killed_by})"
+        elif on_stage and cmd.waiting():
+            state = "WAITING for the stage"
         elif cmd.running:
             state = f"RUNNING, quiet for {cmd.quiet_for:.0f}s"
+        elif on_stage and cmd.exit_code is None:
+            state = "ended without running the command"
         else:
             state = f"finished, exit code {cmd.exit_code}"
+        where = f" on stage '{cmd.stage}'" if on_stage else ""
         command = cmd.command if len(cmd.command) <= 120 else cmd.command[:117] + "..."
         # `elapsed` is measured from the start for a finished command too.
-        lines.append(f"{cmd.handle}  [{state}]  started {cmd.elapsed:.0f}s ago: {command}")
+        lines.append(f"{cmd.handle}  [{state}]  started {cmd.elapsed:.0f}s ago{where}: {command}")
     running = [c.handle for c in cmds if c.running]
     if running:
         lines.append(
@@ -663,11 +678,20 @@ async def _h_run(conn, config, agent_name, role, args) -> str:
     if op == "start":
         _require(args, "command")
         seconds = _run_seconds(args)
+        began = time.monotonic()
         workspace = await run_in_threadpool(_workspace_for, conn, agent_name)
-        # Spawning is a process creation and a log file — short, but blocking,
-        # and the loop serves every other agent.
-        cmd = await run_in_threadpool(commands.start, agent_name, workspace, args["command"])
-        await cmd.wait_async(seconds)
+        if args.get("stage"):
+            # The snapshot is taken inside this call; the deadline counts it.
+            cmd = await run_in_threadpool(
+                stages.start_run, conn, config, agent_name, workspace, args["stage"],
+                args["command"],
+            )
+        else:
+            # Spawning is a process creation and a log file — short, but
+            # blocking, and the loop serves every other agent.
+            cmd = await run_in_threadpool(
+                commands.start, agent_name, workspace["path"], args["command"])
+        await cmd.wait_async(max(0.0, seconds - (time.monotonic() - began)))
         return _run_result(cmd)
 
     if op == "wait":
@@ -777,6 +801,7 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
             lines.append(
                 f"  {_fmt_stamp(w['due_at'])}: from {w['sender']} to {w['recipient']} — {_first_line(w['body'])}"
             )
+    lines.extend(_stage_lines(conn, config, role))
     if role != "director":
         return "\n".join(lines)
     if snap["works"]:
@@ -846,6 +871,51 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
             "letting it clone a fresh tree."
         )
     return "\n".join(lines)
+
+
+def _stage_lines(conn, config, role) -> list[str]:
+    """roster()'s stages: name, state and queue for everybody; for the director also
+    the preparation command, the reason it broke, a pending operation and free space."""
+    lines = []
+    listed = stages.overview(conn)
+    if listed:
+        lines.append("Stages:")
+    for s in listed:
+        line = f"  {s['name']} [{s['state']}]"
+        if s["running"]:
+            r = s["running"]
+            line += f" running: {r['agent']} for {r['running_for']:.0f}s"
+        if s["waiting"]:
+            line += f"; waiting: {', '.join(s['waiting'])}"
+        if role == "director":
+            if s["pending"]:
+                line += f"; {s['pending']} pending"
+            line += f"; prepare: {s['prepare'] or '(none)'}"
+            if s["reason"]:
+                line += f"\n    reason: {s['reason']}"
+        lines.append(line)
+    if role == "director":
+        free = stages.free_space(config) / 1e9
+        lines.append(f"Free space on the drive holding {config.root}: {free:.1f} GB.")
+    return lines
+
+
+def _h_stage(conn, config, agent_name, role, args) -> str:
+    op = args.get("op")
+    if op == "create":
+        _require(args, "name")
+        stages.create(conn, config, args["name"], args.get("prepare") or "", actor=agent_name)
+        return (
+            f"stage '{args['name']}' is being cloned and prepared. roster() shows when it is "
+            "ready, or why it broke."
+        )
+    if op == "reset":
+        _require(args, "name")
+        return stages.reset(conn, config, args["name"], actor=agent_name)
+    if op == "delete":
+        _require(args, "name")
+        return stages.delete(conn, config, args["name"], actor=agent_name)
+    raise ValueError(f"stage: unknown op '{op}' — expected create, reset, or delete")
 
 
 def _h_agent(conn, config, agent_name, role, args) -> str:
@@ -1049,7 +1119,7 @@ _SHARED_TOOL_NAMES = ("say", "chat", "remind", "task", "work", "pr", "note", "ti
 # everybody, and to the director everything staffing turns on besides. It is
 # the only place any of that is said — none of it is printed into a system
 # prompt.
-_DIRECTOR_TOOL_NAMES = ("agent", "assign", "work_close", "work_reassign", "work_dismiss")
+_DIRECTOR_TOOL_NAMES = ("agent", "assign", "work_close", "work_reassign", "work_dismiss", "stage")
 
 _HANDLERS = {
     "say": _h_say,
@@ -1067,6 +1137,7 @@ _HANDLERS = {
     "work_close": _h_work_close,
     "work_reassign": _h_work_reassign,
     "work_dismiss": _h_work_dismiss,
+    "stage": _h_stage,
 }
 
 
@@ -1342,7 +1413,17 @@ _TOOLS: dict[str, types.Tool] = {
         "op=list gives you back your own handles and what each one is doing, for when you no "
         "longer have them. Stop whatever you started before your turn ends. The output of every "
         "run is written to a file the result names, so you can grep it -- and the result says so "
-        "if that file was cut short too.",
+        "if that file was cut short too. "
+        "stage runs the command on a stage instead of in your workspace: a working tree the "
+        "office keeps prepared, which the team uses one run at a time (roster() lists the "
+        "stages). What runs there is your working tree as it stands at this call: your commits, "
+        "your uncommitted changes and your untracked files that are not ignored. A run waiting "
+        "for its turn counts as running, and your workspace can have one run on each stage. Have "
+        "the command write the files you want from it into the folder the OFFICE_ARTIFACTS "
+        "environment variable names. That folder is emptied when your workspace's next run on "
+        "the same stage starts: move out of it whatever must outlive that. What the command "
+        "changed in the stage's tree comes back in the result as a commit: bring it into your "
+        "working copy with the commands the result gives, before your next run on that stage.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1350,7 +1431,12 @@ _TOOLS: dict[str, types.Tool] = {
                 "command": {
                     "type": "string",
                     "description": "Required for start. One shell command line, run in your "
-                    "workspace (PowerShell on Windows).",
+                    "workspace, or on the stage (PowerShell on Windows).",
+                },
+                "stage": {
+                    "type": "string",
+                    "description": "Optional for start: the name of the stage to run the command "
+                    "on instead of your workspace.",
                 },
                 "handle": {
                     "type": "string",
@@ -1377,6 +1463,9 @@ _TOOLS: dict[str, types.Tool] = {
         "context fill, every work that is not finished — running, paused or failed, with the "
         "reason it stopped and, for a pause, the earliest it could resume — remaining quota per "
         "runtime with its reset time, and tasks that look ready but whose dependency is not done. "
+        "Everyone gets the stages: each one's state, who is running on it and who is waiting; "
+        "the director also gets how each is prepared, why a broken one broke, a reset or delete "
+        "waiting on a run, and the free space on the office's drive. "
         "Your prompt carries part of the same picture as it stood at the start of this turn — "
         "call this when you need it current, or when you need the failures, which the prompt "
         "does not carry at all.",
@@ -1516,6 +1605,38 @@ _TOOLS: dict[str, types.Tool] = {
                 "workspace": {"type": "string", "enum": ["inherit", "fresh"]},
             },
             "required": ["work", "to_agent", "workspace"],
+        },
+    ),
+    "stage": types.Tool(
+        name="stage",
+        description="Director only. create | reset | delete a stage: a working tree the office "
+        "owns, cloned from the project and prepared once, on which agents run commands one at a "
+        "time with run(op=start, stage=<name>). create takes name and prepare, one shell command "
+        "line that may be empty; it returns at once, and the stage is 'preparing' while the "
+        "office clones it, puts it on the main branch's tip and runs prepare in it. Exit code 0 "
+        "makes it 'ready'; anything else makes it 'broken', and roster() shows why. A preparing "
+        "or broken stage turns runs away. reset puts the stage back on the main branch's tip and "
+        "runs prepare again, in the tree it already has. delete removes the stage, its tree and "
+        "its refs. On a stage with a run in progress, reset and delete happen when that run ends, "
+        "and the runs waiting behind it are turned away at once. To start a stage from nothing, "
+        "delete it and create it again. Write in the rules or the wiki what each stage is for "
+        "and which commands run on it.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "op": {"type": "string", "enum": ["create", "reset", "delete"]},
+                "name": {
+                    "type": "string",
+                    "description": "Required. Lowercase letters, digits and hyphens, starting with "
+                    "a letter or digit, at most 40 characters.",
+                },
+                "prepare": {
+                    "type": "string",
+                    "description": "For create: one shell command line run in the stage's tree "
+                    "(PowerShell on Windows). Leave it out for a stage that needs no preparation.",
+                },
+            },
+            "required": ["op", "name"],
         },
     ),
 }

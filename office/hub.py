@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from office import core, db, git, marks, mcp
+from office import core, db, git, marks, mcp, stages
 from office.bus import Bus
 from office.config import load_config
 from office.web.routes import router as web_router
@@ -81,6 +81,7 @@ async def lifespan(app: FastAPI):
     db.init_schema(conn)
 
     await asyncio.to_thread(marks.sweep, marks.office_scope(), "a previous life of this office")
+    await asyncio.to_thread(stages.recover, conn, config)
 
     app.state.config = config
     app.state.db = conn
@@ -110,6 +111,7 @@ async def lifespan(app: FastAPI):
         yield
 
         bus.stop()
+        await asyncio.to_thread(stages.shutdown)
 
     core.set_notifier(None)
     marks.set_survivor_hook(None)

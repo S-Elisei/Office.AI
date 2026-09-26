@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from office.config import Config
+from office.config import Config, data_root
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +87,16 @@ class MergeResult:
 # --------------------------------------------------------------------------- process
 
 
+def ceiling() -> str:
+    """GIT_CEILING_DIRECTORIES for every git the office starts: the owner's repository.
+
+    Under it, git looks for a repository in its working directory and in the
+    directories above that up to <root>, never in the owner's repository. In
+    the owner's repository itself, git finds it.
+    """
+    return str(data_root().parent)
+
+
 def _env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ)
     env["LC_ALL"] = "C"
@@ -94,7 +104,17 @@ def _env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env["GIT_TERMINAL_PROMPT"] = "0"
     if extra:
         env.update(extra)
+    env["GIT_CEILING_DIRECTORIES"] = ceiling()
     return env
+
+
+#: core.hooksPath for a git call that must run no hook of the repository it runs
+#: in: a path under this module's own file, which no process can create.
+NO_HOOKS = Path(__file__).resolve().as_posix() + "/hooks"
+
+
+def _argv(args: list[str]) -> list[str]:
+    return ["git", "-c", "protocol.file.allow=always", *args]
 
 
 def git(
@@ -104,12 +124,12 @@ def git(
     env_extra: dict[str, str] | None = None,
     check: bool = True,
     timeout: int | None = None,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run git without a shell."""
-    argv = ["git", "-c", "protocol.file.allow=always", *args]
+    """Run git without a shell. `input` goes to its stdin."""
     log.debug("git %s (cwd=%s)", " ".join(args), cwd)
     proc = subprocess.run(
-        argv,
+        _argv(args),
         cwd=str(cwd) if cwd else None,
         env=_env(env_extra),
         capture_output=True,
@@ -117,10 +137,33 @@ def git(
         encoding="utf-8",
         errors="replace",
         timeout=timeout,
+        input=input,
     )
     if check and proc.returncode != 0:
         raise GitError(args, proc.returncode, proc.stdout + proc.stderr)
     return proc
+
+
+def spawn(
+    args: list[str], *, cwd: Path | str | None = None, env_extra: dict[str, str] | None = None
+) -> subprocess.Popen:
+    """Start git without a shell, stdout and stderr on one text pipe.
+
+    The pipe reads with universal newlines: a progress line git ends with a
+    carriage return comes out of readline() as a line of its own.
+    """
+    log.debug("git %s (cwd=%s)", " ".join(args), cwd)
+    return subprocess.Popen(
+        _argv(args),
+        cwd=str(cwd) if cwd else None,
+        env=_env(env_extra),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
 
 
 def _out(args: list[str], cwd: Path | str, **kw) -> str:
@@ -281,9 +324,18 @@ def owner_takes_delivery(config: Config) -> bool:
     )
     return rc == 0 and output.strip().lower() == "updateinstead"
 
-#: Where the owner's branch lands in project.git. Outside refs/heads/, so it is
-#: not a branch anybody can clone, publish to or merge.
-_OWNER_REF = "refs/office/owner"
+#: The name the owner's repository goes by in project.git, for git-lfs.
+_OWNER_REMOTE = "owner"
+
+
+def _owner_ref(branch: str) -> str:
+    """Where the owner's `branch` lands in project.git.
+
+    A remote-tracking ref of _OWNER_REMOTE: outside refs/heads/, so not a branch
+    anybody can clone, publish to or merge, and what git-lfs reads as the
+    commits the owner's repository already has.
+    """
+    return f"refs/remotes/{_OWNER_REMOTE}/{branch}"
 
 
 def take_from_owner(config: Config, *, branch: str) -> Intake:
@@ -318,8 +370,9 @@ def _take_from_owner(config: Config, *, branch: str) -> Intake:
         )
 
     # Uncapped, here and at the fetch of the large files below.
+    owner_ref = _owner_ref(branch)
     rc, output = _owner_git(
-        ["fetch", "--no-tags", _posix(Path(repo)), f"+refs/heads/{branch}:{_OWNER_REF}"],
+        ["fetch", "--no-tags", _posix(Path(repo)), f"+refs/heads/{branch}:{owner_ref}"],
         cwd=project,
         timeout=None,
     )
@@ -328,7 +381,7 @@ def _take_from_owner(config: Config, *, branch: str) -> Intake:
             "failed", branch=branch, detail=f"Could not read '{branch}' from {repo}: {output}"
         )
 
-    incoming = _out(["rev-parse", "--verify", _OWNER_REF], project, check=False)
+    incoming = _out(["rev-parse", "--verify", owner_ref], project, check=False)
     mine = _out(["rev-parse", "--verify", f"refs/heads/{branch}"], project, check=False)
     if incoming == mine:
         return Intake("nothing", branch=branch, commit=mine, detail=_nothing_new(repo, branch))
@@ -336,7 +389,7 @@ def _take_from_owner(config: Config, *, branch: str) -> Intake:
            cwd=project, check=False).returncode == 0:
         # Only here, where the branch is about to move.
         rc, output = _owner_git(
-            ["lfs", "fetch", f"file:///{_posix(Path(git_dir))}", _OWNER_REF],
+            ["lfs", "fetch", f"file:///{_posix(Path(git_dir))}", owner_ref],
             cwd=project,
             timeout=None,
         )
@@ -486,18 +539,40 @@ def default_branch(config: Config) -> str:
 # --------------------------------------------------------------------------- setup
 
 
-def _lfs_push(source: Path, destination: Path, ref: str = "") -> tuple[int, str]:
-    """Send LFS objects from one repository into another over a file:// address.
+def _import_large_files(owner: Path, project: Path, branch: str) -> None:
+    """Copy into project.git every LFS object of its history the owner's repository
+    holds, then require every object of `branch`'s tip in project.git.
 
-    With a ref, only what that revision needs; without one, everything.
+    Objects of older commits the owner's store lacks are left out. Raises
+    GitError naming the tip's files whose objects did not come across.
     """
-    url = f"file:///{_posix(destination)}"
-    args = ["lfs", "push", url, ref] if ref else ["lfs", "push", "--all", url]
-    proc = git(args, cwd=source, check=False)
-    output = (proc.stdout + proc.stderr).strip()
-    if proc.returncode != 0:
-        log.warning("lfs push %s -> %s: %s", source, destination, output)
-    return proc.returncode, output
+    rc, output = _owner_git(
+        ["-c", "lfs.allowincompletepush=true", "lfs", "push", "--all",
+         f"file:///{_posix(project)}"],
+        cwd=owner,
+        timeout=None,
+    )
+    if rc != 0:
+        raise GitError(
+            ["init_project"], rc,
+            f"The history of {owner} came across, but its large files did not, so the import "
+            f"was undone: {output}",
+        )
+    # Each line: the object id, a marker, the path.
+    listed = git(["lfs", "ls-files", "--long", f"refs/heads/{branch}"], cwd=project).stdout
+    missing = []
+    for line in listed.splitlines():
+        oid, _, rest = line.partition(" ")
+        path = rest.partition(" ")[2]
+        if not (project / "lfs" / "objects" / oid[:2] / oid[2:4] / oid).is_file():
+            missing.append(path)
+    if missing:
+        raise GitError(
+            ["init_project"], 1,
+            f"The content of these large files on '{branch}' is not in {owner} itself, only "
+            f"their pointers: {', '.join(missing)}. The import was undone. Pull their content "
+            f"into {owner} (git lfs pull), then press this again.",
+        )
 
 
 def _first_commit(config: Config, project: Path, branch: str, readme: str) -> None:
@@ -633,7 +708,8 @@ def init_project(config: Config, *, branch: str, readme: str = "") -> dict[str, 
 
     Which of three things it does is read off that directory, not asked: a
     repository with commits is cloned into project.git and the copy's remote
-    dropped, keeping history, tags, submodules and LFS objects; a repository
+    dropped, keeping history, tags, submodules and the LFS objects that
+    repository holds, every object of `branch`'s tip among them; a repository
     with no commits gets an empty bare and a first commit; a directory that is
     no repository yet is made one first and then treated the same.
 
@@ -685,16 +761,10 @@ def init_project(config: Config, *, branch: str, readme: str = "") -> dict[str, 
             if status != "set":
                 raise GitError(["init_project"], 1, detail)
             if owner_has_history:
-                git(["clone", "--bare", _posix(owner), str(project)])
+                git(["clone", "--bare", _posix(owner), str(project)], env_extra=_OWNER_ENV)
                 git(["remote", "remove", "origin"], cwd=project, check=False)
-                rc, output = _lfs_push(owner, project)
-                if rc != 0:
-                    raise GitError(
-                        ["init_project"], rc,
-                        f"The history of {owner} came across, but its large files did not, so "
-                        f"the import was undone: {output}",
-                    )
                 _point_head(project, branch)
+                _import_large_files(owner, project, branch)
             else:
                 git(["init", "--bare", f"--initial-branch={branch}", str(project)])
                 _first_commit(config, project, branch, readme)
@@ -800,6 +870,43 @@ def _set_identity(repo: Path, agent: str) -> None:
     git(["config", "user.email", f"{agent}@office.local"], cwd=repo)
 
 
+def clone_args(config: Config, path: Path) -> list[str]:
+    """The arguments of the clone of project.git into `path` that borrows from the donor."""
+    # --dissociate is never passed: the clone must go on borrowing.
+    return [
+        "clone", "--recurse-submodules",
+        "--reference-if-able", _posix(config.seed_dir / ".git"),
+        "-c", "submodule.alternateLocation=superproject",
+        _posix(project_git(config)), str(path),
+    ]
+
+
+def clone_settings(config: Config) -> dict[str, str]:
+    """Configuration every clone_args() clone gets, apart from its LFS filters."""
+    endpoint = f"file:///{_posix(project_git(config))}"
+    return {
+        "submodule.recurse": "true",
+        "fetch.recurseSubmodules": "on-demand",
+        "diff.submodule": "log",
+        "status.submoduleSummary": "true",
+        "lfs.storage": _posix(config.lfs_dir),
+        "protocol.file.allow": "always",
+        # Both keys, and the address is written out rather than named by a
+        # remote.
+        "lfs.url": endpoint,
+        "lfs.pushurl": endpoint,
+    }
+
+
+def submodule_lfs_command(config: Config, filters: dict[str, str]) -> str:
+    """The `submodule foreach` command that gives a submodule the shared LFS store and `filters`."""
+    # Every value quoted.
+    return " && ".join(
+        [f'git config lfs.storage "{_posix(config.lfs_dir)}"']
+        + [f'git config {k} "{v}"' for k, v in filters.items()]
+    )
+
+
 def create_workspace(
     config: Config,
     owner: str,
@@ -829,27 +936,10 @@ def create_workspace(
         on_intake(intake)
     _refresh_donor(config)
 
-    # --dissociate is never passed: the workspace must go on borrowing.
-    args = [
-        "clone", "--recurse-submodules",
-        "--reference-if-able", _posix(config.seed_dir / ".git"),
-        "-c", "submodule.alternateLocation=superproject",
-        _posix(project_git(config)), str(path),
-    ]
-    git(args, env_extra={"GIT_LFS_SKIP_SMUDGE": "1"})
+    git(clone_args(config, path), env_extra={"GIT_LFS_SKIP_SMUDGE": "1"})
 
-    endpoint = f"file:///{_posix(project_git(config))}"
     settings = {
-        "submodule.recurse": "true",
-        "fetch.recurseSubmodules": "on-demand",
-        "diff.submodule": "log",
-        "status.submoduleSummary": "true",
-        "lfs.storage": _posix(config.lfs_dir),
-        "protocol.file.allow": "always",
-        # Both keys, and the address is written out rather than named by a
-        # remote.
-        "lfs.url": endpoint,
-        "lfs.pushurl": endpoint,
+        **clone_settings(config),
         # A workspace holds pointers; an agent that needs the contents of an
         # asset runs `git lfs pull -I <path>` itself.
         **_LFS_SKIP,
@@ -858,12 +948,8 @@ def create_workspace(
         git(["config", key, value], cwd=path)
     _set_identity(path, owner)
 
-    # Every value quoted.
-    sub_cmd = " && ".join(
-        [f'git config lfs.storage "{_posix(config.lfs_dir)}"']
-        + [f'git config {k} "{v}"' for k, v in _LFS_SKIP.items()]
-    )
-    git(["submodule", "foreach", "--recursive", sub_cmd], cwd=path, check=False)
+    git(["submodule", "foreach", "--recursive", submodule_lfs_command(config, _LFS_SKIP)],
+        cwd=path, check=False)
     _exclude_office(path)
     # The sandbox is a sibling of the clone, not a directory inside it.
     (config.scratch_dir / ws_id).mkdir(parents=True, exist_ok=True)
@@ -891,6 +977,10 @@ def publish(config: Config, path: Path | str) -> PublishResult:
 
     Nothing is pushed inside a submodule. A submodule holding commits that are
     not reachable from its own remote-tracking refs is named in the result.
+    The push runs none of the workspace's hooks.
+
+    The branch's large files go to project.git before the branch does, and the
+    branch does not go if they do not.
 
     Refuses a detached HEAD. A push to the branch project.git's HEAD names is
     refused by project.git's own pre-receive hook (_install_pre_receive).
@@ -912,20 +1002,30 @@ def publish(config: Config, path: Path | str) -> PublishResult:
         if stranded:
             result.unpublished_submodules.append(sub_path)
 
+    # The large files go first, to project.git whatever origin's configuration
+    # says. git-lfs sends those of the commits no remote-tracking ref of origin
+    # reaches; the branch push below moves those refs, so it must come after.
+    lfs_args = ["-c", f"remote.origin.lfspushurl=file:///{_posix(project_git(config))}",
+                "lfs", "push", "origin", branch]
+    sent = git(lfs_args, cwd=repo, check=False)
+    if sent.returncode != 0:
+        output = (sent.stdout + sent.stderr).strip()
+        raise GitError(
+            lfs_args, sent.returncode,
+            f"the large files on branch '{branch}' did not reach the office repository, so the "
+            f"branch was not published. Publish again once the files git-lfs names below hold "
+            f"their content in {repo}.\n{output}",
+        )
+
     # --recurse-submodules=no: nothing inside a submodule is pushed anywhere,
     # and that decision is made here rather than left to the workspace's config.
-    args = ["push", "--recurse-submodules=no", "origin", f"HEAD:refs/heads/{branch}"]
+    # No hook of the workspace's runs in this process.
+    args = ["-c", f"core.hooksPath={NO_HOOKS}", "push", "--recurse-submodules=no",
+            "origin", f"HEAD:refs/heads/{branch}"]
     pushed = git(args, cwd=repo, check=False)
     if pushed.returncode != 0:
         output = (pushed.stdout + pushed.stderr).strip()
         raise GitError(args, pushed.returncode, f"{_publish_refusal(branch, output)}\n{output}")
-    rc, output = _lfs_push(repo, project_git(config), branch)
-    if rc != 0:
-        raise GitError(
-            ["publish"], rc,
-            f"branch '{branch}' reached the office repository, but the large files it points at "
-            f"did not leave {repo}, so nothing can be merged from it yet: {output}",
-        )
     return result
 
 
@@ -971,6 +1071,8 @@ def _deliver(config: Config, *, branch: str, commit: str, source: str) -> Delive
     The objects the branch keeps outside its history go first, and the branch
     does not go at all if they do not arrive. ``source`` is the branch whose
     tree the commit carries, so it is the revision those objects belong to.
+    git-lfs sends the objects of the commits in `source` that no _owner_ref()
+    reaches; the intake before the merge has just written that ref.
     """
     repo = str(owner_repo(config))
     project = project_git(config)
@@ -980,9 +1082,12 @@ def _deliver(config: Config, *, branch: str, commit: str, source: str) -> Delive
                         repo=repo, branch=branch)
 
     # The two transfers below are uncapped.
-    url = f"file:///{_posix(Path(git_dir))}"
     rc, output = _owner_git(
-        ["lfs", "push", url, f"refs/heads/{source}"], cwd=project, timeout=None
+        ["-c", f"remote.{_OWNER_REMOTE}.url={_posix(Path(repo))}",
+         "-c", f"remote.{_OWNER_REMOTE}.lfspushurl=file:///{_posix(Path(git_dir))}",
+         "lfs", "push", _OWNER_REMOTE, f"refs/heads/{source}"],
+        cwd=project,
+        timeout=None,
     )
     if rc != 0:
         return Delivery(

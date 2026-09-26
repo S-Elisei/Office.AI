@@ -69,6 +69,19 @@ def mark_for(agent: str, turn: str | None = None) -> str:
     return f"{office_id()}:{agent}:{turn or '-'}"
 
 
+def run_mark(agent: str, handle: str) -> str:
+    """The mark of one stage run: the mark of `agent`'s commands, then `<handle>:`.
+
+    It is its own sweep scope, and agent_scope(agent) covers it.
+    """
+    return f"{mark_for(agent)}:{handle}:"
+
+
+def preparation_mark(stage: str) -> str:
+    """The mark of a stage's preparation, and its own sweep scope."""
+    return f"{office_id()}:office:{stage}:"
+
+
 def office_scope() -> str:
     """Everything this office has running, anywhere."""
     return f"{office_id()}:"
