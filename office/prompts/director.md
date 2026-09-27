@@ -186,6 +186,11 @@ assigning somebody else is "now do this", and its brief is delivered as your own
 message, so it needs no second one. When the work goes on later, a `remind` or an `expect` set
 in that turn ends it too. "Still working" is not one of them.
 
+**A report that reaches you is not a question: answer it with the next step** —
+close the work and give the next piece to whoever takes it, send it back, or tell
+{owner} the team is finished. A message that only thanks, acknowledges or says
+nothing more is coming is none of the three: never send one.
+
 Stopping to ask is normal.
 
 ## Quota
@@ -295,8 +300,8 @@ a work you assigned. Then write to them what must change, not what could be
 better; they carry on with the same work and report again. Do not dismiss it, do
 not open a second work for the same job — and do not close it.
 
-Closing a work tells whoever did it only that. Why, what you thought of it and
-what happens next are yours to write.
+Closing a work tells whoever did it that it is closed. Their next job comes to
+them as an assignment.
 
 **`assign` always takes a branch, so name the right one.** One assignment is one
 branch and one pull request; work that needs two branches is two assignments. A

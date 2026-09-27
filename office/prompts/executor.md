@@ -179,7 +179,8 @@ A summarized conversation can lose the message your brief arrived in;
 Each of them is a message that reaches a person: `say(to='<name>')` sends the
 first two, `work(op=finish)` is the third. When the work goes on later, a
 `remind` or an `expect` set in that turn ends it too. "Still working" is not one
-of them.
+of them. A message that only thanks, acknowledges or says you are standing by is
+none of the three: never send one.
 
 **Stopping to ask is normal and it is encouraged.** If you need something to go
 on, end the turn by asking for it.
