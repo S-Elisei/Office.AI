@@ -6,7 +6,6 @@ import logging
 import math
 import os
 import re
-import shutil
 import sqlite3
 import threading
 import time
@@ -34,6 +33,9 @@ COALESCE_SECONDS = 3.0
 # collapsed into the next one. Nothing is dropped.
 FUSE_TURNS = 6
 FUSE_WINDOW_SECONDS = 300.0
+
+# One delivery carries at most this many common-chat lines, the newest ones.
+COMMON_CHAT_DELIVERED = 50
 
 # How long an agent may produce no output at all before the office mentions it
 # to its manager (_report_silent_turn). Stored in minutes.
@@ -87,23 +89,6 @@ class _AgentState:
     # True for exactly as long as a compaction of this agent's session is
     # running. _start_turn refuses while it is set.
     compacting: bool = False
-
-
-def _drop_stale_snapshots(ws: Path) -> None:
-    """Delete `<ws>/.office/knowledge/` and `<ws>/.office/chat.md` if present.
-    Called at the start of a turn.
-
-    Best-effort and never fatal: a turn must not fail over this cleanup.
-    """
-    try:
-        stale_wiki = ws / ".office" / "knowledge"
-        if stale_wiki.exists():
-            shutil.rmtree(stale_wiki, ignore_errors=True)
-        stale_chat = ws / ".office" / "chat.md"
-        if stale_chat.exists():
-            stale_chat.unlink()
-    except Exception:
-        _log.exception("could not remove the stale wiki/chat snapshots at %s", ws)
 
 
 class Bus:
@@ -839,8 +824,6 @@ class Bus:
                 return False
 
             adapter = adapter_for(agent["runtime"], self.config)
-            # Nothing is written into the workspace for the agent to read.
-            _drop_stale_snapshots(ws)
             # Before the claim, not after: prepare_session rewrites the workspace
             # owner, and a workspace that changed hands drops the queue the previous
             # owner never read.
@@ -1024,7 +1007,7 @@ class Bus:
     #
     # Compaction is possible only while the agent is free, and only on claude.
 
-    def _busy_reason(self, agent_name: str) -> str | None:
+    def busy_reason(self, agent_name: str) -> str | None:
         """What a vendor process is doing on this agent's session at this instant,
                 in words, or None when nothing is.
 
@@ -1062,22 +1045,17 @@ class Bus:
                     if agent["runtime"] == "codex"
                     else "it has no such command"
                 )
-                + ". It relies on its own automatic compaction. agent(op=new_session) is the "
-                "other lever — it drops the conversation and the next turn starts from the "
-                "full state snapshot."
+                + "; agent(op=new_session) is the other lever."
             )
         if not agent["session_id"]:
             return "no session to compact yet"
         if self._workspace_of(agent_name) is None:
             return "no workspace"
-        busy = self._busy_reason(agent_name)
+        busy = self.busy_reason(agent_name)
         if busy is not None:
             # The one condition compaction shares with firing, asked of the one
-            # predicate that knows it (_busy_reason above).
-            return (
-                f"compaction is only possible while the agent is free — {busy} right now. "
-                "Ask again when it is idle."
-            )
+            # predicate that knows it (busy_reason above).
+            return f"compaction is only possible while the agent is free — {busy} right now"
         return None
 
     def compact(self, agent_name: str, actor: str | None = None) -> dict:
@@ -1220,11 +1198,10 @@ class Bus:
         """
         state = self._state(agent_name)
         with state.lock:
-            busy = self._busy_reason(agent_name)
+            busy = self.busy_reason(agent_name)
             if busy is not None:
                 return {"ok": False, "reason": (
-                    f"{busy} — {agent_name}'s session cannot be dropped while a process is "
-                    "speaking on it. Ask again when it is idle, or stop the turn first."
+                    f"{busy} — {agent_name}'s session cannot be dropped until it ends."
                 )}
             agent = db.query_one(self.conn, "SELECT id FROM agents WHERE name = ?", (agent_name,))
             if agent is None:
@@ -1242,12 +1219,10 @@ class Bus:
         """
         state = self._state(agent_name)
         with state.lock:
-            busy = self._busy_reason(agent_name)
+            busy = self.busy_reason(agent_name)
             if busy is not None:
                 return {"ok": False, "reason": (
-                    f"{busy} — {agent_name} cannot be fired while a process is speaking on it. "
-                    "Firing removes the session that process is continuing. Wait for it to end, "
-                    "or stop the turn first."
+                    f"{busy} — {agent_name} cannot be fired until it ends."
                 )}
             agent = db.query_one(self.conn, "SELECT id FROM agents WHERE name = ?", (agent_name,))
             if agent is None:
@@ -1654,6 +1629,7 @@ class _Pending:
     def build(cls, agent: dict, messages) -> "_Pending":
         pending = cls()
         name = agent["name"]
+        chat_lines: list[tuple[int, int]] = []  # (index in lines, message id)
         for row in messages:
             # The id first, the decision after: a row this agent is not
             # shown still has to be passed.
@@ -1684,8 +1660,17 @@ class _Pending:
                     continue
                 pending.lines.append(row["body"])
             else:
+                chat_lines.append((len(pending.lines), row["id"]))
                 pending.lines.append(f"[common chat, from {row['sender']}] {row['body']}")
 
+        left_out = len(chat_lines) - COMMON_CHAT_DELIVERED
+        if left_out > 0:
+            dropped = {index for index, _ in chat_lines[:left_out]}
+            pending.lines = [
+                f"[common chat] {left_out} earlier lines are not shown here; "
+                f"chat(before_id={chat_lines[left_out][1]}) can read them.",
+                *(line for index, line in enumerate(pending.lines) if index not in dropped),
+            ]
         return pending
 
 
@@ -1734,15 +1719,12 @@ def _work_ended_notice(
         when = _fmt_epoch(resume_after) if resume_after else None
         return (
             f"{head}\nPaused: {reason}" + (f", earliest resume {when}" if when else "") + ". "
-            "Nothing is waiting on it — decide whether to wait — then resume it with "
-            f"work_reassign(work={work_id}, to_agent={agent_name}, workspace='inherit') — move "
-            "the workspace to another runtime, or re-cut the job."
+            "Nothing resumes it by itself; "
+            f"work_reassign(work={work_id}, to_agent={agent_name}, workspace='inherit') does."
         )
     return (
-        f"{head}\nFailed: {reason}. Read its output tail with work(op=show, work={work_id}). The "
-        "workspace outlived the turn: work_reassign(workspace='inherit') carries its commits, "
-        "uncommitted changes and branch to whoever continues it — the same agent included — and "
-        "workspace='fresh' starts the brief again in a clean clone."
+        f"{head}\nFailed: {reason}. work(op=show, work={work_id}) shows its output tail; "
+        "work_reassign(workspace='inherit') carries its tree on, to the same agent included."
     )
 
 
@@ -1767,10 +1749,7 @@ def _lead_turn_died_notice(name: str, reason: str, resume_after) -> str:
         cause = "its context overflowed, and its next turn starts a fresh session"
     else:
         cause = reason
-    return (
-        f"[office] {name}'s turn died: {cause}. Whatever it was in the middle of stopped there; "
-        f"ask {name} where it had got to once it can answer."
-    )
+    return f"[office] {name}'s turn died: {cause}. What it was in the middle of stopped there."
 
 
 def _ending_nudge() -> str:
@@ -1778,17 +1757,11 @@ def _ending_nudge() -> str:
         word to anybody (_report_turn_ended_without_a_word).
     """
     return (
-        "[office] Your last turn ended without you sending anything to anybody and without "
-        "setting a `remind` or an `expect`. That is against your instructions: every turn ends with one of "
-        "three things — a question to whoever can answer it, an answer to whoever asked you, or "
-        "a report handing the work on — or, when the work goes on later, with a `remind` or an "
-        "`expect`. Nothing here wakes by itself, so a turn that ends silently "
-        "stops the office until a human notices. Decide which of these your last turn was and "
-        "do it now: a question or an answer goes with `say(to='<name>')`, and a report is "
-        "`assign` or `work(op=finish)`, whichever side of a work you are on. A message reaches somebody "
-        "only when it goes through the office — text you merely printed reached nobody. If you "
-        "genuinely were not finished, that is a question or a report of where you have got "
-        "to — not a reason to say nothing."
+        "[office] Your last turn ended without a question, an answer or a report to anybody, "
+        "and without a `remind` or an `expect`. Every turn ends with one of those. Decide which "
+        "your last turn was and do it now: a question or an answer is `say(to='<name>')`, a "
+        "report is `assign` or `work(op=finish)`. Text you printed reached nobody; only what "
+        "goes through the office does. If you were not finished, say where you have got to."
     )
 
 
@@ -1797,12 +1770,9 @@ def _wordless_turn_notice(agent_name: str) -> str:
         turns in a row without a word to anybody (_escalate_wordless_turn).
     """
     return (
-        f"[office] {agent_name} has ended two turns in a row without sending anything to "
-        "anybody — no question, no answer, no report — and without setting a `remind` or an "
-        f"`expect`. {agent_name} was told after the first "
-        "one and it happened again, so nothing further will be said to it. Nobody else has "
-        f"been told anything either: this is all there is. Ask {agent_name} what it is doing, "
-        "look at what is on its branch, or take the job elsewhere."
+        f"[office] {agent_name} has ended two turns in a row without a question, an answer or "
+        "a report to anybody, and without a `remind` or an `expect`. It was told after the "
+        "first one. Nobody else has been told."
     )
 
 
@@ -1864,23 +1834,14 @@ def _silent_turn_notice(agent_name: str, quiet_for: float, running_for: float, a
         f"(its turn has been running {_fmt_duration(running_for)})."
     )
     body = (
-        "This may be perfectly normal: a long test, a slow build or a hard think looks exactly "
-        "like this from outside, and the office cannot tell them from a wedged process — it is "
-        "reporting a silence, not passing a verdict. Nothing has been done to the agent."
+        "Nothing has been done to the agent; a long test or a slow build looks the same from "
+        "outside."
     )
     if actions:
         evidence = "The last things it was seen doing:\n" + "\n".join(actions)
     else:
-        evidence = (
-            "Nothing in the last 200 lines of its output parses as a tool call, so the office "
-            "cannot say what it is inside — it has been thinking or printing, not running "
-            "anything it named."
-        )
-    return (
-        f"{head}\n{body}\n{evidence}\n"
-        f"Whether to leave it alone, ask {agent_name} what it is doing, or stop it is yours; "
-        "nothing else will look."
-    )
+        evidence = "Nothing in the last 200 lines of its output is a tool call."
+    return f"{head}\n{body}\n{evidence}\nNothing else will look."
 
 
 def _wordless_turn_journal(agent_name: str) -> str:
@@ -1931,7 +1892,7 @@ def _expired_expectation_notice(about: str) -> str:
     """The office's message to an agent whose expectation came due unanswered."""
     return (
         f"[office] Nothing came about '{about}' within the time you gave, and the address you "
-        "handed out for it is closed. Look at the job through the service's own API."
+        "handed out for it is closed; the service's own API can say what became of it."
     )
 
 
@@ -1941,8 +1902,7 @@ def _lost_wake_notice(wake: dict) -> str:
     return "\n".join(
         [
             f"[office] The message you had set for {wake['recipient']} was not delivered: "
-            f"{wake['recipient']} is not a participant of this office any more. It has been "
-            "dropped, and nothing is re-delivered automatically.",
+            f"{wake['recipient']} is no longer a participant. It has been dropped.",
             f"  - {_excerpt(wake['body'])}",
         ]
     )
@@ -2083,8 +2043,8 @@ def _restart_delta(interrupted: list, leads: list[str]) -> str:
             f"These leads of yours were in a turn, which died with the hub: {', '.join(leads)}."
         )
     lines.append(
-        "Decide what to continue: work_reassign(workspace='inherit') carries each one on in the "
-        "tree it has, the same agent included."
+        "work_reassign(workspace='inherit') carries a work on in the tree it has, to the same "
+        "agent included."
     )
     return "\n".join(lines)
 

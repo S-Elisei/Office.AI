@@ -981,8 +981,9 @@ def publish(config: Config, path: Path | str) -> PublishResult:
     The branch's large files go to project.git before the branch does, and the
     branch does not go if they do not.
 
-    Refuses a detached HEAD. A push to the branch project.git's HEAD names is
-    refused by project.git's own pre-receive hook (_install_pre_receive).
+    Refuses a detached HEAD and the branch project.git's HEAD names; a push to
+    that branch is also refused by project.git's own pre-receive hook
+    (_install_pre_receive).
     """
     repo = Path(path)
     branch = _out(["rev-parse", "--abbrev-ref", "HEAD"], repo)
@@ -991,6 +992,13 @@ def publish(config: Config, path: Path | str) -> PublishResult:
             ["publish"], 1,
             "this workspace is on a detached HEAD, so there is no branch name to publish "
             "under. Create a branch (git switch -c <name>) and publish again.",
+        )
+    # Asked here as well as by pre-receive: a push that moves nothing runs no hook.
+    if branch == default_branch(config):
+        raise GitError(
+            ["publish"], 1,
+            f"'{branch}' is the office's main branch, and only a merge writes to it. Put this "
+            "work on a branch of its own (git switch -c <name>) and publish again.",
         )
     result = PublishResult(branch)
 

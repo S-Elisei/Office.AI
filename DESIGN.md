@@ -65,8 +65,9 @@ owner is a named participant like any other — the setting `owner_name`, defaul
 belongs to the office itself.
 
 Two names are refused when hiring: the owner's and `office`. A name is an
-identity, and taking either would hand an agent the other's authority. A name may
-not contain a colon.
+identity, and taking either would hand an agent the other's authority. An agent's
+name is Latin letters, digits, `.`, `_` and `-`, starting and ending with a letter or
+a digit; the owner's name may not contain a colon.
 
 A local service is not a participant. It answers an agent's expectation (section
 4), and its message arrives from `hook:<service>`, a sender no participant can be.
@@ -74,7 +75,8 @@ A local service is not a participant. It answers an agent's expectation (section
 
 **The owner hires the director**, on the main page, once — it is the only hire
 control in the interface. Afterwards the owner changes the director's runtime,
-model and effort from the settings page. `agent(op=fire)` refuses a director
+model and effort from the settings page; a runtime change is refused while a turn
+or a compaction runs on the director's session. `agent(op=fire)` refuses a director
 target; no tool lets an agent change anyone's model, its own included.
 
 The owner's interface carries authority (rules, wiki, the director's settings,
@@ -362,8 +364,8 @@ for agy it is `injectSteps[].ephemeralMessage`, plus
 returns `{}` for codex and agy, and nothing at all for claude; for agy that `{}`
 is what stops `force_continue` continuing the turn forever.
 
-The injected text carries a preamble marking it as data rather than as an
-instruction from the environment.
+The injected text opens with one line saying that these are office messages that
+arrived during the turn.
 
 agy needs no tool call: its boundary is a model call, so an agy agent that only
 ever thinks still gets its messages inside the turn. On a weak model a turn can
@@ -399,7 +401,9 @@ as its own `[office]`-prefixed body.
 
 An agent never receives its own messages. The watermark moves past them anyway.
 
-A single delivery always carries everything accumulated. Wakes coalesce over a
+A single delivery always carries everything accumulated, except that of the
+common chat it carries the newest 50 lines, after a line saying how many earlier
+ones were left out and which `chat(before_id=…)` call can read them. Wakes coalesce over a
 3-second window; the bus ticks once a second; the fuse allows at most 6 wakes per
 agent in 300 seconds, with extras collapsing while the queue keeps growing. The
 environment never interrupts a turn that has started.
@@ -793,8 +797,9 @@ own words — is appended to the task. It refuses a `failed` work by name.
 
 Moving a task to `done` deletes every work still on it, so it is an act on those
 works: it is refused unless each of them is within the caller's reach for
-`work_close` — its assignee in the caller's subtree, or the caller its assigner. An
-executor can move to `done` only a task with no works.
+`work_close` — its assignee in the caller's subtree, or the caller its assigner. It
+is also refused while a work on it has reported and waits to be closed, naming that
+work. An executor can move to `done` only a task with no works.
 
 `fail_work` keeps the row: it holds the tail, and its assigner and every manager
 above its assignee see it in `roster()` until the work is reassigned, its task is
@@ -827,7 +832,8 @@ TicketComment { id, ticket_id, author, body, created_at }
 
 **A ticket wakes nobody and sends nothing** — not on creation, not on a comment,
 not on resolution. What is open and what is resolved is read with
-`ticket(op=list|read)`; tickets addressed to the owner appear on his main page.
+`ticket(op=list|read)`; `list` gives the open tickets unless `status` names
+`resolved` or `all`. Tickets addressed to the owner appear on his main page.
 `task_id` is an optional link.
 
 Resolved tickets are kept forever.
@@ -1015,11 +1021,13 @@ the shared store refuses the publish by name. Then one push with
 `core.hooksPath` points at a path that cannot be created. `project.git`'s own
 `pre-receive` still runs on that push.
 
-**Publishing to the main branch is rejected**, separately by `project.git`'s
-`pre-receive` hook: an agent has a real shell, and its workspace's `origin` is
-`project.git` at a local path, so refusing inside `publish()` alone would hold only
-until the first hand-typed command. The hook reads the branch name from `HEAD` at
-push time, so it follows it. Merge and intake move branches with `update-ref`,
+**Publishing to the main branch is rejected**, by `publish()` and separately by
+`project.git`'s `pre-receive` hook: an agent has a real shell, and its workspace's
+`origin` is `project.git` at a local path, so refusing inside `publish()` alone
+would hold only until the first hand-typed command. The hook reads the branch name
+from `HEAD` at push time, so it follows it. A push that moves nothing runs no hook,
+so `publish()` refuses the main branch itself, and no pull request ever has it as
+its source. Merge and intake move branches with `update-ref`,
 which runs no hooks.
 
 The only writer of the main branch is the merge, under a lock.

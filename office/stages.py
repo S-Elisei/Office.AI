@@ -37,9 +37,9 @@ _LFS_ORDINARY = {
     "filter.lfs.required": "true",
 }
 
-_RECREATE = "Delete the stage and create it again."
+_RECREATE = "The stage is unusable until it is deleted and created again."
 
-_RESET_AGAIN = "Reset the stage to try again."
+_RESET_AGAIN = "The stage is unusable until it is reset."
 
 #: How long a kill waits for a run or a preparation to end before it gives up on it.
 _KILL_WAIT_SECONDS = 10.0
@@ -343,8 +343,7 @@ def _closed(conn, name: str) -> str | None:
         prep = live.preparation
         now = time.monotonic()
         return (f"stage '{name}' is being prepared: for {_fmt(now - prep.started_at)}, last "
-                f"output {_fmt(now - prep.last_output_at)} ago. Run on it once it is ready; "
-                "set yourself a remind() to try again.")
+                f"output {_fmt(now - prep.last_output_at)} ago. It takes runs once it is ready.")
     if row["state"] == "broken":
         return (f"stage '{name}' is broken: {row['reason']}\nOnly the director can reset it, or "
                 "delete it and create it again.")
@@ -459,8 +458,8 @@ def _cancel(prep: _Preparation) -> bool:
     return not prep.thread.is_alive()
 
 
-_SURVIVED = ("its preparation did not end when it was killed. Ask the owner to stop what is "
-             "left of it — the owner's journal names any process that survived — then try again.")
+_SURVIVED = ("its preparation did not end when it was killed; what survived is in the owner's "
+             "journal, and only the owner can stop it.")
 
 
 # --------------------------------------------------------------------------- management

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Request
 
 from office import core, db, git
 from office.bus import SILENCE_NOTICE_DEFAULT_MINUTES, SILENCE_NOTICE_SETTING
-from office.web.deps import get_config, get_db, get_owner_name, read_form
+from office.web.deps import get_bus, get_config, get_db, get_owner_name, read_form
 from office.web.templating import templates
 
 router = APIRouter()
@@ -226,6 +226,13 @@ async def apply_director_model(request: Request):
     model = data.get("model", "").strip()
     effort = data.get("effort", "").strip() or None
     owner_name = get_owner_name(conn)
+    busy = get_bus(request).busy_reason(director["name"]) if runtime != director["runtime"] else None
+    if busy is not None:
+        ctx = _context(
+            request, form=data,
+            error=f"The runtime cannot change while {busy}: wait for it to end, or stop it, and apply again.",
+        )
+        return templates.TemplateResponse(request, "partials/settings_form.html", ctx, status_code=400)
     try:
         result = core.update_agent_model(
             conn, director["id"], runtime=runtime, model=model, effort=effort, actor=owner_name

@@ -175,7 +175,7 @@ def _check_participant(conn, recipient: str) -> None:
         conn, "SELECT 1 FROM agents WHERE name = ?", (recipient,)
     )
     if not known:
-        raise ValueError(f"no participant named '{recipient}' — check the name and try again")
+        raise ValueError(f"no participant named '{recipient}'")
 
 
 CHAT_PAGE_SIZE = 30
@@ -252,10 +252,7 @@ def schedule_message(conn, sender: str, recipient: str, body: str, in_seconds: i
     """
     in_seconds = _seconds_ahead("in_seconds", in_seconds)
     if recipient == "all":
-        raise ValueError(
-            "'all' is the common chat and it wakes nobody, so a deferred post to it would arrive "
-            "and do nothing — name the participant who should be woken"
-        )
+        raise ValueError("'all' is not a recipient here — name the participant who should be woken")
     _check_participant(conn, recipient)
     with db.transaction(conn):
         cur = db.execute(
@@ -282,10 +279,7 @@ def _seconds_ahead(arg: str, value) -> int:
     if value < 0:
         raise ValueError(f"{arg} cannot be negative — it counts forward from now")
     if value > MAX_WAKE_SECONDS:
-        raise ValueError(
-            f"{arg} is at most {MAX_WAKE_SECONDS} (seven days); {value} is further off than "
-            "the office will hold it"
-        )
+        raise ValueError(f"{arg} is at most {MAX_WAKE_SECONDS} (seven days)")
     return value
 
 
@@ -557,6 +551,9 @@ def list_profiles(conn) -> list[dict]:
 # --------------------------------------------------------------------------- agents & workspaces
 
 
+_AGENT_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+
+
 def hire(
     conn,
     config: Config,
@@ -590,20 +587,13 @@ def hire(
     _check_model_choice(conn, runtime, model, effort)
     owner_name = get_owner_name(conn)
     if name == owner_name:
-        raise ValueError(
-            f"'{name}' is the owner's own name — an agent cannot be hired under it "
-            "(it would inherit the right to resolve tickets addressed to him)"
-        )
+        raise ValueError(f"'{name}' is the owner's own name — an agent cannot be hired under it")
     if name == OFFICE_SENDER:
+        raise ValueError(f"'{name}' is the office's own name — an agent cannot be hired under it")
+    if not _AGENT_NAME.fullmatch(name):
         raise ValueError(
-            f"'{name}' is the office's own name — an agent cannot be hired under it "
-            "(it would be able to sign messages as the office)"
-        )
-    if ":" in name:
-        raise ValueError(
-            f"'{name}' cannot contain a colon — a name is also a URL segment, a log field "
-            "and part of the mark the office tracks that agent's processes by, where a "
-            "colon separates one agent from another. Pick a name without one."
+            f"'{name}' is not a usable name. Use Latin letters, digits, '.', '_' and '-', "
+            "starting and ending with a letter or a digit — for example 'ui-designer'."
         )
     existing = db.query_one(conn, "SELECT id FROM agents WHERE name = ?", (name,))
     if existing is not None:
@@ -727,8 +717,7 @@ def fire(conn, agent_id: int, actor: str | None = None) -> None:
     if authored:
         named = ", ".join(f"#{p['id']} '{p['title']}'" for p in authored)
         raise ValueError(
-            f"agent '{agent['name']}' still has {named} standing — merge or close it before "
-            "firing them; a pull request keeps the name of whoever wrote it"
+            f"agent '{agent['name']}' still has {named} standing — merge or close it before firing"
         )
     with db.transaction(conn):
         wakes = db.execute(
@@ -828,14 +817,13 @@ def set_instructions(conn, agent_id: int, text: str, actor: str | None = None) -
               actor=actor)
     if value is None:
         line = (
-            "[office] Your standing instructions have been cleared. Disregard the standing "
-            "instructions in your system prompt from now on."
+            "[office] Your standing instructions have been cleared; those in your system prompt "
+            "no longer stand."
         )
     else:
         line = (
-            "[office] Your standing instructions have been rewritten. This replaces the standing "
-            "instructions in your system prompt — work from this text from now on."
-            "\n\n" + value
+            "[office] Your standing instructions are now these, replacing those in your system "
+            "prompt:\n\n" + value
         )
     tell_quietly(conn, agent["name"], line)
     return True
@@ -946,8 +934,6 @@ def update_agent_model(
     `dry_run` asks for the classification without writing anything.
     """
     agent = _row(conn, "agents", "id", agent_id)
-    if agent is None:
-        raise ValueError(f"no such agent {agent_id}")
 
     new_runtime = runtime if runtime is not None else agent["runtime"]
     new_model = model if model is not None else agent["model"]
@@ -1010,16 +996,13 @@ def start_new_session(conn, agent_id: int) -> dict:
     working tree are untouched, and the next turn finds nothing to resume, so it
     starts a fresh session and the bus hands it the full state snapshot.
     """
-    agent = _row(conn, "agents", "id", agent_id)
-    if agent is None:
-        raise ValueError(f"no such agent {agent_id}")
     with db.transaction(conn):
         db.execute(conn, "UPDATE agents SET session_id = NULL WHERE id = ?", (agent_id,))
     return _row(conn, "agents", "id", agent_id)
 
 
 
-def record_quota(conn, snapshots, actor: str | None = None) -> int:
+def record_quota(conn, snapshots) -> int:
     """Store a poll's worth of quota buckets, and tell the page about it.
 
     One row per (runtime, label), shared by every agent of that runtime.
@@ -1074,7 +1057,7 @@ def record_quota(conn, snapshots, actor: str | None = None) -> int:
             )
             changed += cur.rowcount
         if changed:
-            _emit(conn, "quota", "quota", None, {"runtime": snapshots[0].runtime}, actor=actor)
+            _emit(conn, "quota", "quota", None, {"runtime": snapshots[0].runtime})
     return changed
 
 
@@ -1766,10 +1749,9 @@ def close_work(conn, work_id: int, summary: str | None = None, *, actor: str) ->
     check_work_reach(conn, _row(conn, "agents", "name", actor), work, "work_close")
     if work["status"] == "failed":
         raise ValueError(
-            f"work {work_id} died ({work['fail_reason']}) — it delivered no result and cannot be "
-            "closed as though it had. Read its output tail with work(op=show, "
-            f"work={work_id}), then write it off with work_dismiss or hand the tree on with "
-            "work_reassign(workspace='inherit')"
+            f"work {work_id} failed ({work['fail_reason']}) and is not closed: work_dismiss writes "
+            "it off, work_reassign(workspace='inherit') hands it on, and work(op=show, "
+            f"work={work_id}) shows its output tail"
         )
     agent_name = _agent_name(conn, work["agent_id"])
     with db.transaction(conn):
@@ -1786,9 +1768,7 @@ def close_work(conn, work_id: int, summary: str | None = None, *, actor: str) ->
     if actor != agent_name:
         tell_quietly(
             conn, agent_name,
-            f"[office] Work {work_id} is closed by {actor} — it is off your hands. Nothing "
-            "further is expected on it and it is not reported again; anything more on this "
-            "subject would come as a new assignment."
+            f"[office] Work {work_id} is closed by {actor}; nothing further is expected on it."
             + (f" Accepted as: {summary}" if summary else ""),
         )
     # The row no longer exists, so this is the last copy of it.
@@ -1862,9 +1842,7 @@ def dismiss_work(conn, work_id: int, *, actor: str) -> dict:
         raise ValueError(
             f"work {work_id} is "
             f"{ {'running': 'open', 'done': 'reported'}.get(work['status'], work['status']) }, "
-            "not failed — only a work that has already died can be written off. Close it with "
-            "work_close, or hand it on with work_reassign; agent(op=stop) ends a turn that is "
-            "running on it"
+            "not failed: only a failed work is written off"
         )
     agent_name = _agent_name(conn, work["agent_id"])
     with db.transaction(conn):
@@ -2002,8 +1980,7 @@ def reassign_work(
         tell_quietly(
             conn, name,
             f"[office] Your workspace is now {ws['path']} and your sandbox "
-            f"{config.scratch_dir / ws['id']}. Work there from now on; the paths in your "
-            "system prompt are out of date.",
+            f"{config.scratch_dir / ws['id']}; the paths in your system prompt no longer hold.",
         )
     return _row(conn, "works", "id", work_id)
 
@@ -2055,6 +2032,7 @@ def publish_workspace(conn, config: Config, agent_id: int) -> git.PublishResult:
 
 
 def create_ticket(conn, *, title: str, body: str | None, author: str, addressee: str, kind: str, task_id: int | None = None) -> dict:
+    _check_participant(conn, addressee)
     with db.transaction(conn):
         cur = db.execute(
             conn,
@@ -2322,10 +2300,9 @@ def announce_intake(conn, intake: git.Intake | None) -> None:
         conn,
         OFFICE_SENDER,
         "all",
-        f"The main branch '{intake.branch}' has moved to {intake.commit[:10]}: work done outside "
-        "the office has come in. Take it into anything you have open now "
-        f"(git fetch origin, then git merge origin/{intake.branch}); a branch that "
-        "does not contain it cannot be merged.",
+        f"The main branch '{intake.branch}' has moved to {intake.commit[:10]}: work from outside "
+        "the office has come in. A branch that does not contain it cannot be merged "
+        f"(git fetch origin, then git merge origin/{intake.branch}).",
     )
 
 
@@ -2584,9 +2561,7 @@ def undo_wiki_page(conn, path: str, actor: str | None = None) -> dict:
     if page is None:
         raise ValueError(f"no wiki page '{path}'")
     if page["prev_body"] is None:
-        raise ValueError(
-            f"wiki page '{path}' has only ever been written once — there is nothing behind it"
-        )
+        raise ValueError(f"wiki page '{path}' has been written once; there is nothing to go back to")
     new_version = page["version"] + 1
     with db.transaction(conn):
         db.execute(
@@ -2656,8 +2631,7 @@ def create_rule(conn, text: str, created_by: str, title: str) -> dict:
         _emit(conn, "rules", "rule", rule_id, {"title": title, "text": text}, actor=created_by)
     _announce_rule(
         conn, created_by,
-        f"A project rule was added by {created_by} and stands over the whole office from now on "
-        f"— [{rule_id}] {title}: {text}",
+        f"A project rule was added by {created_by} — [{rule_id}] {title}: {text}",
     )
     return _row(conn, "rules", "id", rule_id)
 
@@ -2688,6 +2662,6 @@ def delete_rule(conn, rule_id: int, actor: str | None = None) -> None:
     if rule is not None:
         _announce_rule(
             conn, actor,
-            f"A project rule was withdrawn by {actor or 'the owner'} and no longer stands — "
+            f"A project rule was withdrawn by {actor or 'the owner'} — "
             f"[{rule_id}] {rule['title'] or 'untitled'}: {rule['text']}",
         )
