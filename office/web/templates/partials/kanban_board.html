@@ -1,24 +1,47 @@
 {% include "partials/notice.html" %}
 
+<nav class="kanban-crumbs">
+  {% if flat %}
+  <a href="/kanban">Top level</a> <span class="text-faint">›</span> <span>All tasks, flat</span>
+  {% else %}
+  {% if chain %}
+  <a href="/kanban">Top level</a>
+  {% for c in chain %}
+  <span class="text-faint">›</span>
+  {% if loop.last %}<span>#{{ c.id }} {{ c.title }}</span>{% else %}<a href="/kanban?parent={{ c.id }}">#{{ c.id }} {{ c.title }}</a>{% endif %}
+  {% endfor %}
+  {% else %}
+  <span>Top level</span>
+  {% endif %}
+  <span class="text-faint">·</span> <a href="/kanban?flat=1">All tasks, flat</a>
+  {% endif %}
+</nav>
+
 {# `data-office-details` keeps it open across a refresh. #}
-<details class="panel collapse-panel" data-office-details="kanban-new-task" style="margin-bottom: 14px;">
+<details class="panel collapse-panel" data-office-details="kanban-new-task" style="margin-bottom: 14px;"{% if form %} open{% endif %}>
   <summary>New task</summary>
   <div class="body">
     {# data-office-required: the button is dead and grey until the title has
        something in it. #}
-    <form method="post" action="/kanban/tasks" hx-post="/kanban/tasks" hx-target="#kanban-board" hx-swap="innerHTML"
-          data-office-required="title">
+    <form method="post" action="/kanban/tasks?{{ view_query }}" hx-post="/kanban/tasks?{{ view_query }}"
+          hx-target="#kanban-board" hx-swap="innerHTML" data-office-required="title">
       <div class="form-row">
         <label for="kt-title">Title</label>
-        <input id="kt-title" name="title" type="text" required>
+        <input id="kt-title" name="title" type="text" value="{{ form.title if form else '' }}" required>
       </div>
       <div class="form-row">
         <label for="kt-body">Body</label>
-        <textarea id="kt-body" name="body" style="min-height: 70px;"></textarea>
+        <textarea id="kt-body" name="body" style="min-height: 70px;">{{ form.body if form else '' }}</textarea>
       </div>
       <div class="form-row">
-        <span class="hint">New tasks land in <strong>Idea</strong>. Nobody is notified: the board is not an
-          inbox. If it should be looked at now, say so to the director in chat.</span>
+        <label for="kt-parent">Parent task</label>
+        <input id="kt-parent" name="parent" type="number" min="1" step="1" placeholder="none — top level"
+               value="{{ form.parent if form else (parent or '') }}">
+      </div>
+      <div class="form-row">
+        <span class="hint">New tasks land in <strong>Idea</strong>, under the parent task when one is given.
+          Nobody is notified: the board is not an inbox. If it should be looked at now, say so to the director
+          in chat.</span>
       </div>
       <div class="form-actions">
         <button type="submit" class="primary" disabled>Create task</button>
@@ -33,19 +56,24 @@
   <div class="kanban-col">
     <header>
       <span>{{ label }}</span>
-      <span class="count">{{ (by_status.get(status, [])) | length }}</span>
+      <span class="count">{{ done_total if status == 'done' else (by_status.get(status, []) | length) }}</span>
     </header>
     <div class="kanban-cards" id="kanban-cards-{{ status }}">
       {% for t in by_status.get(status, []) %}
       <div class="card">
-        <button type="button" class="card-open" hx-get="/fragments/kanban/task/{{ t.id }}"
+        <button type="button" class="card-open" hx-get="/fragments/kanban/task/{{ t.id }}?{{ view_query }}"
                 hx-target="#task-dialog-body" hx-swap="innerHTML"
                 onclick="document.getElementById('task-dialog').showModal()">{{ t.title }}</button>
         {% set sig = signals.works.get(t.id, []) %}
         {% set tks = signals.tickets.get(t.id, []) %}
-        {% set blk = blocker_ids.get(t.id, []) %}
-        {% if sig or tks or blk %}
+        {% if t.children or sig or tks or t.blockers %}
         <div class="card-signals">
+          {% if t.children %}
+          <a class="chip" href="/kanban?parent={{ t.id }}" title="open the board of its children">
+            <svg class="chip-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.4 2.4v8.8h4.2M3.4 6.4h4.2"/><rect x="8.4" y="4.8" width="5" height="3.2" rx=".7"/><rect x="8.4" y="9.6" width="5" height="3.2" rx=".7"/></svg>
+            {{ t.open_children }} open · {{ t.done_children }} done
+          </a>
+          {% endif %}
           {% for w in sig %}
           <span class="chip" title="work">
             <svg class="chip-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.6 8h2.8l1.8-4.4L9 12.6l1.8-4.6h2.6"/></svg>
@@ -58,10 +86,10 @@
             #{{ k.id }} {{ k.status }} · {{ k.addressee }}
           </span>
           {% endfor %}
-          {% if blk %}
+          {% if t.blockers %}
           <span class="chip warn" title="blocked by another task">
             <svg class="chip-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.6" width="3.2" height="10.8" rx=".7"/><rect x="6.4" y="2.6" width="3.2" height="7" rx=".7"/><rect x="10.8" y="2.6" width="3.2" height="9" rx=".7"/></svg>
-            blocked by task {{ blk | map('string') | join(', ') }}
+            blocked by task {{ t.blockers | map('string') | join(', ') }}
           </span>
           {% endif %}
         </div>
@@ -70,6 +98,9 @@
       {% else %}
       <div class="empty">Empty</div>
       {% endfor %}
+      {% if status == 'done' and done_total > done_shown %}
+      <a class="kanban-more" href="/kanban?{{ all_done_query }}">{% if all_done %}Show the latest {{ done_shown }}{% else %}Show all {{ done_total }}{% endif %}</a>
+      {% endif %}
     </div>
   </div>
   {% endfor %}

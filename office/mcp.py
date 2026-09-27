@@ -182,15 +182,96 @@ def _h_expect(conn, config, agent_name, role, args) -> str:
     )
 
 
+_TASK_LIST_LINES = 200
+_TASK_LIST_CHARS = 16000
+
+
+def _capped(lines: list[str], left_out: str) -> list[str]:
+    """At most _TASK_LIST_LINES of `lines` and _TASK_LIST_CHARS characters, the
+    first line whatever its size, then a line counting the rest, worded by
+    `left_out`."""
+    shown: list[str] = []
+    size = 0
+    for line in lines:
+        if len(shown) == _TASK_LIST_LINES or (shown and size + len(line) > _TASK_LIST_CHARS):
+            break
+        shown.append(line)
+        size += len(line) + 1
+    if len(shown) < len(lines):
+        shown.append(f"{len(lines) - len(shown)} more {left_out}")
+    return shown
+
+
+def _read_task(conn, task_id) -> str:
+    found = core.get_task(conn, task_id)
+    if found is None:
+        raise ValueError(f"no such task {task_id} — task(op=list) shows the board")
+    task = found["task"]
+    lines = [f"#{task['id']} [{task['status']}] {task['title']}"]
+    if found["chain"]:
+        lines.append("Under " + ", under ".join(f"#{t['id']} {t['title']}" for t in found["chain"]))
+    else:
+        lines.append("Top level.")
+    lines.append(task["body"] if task["body"] else "(no body)")
+    if task["result"]:
+        lines.append(f"Result:\n{task['result']}")
+    if found["children"]:
+        lines.append(f"Children ({len(found['children'])}):")
+        lines.extend(
+            _capped(
+                ["  " + core.task_line(t) for t in found["children"]],
+                f"child task(s) left out — task(op=list, parent={task['id']}) with status or query narrows them",
+            )
+        )
+    for heading, deps in (
+        ("Depends on (they finish first)", found["depends_on"]),
+        ("Needed by (they wait for this one)", found["needed_by"]),
+    ):
+        if deps:
+            lines.append(f"{heading}:")
+            lines.extend(f"  #{t['id']} [{t['status']}] {t['title']}" for t in deps)
+    if found["works"]:
+        lines.append("Works:")
+        lines.extend(
+            f"  work {w['id']}: {w['agent']}, assigned by {w['assigner']} "
+            f"[{ {'running': 'open', 'done': 'reported'}.get(w['status'], w['status']) }]"
+            for w in found["works"]
+        )
+    if found["tickets"]:
+        lines.append("Tickets:")
+        lines.extend(f"  ticket {t['id']} [{t['status']}] {t['title']}" for t in found["tickets"])
+    return "\n".join(lines)
+
+
 def _h_task(conn, config, agent_name, role, args) -> str:
     op = args.get("op")
+    if op == "list":
+        tasks = core.list_tasks(
+            conn, parent=args.get("parent") or None, status=args.get("status"), query=args.get("query") or None
+        )
+        if not tasks:
+            if args.get("status"):
+                return "no task matches"
+            return "no task matches among those not done — status=all includes the done ones"
+        return "\n".join(
+            _capped([core.task_line(t) for t in tasks], "task(s) left out — narrow with parent, status or query")
+        )
+    if op == "read":
+        _require(args, "task_id")
+        return _read_task(conn, args["task_id"])
     if op == "create":
         _require(args, "title")
-        task = core.create_task(conn, args["title"], args.get("body"), args.get("status", "idea"), actor=agent_name)
+        task = core.create_task(
+            conn, args["title"], args.get("body"), args.get("status", "idea"), actor=agent_name,
+            parent=args.get("parent") or None,
+        )
         return f"task {task['id']} created: {task['title']} [{task['status']}]"
     if op == "update":
         _require(args, "task_id")
-        task = core.update_task(conn, args["task_id"], title=args.get("title"), body=args.get("body"), actor=agent_name)
+        task = core.update_task(
+            conn, args["task_id"], title=args.get("title"), body=args.get("body"), parent=args.get("parent"),
+            actor=agent_name,
+        )
         return f"task {task['id']} updated"
     if op == "move":
         _require(args, "task_id", "status")
@@ -209,7 +290,7 @@ def _h_task(conn, config, agent_name, role, args) -> str:
             return f"task {args['task_id']} no longer depends on task {args['depends_on']}"
         core.link_tasks(conn, args["depends_on"], args["task_id"], actor=agent_name)
         return f"task {args['task_id']} now depends on task {args['depends_on']}"
-    raise ValueError(f"task: unknown op '{op}' — expected create, update, move, or link")
+    raise ValueError(f"task: unknown op '{op}' — expected list, read, create, update, move, or link")
 
 
 def _h_work(conn, config, agent_name, role, args) -> str:
@@ -1455,9 +1536,21 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "task": types.Tool(
         name="task",
-        description="Manage kanban tasks. A task is a card on the board — one piece of the project, "
-        "at whatever size the owner asks for. Works are the assignments made against it: a task may "
-        "gather several, and each one closed appends its result line to the task. "
+        description="Read and manage the board of kanban tasks. A task is a card on the board — one "
+        "piece of the project, at whatever size the owner asks for. A task may sit under a parent "
+        "task; a task with no parent is top-level. Works are the assignments made against a task: a "
+        "task may gather several, and each one closed appends its result line to the task. "
+        "list prints one line per task: id, status, title, its children's counts (open / done) and "
+        "the dependencies that are not done. Without parent and query it lists the top-level "
+        "tasks; with parent, that task's children. query is a regular expression matched "
+        "case-insensitively against titles: alone it searches the whole board, with parent "
+        "everything under that task at any depth. status keeps one status, or all; without it "
+        "done tasks are left out. A long answer is cut, and its last line says how many tasks "
+        "were left out. read gives one task in full: body, result, the chain of parents up to the "
+        "top, the children, the dependencies both ways, the works on it and the tickets linked to "
+        "it. create takes an optional parent. update with parent moves a task under another task, "
+        "with parent=0 to the top level; a task cannot go under itself or under a task inside it. "
+        "A parent's status does not follow its children's. "
         "move with status='done' requires result and closes the task with that line. Works "
         "still open on it are deleted with it, and their assignees are not told. It is refused while a work on the task has reported "
         "and is waiting to be closed, and while a work on it is one you could not close with "
@@ -1467,14 +1560,27 @@ _TOOLS: dict[str, types.Tool] = {
         input_schema={
             "type": "object",
             "properties": {
-                "op": {"type": "string", "enum": ["create", "update", "move", "link"]},
-                "task_id": {"type": "integer", "description": "Required for update, move, link (the dependent task)."},
+                "op": {"type": "string", "enum": ["list", "read", "create", "update", "move", "link"]},
+                "task_id": {
+                    "type": "integer",
+                    "description": "Required for read, update, move, link (the dependent task).",
+                },
                 "title": {"type": "string"},
                 "body": {"type": "string"},
+                "parent": {
+                    "type": "integer",
+                    "description": "For list: the task whose children to list. Optional for create: the "
+                    "task to file it under. For update: the task to move it under, 0 for the top level.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "For list: a regular expression matched case-insensitively against titles.",
+                },
                 "status": {
                     "type": "string",
-                    "enum": ["idea", "planned", "needs_clarification", "in_progress", "paused", "done"],
-                    "description": "Required for move.",
+                    "enum": ["idea", "planned", "needs_clarification", "in_progress", "paused", "done", "all"],
+                    "description": "Required for move. Optional for create, default idea. Optional for "
+                    "list: one status, or all; without it every status but done.",
                 },
                 "position": {"type": "integer", "description": "Optional order within the column, for move."},
                 "result": {"type": "string", "description": "One-line outcome, required for move to status=done."},

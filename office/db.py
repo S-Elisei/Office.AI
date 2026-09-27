@@ -25,6 +25,7 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # A rule's short name.
     ("rules", "title", "TEXT"),
     ("wiki", "prev_body", "TEXT"),
+    ("tasks", "parent_task_id", "INTEGER REFERENCES tasks(id)"),
 )
 
 

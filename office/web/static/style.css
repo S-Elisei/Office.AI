@@ -570,6 +570,30 @@ main > .subtitle {
   color: var(--warn, #c98a00);
 }
 
+a.chip {
+  text-decoration: none;
+}
+
+a.chip:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.kanban-crumbs {
+  font-size: 13px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.kanban-more {
+  font-size: 12px;
+  text-align: center;
+  padding: 4px 0;
+}
+
 .task-dialog {
   width: min(760px, 92vw);
   max-height: 85vh;

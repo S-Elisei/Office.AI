@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     body TEXT,
+    -- The task this one sits under. NULL for a top-level task.
+    parent_task_id INTEGER REFERENCES tasks(id),
     status TEXT NOT NULL DEFAULT 'idea'
         CHECK (status IN ('idea', 'planned', 'needs_clarification', 'in_progress', 'paused', 'done')),
     position INTEGER NOT NULL DEFAULT 0,

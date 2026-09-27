@@ -549,9 +549,13 @@ the works, quota and the model catalogue are not in it at all — they are
 
 The snapshot is assembled from what the office already holds: who this agent is —
 name, kind, title and manager; the team; this agent's own work (its id, status,
-branch, assigner and brief, `failed` included); open PRs; the board by
-column, titles only; open tickets addressed to this participant — number, title
-and author, no bodies, with a note of how to read one. A ticket wakes nobody, so
+branch, assigner and brief, `failed` included) and, when the work has a task, that
+task with each task above it; open PRs; the top-level tasks that are not done, one
+line each as `task(op=list)` prints them, in progress first and ideas last, at
+most fifty, with the count of the rest;
+a line saying that `task(op=list)` and `task(op=read)` read the board; open tickets
+addressed to this participant — number, title and author, no bodies, with a note of
+how to read one. A ticket wakes nobody, so
 a fresh session would otherwise have no way to learn that one is waiting on it.
 
 ---
@@ -654,6 +658,29 @@ agent tool changes a model; the settings page offers it for the director only.
 **A task** is a record of something to be done. It may have no assignee and no
 works. Statuses: `idea` · `planned` · `needs_clarification` · `in_progress` ·
 `paused` · `done`.
+
+A task may sit under a parent task, `tasks.parent_task_id`; a task without one is
+top-level. `task(op=create)` takes an optional `parent`; `task(op=update)` takes
+`parent` to move a task under another and `parent=0` to make it top-level. A parent
+that is the task itself or lies under it is refused, and the refusal names the
+chain; the check and the write share one transaction. Nothing else about parents is
+enforced: a parent may be `done` while its children are open, and a parent's status
+does not follow its children's.
+
+`task(op=list)` and `task(op=read)` are open to everyone. `list` takes `parent`,
+`status` — one status, or `all`; without it every status but `done` — and `query`, a
+regular expression matched case-insensitively against titles; an invalid expression
+is refused. Without `parent` and `query` it lists the top-level tasks; with `query`
+alone, the whole board; with `parent` alone, that task's children; with both,
+everything under that task at any depth. One line per task: id, status, title, the
+children's counts (open / done) and `blocked by #…` naming each dependency that is
+not done. The order is the board's: status in the order above, then position, then
+id. The answer stops at two hundred lines or sixteen thousand characters, and its
+last line counts the tasks left out and names the filters that narrow the list.
+`read` gives one task: title, status, body, result, the chain of parents up to the
+top, the children (one line each as in `list`, capped the same way), the
+dependencies both ways, the works on it (id, assignee, assigner, status) and the
+linked tickets (id, status, title).
 
 Dependencies live in `task_dependencies`: `blocking_task_id` finishes before
 `blocked_task_id`. There is no cycle detection; a task may not block itself. A
@@ -1531,7 +1558,7 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | Stored | Why |
 |---|---|
 | Agents: role, manager, title, standing instructions, composition, runtime/model/effort, workspace path | Not recoverable |
-| Tasks and their dependencies | This is the plan |
+| Tasks, each with its parent, and their dependencies | This is the plan |
 | Rules and wiki | What the database exists for |
 | Open PRs and their comments | git holds no metadata |
 | Works that are still on the books: brief, assignee, assigner, session id | Live state |
@@ -1612,7 +1639,8 @@ say(to, text)                    # to = "all" | a participant's name
 chat(before_id?)                 # the common chat, newest page first, cursor backwards
 remind(to, text, in_seconds)     # the same message, sent later; wakes the addressee
 expect(about, within_seconds)    # an address a service notifies; its answer or the due time wakes you
-task(op, ...)                    # create | update | move | link (link with remove=true drops it)
+task(op, ...)                    # list | read | create | update | move | link (link with remove=true drops it)
+                                 # list(parent?, status?, query?) — one level, or a search under parent or over the board
 work(op, ...)                    # show — your brief, branch and assigner
                                  # show(work) — one work in full, its stored output tail included
                                  # finish — your report to whoever assigned the work, with a PR if you like
@@ -1728,8 +1756,9 @@ and `pr(op=merge|close)` refuses an executor.
 There is no `inbox_check`, no `poll`, and no file standing in for them. Everything
 arrives by itself.
 
-The reading operations — `note(op=list|read)`, `pr(op=list|read)`,
-`ticket(op=list|read)`, `work(op=show)`, `chat()`, `roster()` — are not polling:
+The reading operations — `task(op=list|read)`, `note(op=list|read)`,
+`pr(op=list|read)`, `ticket(op=list|read)`, `work(op=show)`, `chat()`, `roster()` —
+are not polling:
 they answer what was asked rather than "is there news". Their composition follows
 from the rule in section 4: no state may be knowable only from a message that was
 received. So the reason a work failed, the text of PR comments, one's own brief and
@@ -1789,9 +1818,15 @@ All times are shown local and stored UTC.
    possible before the first message. Under the model field is the vendor model
    catalogue, the same one the office would refuse by.
 2. **Direct messages** — a thread list and one thread, paginated.
-3. **Kanban** — six columns. The owner files a task into "idea" and edits titles and
-   bodies; there is no move control for him. A card with unclosed blocking tasks
-   carries the list of them, in any column.
+3. **Kanban** — six columns. By default the board holds the top-level tasks. A card
+   with children carries their counts, open and done, and opens the board of its
+   children (`?parent=N`); that board has a breadcrumb of the chain back to the top
+   level. A link shows every task on one flat board (`?flat=1`). The done column holds
+   the twenty tasks changed most recently, newest first, with a link that shows all
+   of them (`?all_done=1`). The owner files a task into "idea", with an optional
+   parent by id, filled in with the current parent on a parent's board, and edits
+   titles and bodies; there is no move control for him. A card with unclosed
+   blocking tasks carries the list of them, in any column.
 4. **Works** — who, what, branch, context, a stop button. Finished works do not
    appear. State is stated both ways: either "a turn is running" with `running_for`
    and `quiet_for`, or "nobody is working" naming the idle assignee. The brief is

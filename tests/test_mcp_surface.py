@@ -247,6 +247,53 @@ def test_a_wiki_search_numbers_its_lines_and_caps_them_per_page(conn, config):
     )
 
 
+def test_the_board_lists_one_level_searches_all_levels_and_refuses_a_parent_inside_the_task(conn, config):
+    add_agent(conn, "hand", "executor")
+
+    def task(**arguments):
+        failed, text = answer_to(conn, config, "hand", "task", arguments)
+        assert not failed, text
+        return text
+
+    task(op="create", title="Game")
+    task(op="create", title="Economy", parent=1)
+    task(op="create", title="Gold mine", parent=2)
+    task(op="create", title="Tooling")
+    task(op="create", title="Old economy draft", parent=1)
+    task(op="move", task_id=5, status="done", result="dropped")
+
+    assert task(op="list") == "#1 [idea] Game — children: 1 open / 1 done\n#4 [idea] Tooling"
+    assert task(op="list", parent=1) == "#2 [idea] Economy — children: 1 open / 0 done"
+    assert task(op="list", parent=1, status="all") == (
+        "#2 [idea] Economy — children: 1 open / 0 done\n#5 [done] Old economy draft"
+    )
+    assert task(op="list", query="ECONOMY") == "#2 [idea] Economy — children: 1 open / 0 done"
+    assert task(op="list", query="economy", status="all") == (
+        "#2 [idea] Economy — children: 1 open / 0 done\n#5 [done] Old economy draft"
+    )
+    assert task(op="list", parent=1, query="mine") == "#3 [idea] Gold mine"
+    assert task(op="list", parent=4, query="mine") == (
+        "no task matches among those not done — status=all includes the done ones"
+    )
+
+    for arguments, chain in (
+        ({"task_id": 1, "parent": 3}, "#3 under #2 under #1"),
+        ({"task_id": 2, "parent": 2}, "#2"),
+    ):
+        failed, refusal = answer_to(conn, config, "hand", "task", {"op": "update", **arguments})
+        assert failed, refusal
+        assert f"the chain {chain} leads back to task {arguments['task_id']}" in refusal, refusal
+    assert [r["parent_task_id"] for r in db.query(conn, "SELECT parent_task_id FROM tasks ORDER BY id")] == [
+        None, 1, 2, None, 1,
+    ]
+
+    for n in range(office_mcp._TASK_LIST_LINES + 5):
+        core.create_task(conn, f"Unit {n}")
+    lines = task(op="list").splitlines()
+    assert len(lines) == office_mcp._TASK_LIST_LINES + 1
+    assert lines[-1] == "7 more task(s) left out — narrow with parent, status or query"
+
+
 def git_workspace(conn, config, agent, ws_id):
     """A workspace row over a real, empty repository, owned by `agent`."""
     path = config.ws_dir / ws_id

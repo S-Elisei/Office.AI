@@ -8,6 +8,13 @@
     <div class="text-faint" style="font-size: 11.5px;">
       task {{ task.id }} · {{ task.status }} · created {{ task.created_at | fmt_time }}{% if task.updated_at %} · last change {{ task.updated_at | fmt_time }}{% endif %}
     </div>
+    {% if chain or children %}
+    <div class="text-faint" style="font-size: 11.5px;">
+      {% if chain %}under <a href="/kanban?parent={{ chain[0].id }}">#{{ chain[0].id }} {{ chain[0].title }}</a>{% endif %}
+      {% if chain and children %} · {% endif %}
+      {% if children %}<a href="/kanban?parent={{ task.id }}">{{ children | length }} child task(s)</a>{% endif %}
+    </div>
+    {% endif %}
   </div>
   <form method="dialog"><button type="submit" class="small">Close</button></form>
 </header>
@@ -41,19 +48,19 @@
 {% endfor %}
 {% endif %}
 
-{% if blocked_by or blocks %}
+{% if depends_on or needed_by %}
 <h4 class="task-dialog-section">Dependencies</h4>
-{% for t in blocked_by %}
+{% for t in depends_on %}
 <div class="task-dialog-item"><span class="badge warn">blocked by</span> task {{ t.id }} — {{ t.title }} <span class="text-faint">({{ t.status }})</span></div>
 {% endfor %}
-{% for t in blocks %}
+{% for t in needed_by %}
 <div class="task-dialog-item"><span class="badge">blocks</span> task {{ t.id }} — {{ t.title }} <span class="text-faint">({{ t.status }})</span></div>
 {% endfor %}
 {% endif %}
 
 <h4 class="task-dialog-section">Edit</h4>
 {# data-office-required: Save is dead and grey whenever the title box is empty. #}
-<form method="post" action="/kanban/tasks/{{ task.id }}" hx-post="/kanban/tasks/{{ task.id }}"
+<form method="post" action="/kanban/tasks/{{ task.id }}?{{ view_query }}" hx-post="/kanban/tasks/{{ task.id }}?{{ view_query }}"
       hx-target="#kanban-board" hx-swap="innerHTML" data-office-required="title">
   <div class="form-row">
     <label for="dlg-title-{{ task.id }}">Title</label>

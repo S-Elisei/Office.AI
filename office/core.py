@@ -1308,15 +1308,177 @@ def roster(conn) -> dict:
 # --------------------------------------------------------------------------- tasks
 
 
-def create_task(conn, title: str, body: str | None = None, status: str = "idea", actor: str | None = None) -> dict:
+def board(conn) -> dict[int, dict]:
+    """Every task by id, in the board's order: status as TASK_STATUSES lists it,
+    then position, then id.
+
+    Each row carries id, title, status, position, parent_task_id and updated_at;
+    `children`, the ids of its children in the board's order; `open_children` and
+    `done_children`, their counts; and `blockers`, the ids of the tasks it
+    depends on that are not done.
+    """
+    rows = [
+        dict(r)
+        for r in db.query(conn, "SELECT id, title, status, position, parent_task_id, updated_at FROM tasks")
+    ]
+    rows.sort(key=lambda t: (TASK_STATUSES.index(t["status"]), t["position"], t["id"]))
+    tasks = {t["id"]: {**t, "children": [], "open_children": 0, "done_children": 0, "blockers": []} for t in rows}
+    for t in tasks.values():
+        if t["parent_task_id"] is not None:
+            parent = tasks[t["parent_task_id"]]
+            parent["children"].append(t["id"])
+            parent["done_children" if t["status"] == "done" else "open_children"] += 1
+    for r in db.query(
+        conn,
+        "SELECT td.blocked_task_id, td.blocking_task_id FROM task_dependencies td "
+        "JOIN tasks blocker ON blocker.id = td.blocking_task_id "
+        "WHERE blocker.status != 'done' ORDER BY td.blocking_task_id",
+    ):
+        tasks[r["blocked_task_id"]]["blockers"].append(r["blocking_task_id"])
+    return tasks
+
+
+def task_chain(tasks: dict[int, dict], task_id: int) -> list[dict]:
+    """The task and the tasks above it, from `tasks` as board() returns it: the
+    task first, its top-level ancestor last."""
+    chain = [tasks[task_id]]
+    while chain[-1]["parent_task_id"] is not None:
+        chain.append(tasks[chain[-1]["parent_task_id"]])
+    return chain
+
+
+def task_line(t: dict) -> str:
+    """One row of board() on one line: id, status, title, the children's counts
+    when it has children, and its blockers when it has some."""
+    notes = []
+    if t["children"]:
+        notes.append(f"children: {t['open_children']} open / {t['done_children']} done")
+    if t["blockers"]:
+        notes.append("blocked by " + ", ".join(f"#{b}" for b in t["blockers"]))
+    line = f"#{t['id']} [{t['status']}] {t['title']}"
+    return f"{line} — {'; '.join(notes)}" if notes else line
+
+
+def list_tasks(
+    conn, *, parent: int | None = None, status: str | None = None, query: str | None = None
+) -> list[dict]:
+    """task(op=list), as rows of board() in the board's order.
+
+    Without `parent` and `query`: the top-level tasks. `query` alone: the whole
+    board. `parent` alone: that task's children. Both: every task under `parent`
+    at any depth. `query` is a regular expression matched case-insensitively
+    against titles. `status` is one status or 'all'; None keeps every status
+    but done.
+    """
+    if status is not None and status != "all" and status not in TASK_STATUSES:
+        raise ValueError(f"bad task status '{status}' — one of {', '.join(TASK_STATUSES)}, or all")
+    regex = None
+    if query is not None:
+        try:
+            regex = re.compile(query, re.IGNORECASE)
+        except re.error as e:
+            raise ValueError(f"task: query is not a valid regular expression — {e}") from None
+    tasks = board(conn)
+    if parent is not None and parent not in tasks:
+        raise ValueError(f"no such task {parent}")
+    if parent is None:
+        pool = [t for t in tasks.values() if regex is not None or t["parent_task_id"] is None]
+    elif regex is None:
+        pool = [tasks[c] for c in tasks[parent]["children"]]
+    else:
+        under, frontier = set(), [parent]
+        while frontier:
+            ids = tasks[frontier.pop()]["children"]
+            under.update(ids)
+            frontier.extend(ids)
+        pool = [t for t in tasks.values() if t["id"] in under]
+    return [
+        t for t in pool
+        if (status == "all" or t["status"] == status or (status is None and t["status"] != "done"))
+        and (regex is None or regex.search(t["title"]))
+    ]
+
+
+def get_task(conn, task_id: int) -> dict | None:
+    """One task in full, or None: `task`, its row; `chain`, the rows of board()
+    above it, its parent first; `children`, their rows of board(); `depends_on`
+    and `needed_by`, the tasks on either side of its dependencies; `works`, the
+    works on it with assignee and assigner; `tickets`, the tickets linked to it.
+    """
+    task = _row(conn, "tasks", "id", task_id)
+    if task is None:
+        return None
+    tasks = board(conn)
+    return {
+        "task": task,
+        "chain": task_chain(tasks, task_id)[1:],
+        "children": [tasks[c] for c in tasks[task_id]["children"]],
+        "depends_on": [
+            dict(r) for r in db.query(
+                conn,
+                "SELECT t.id, t.title, t.status FROM task_dependencies td "
+                "JOIN tasks t ON t.id = td.blocking_task_id WHERE td.blocked_task_id = ? ORDER BY t.id",
+                (task_id,),
+            )
+        ],
+        "needed_by": [
+            dict(r) for r in db.query(
+                conn,
+                "SELECT t.id, t.title, t.status FROM task_dependencies td "
+                "JOIN tasks t ON t.id = td.blocked_task_id WHERE td.blocking_task_id = ? ORDER BY t.id",
+                (task_id,),
+            )
+        ],
+        "works": [
+            dict(r) for r in db.query(
+                conn,
+                "SELECT w.id, a.name AS agent, assigner.name AS assigner, w.status, w.branch, w.brief, "
+                "w.fail_reason, w.pause_reason "
+                "FROM works w JOIN agents a ON a.id = w.agent_id "
+                "JOIN agents assigner ON assigner.id = w.assigned_by_agent_id "
+                "WHERE w.task_id = ? ORDER BY w.id",
+                (task_id,),
+            )
+        ],
+        "tickets": [
+            dict(r) for r in db.query(
+                conn,
+                "SELECT id, title, kind, status, addressee, author FROM tickets WHERE task_id = ? ORDER BY id",
+                (task_id,),
+            )
+        ],
+    }
+
+
+def _check_parent(conn, task_id: int | None, parent: int) -> None:
+    """Refuses a `parent` that is no task, and one that is `task_id` itself or
+    lies under it. Call inside the transaction that writes the parent."""
+    tasks = board(conn)
+    if parent not in tasks:
+        raise ValueError(f"no such task {parent}")
+    ids = [t["id"] for t in task_chain(tasks, parent)]
+    if task_id in ids:
+        path = " under ".join(f"#{i}" for i in ids[: ids.index(task_id) + 1])
+        raise ValueError(
+            f"task {task_id} cannot go under task {parent}: the chain {path} leads back to task "
+            f"{task_id} — pick a parent outside it, or parent=0 for the top level"
+        )
+
+
+def create_task(
+    conn, title: str, body: str | None = None, status: str = "idea", actor: str | None = None,
+    parent: int | None = None,
+) -> dict:
     if status not in TASK_STATUSES:
         raise ValueError(f"bad task status '{status}'")
     with db.transaction(conn):
+        if parent is not None:
+            _check_parent(conn, None, parent)
         row = db.query_one(conn, "SELECT COALESCE(MAX(position) + 1, 0) AS p FROM tasks WHERE status = ?", (status,))
         cur = db.execute(
             conn,
-            "INSERT INTO tasks (title, body, status, position) VALUES (?, ?, ?, ?)",
-            (title, body, status, row["p"]),
+            "INSERT INTO tasks (title, body, parent_task_id, status, position) VALUES (?, ?, ?, ?, ?)",
+            (title, body, parent, status, row["p"]),
         )
         task_id = cur.lastrowid
         _emit(conn, "tasks", "task", task_id, {"title": title, "status": status}, actor=actor)
@@ -1324,8 +1486,12 @@ def create_task(conn, title: str, body: str | None = None, status: str = "idea",
 
 
 def update_task(
-    conn, task_id: int, *, title: str | None = None, body: str | None = None, actor: str | None = None
+    conn, task_id: int, *, title: str | None = None, body: str | None = None, parent: int | None = None,
+    actor: str | None = None,
 ) -> dict:
+    """`parent` None leaves the parent as it is; 0 makes the task top-level."""
+    if _row(conn, "tasks", "id", task_id) is None:
+        raise ValueError(f"no such task {task_id} — task(op=list) shows the board")
     fields, params = [], []
     if title is not None:
         fields.append("title = ?")
@@ -1333,10 +1499,15 @@ def update_task(
     if body is not None:
         fields.append("body = ?")
         params.append(body)
+    if parent is not None:
+        fields.append("parent_task_id = ?")
+        params.append(parent or None)
     if not fields:
         return _row(conn, "tasks", "id", task_id)
     fields.append("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
     with db.transaction(conn):
+        if parent:
+            _check_parent(conn, task_id, parent)
         db.execute(conn, f"UPDATE tasks SET {', '.join(fields)} WHERE id = ?", (*params, task_id))
         _emit(conn, "tasks", "task", task_id, {"title": title} if title is not None else {}, actor=actor)
     return _row(conn, "tasks", "id", task_id)

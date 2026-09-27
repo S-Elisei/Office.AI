@@ -2089,12 +2089,17 @@ def _restart_delta(interrupted: list, leads: list[str]) -> str:
     return "\n".join(lines)
 
 
+_SNAPSHOT_STATUS_ORDER = ("in_progress", "needs_clarification", "paused", "planned", "idea")
+_SNAPSHOT_TASKS = 50
+
+
 def _snapshot(conn: sqlite3.Connection, agent: dict) -> str:
     """The one-off picture a brand-new session gets instead of a delta.
 
         Assembled from what the office already holds: who this agent is, the
-        team, this agent's own work, the open PRs, the board, and any open ticket
-        addressed to it.
+        team, this agent's own work and its task with the tasks above it, the open
+        PRs, the top-level tasks not done, at most _SNAPSHOT_TASKS of them, and any
+        open ticket addressed to it.
     """
     who = f"{agent['name']} ({agent['kind']}"
     if agent["title"]:
@@ -2142,19 +2147,21 @@ def _snapshot(conn: sqlite3.Connection, agent: dict) -> str:
             for r in prs
         )
 
-    # The board: titles by column, no bodies.
-    tasks = db.query(conn, "SELECT id, title, status FROM tasks ORDER BY status, position, id")
-    if tasks:
-        by_status: dict[str, list[str]] = {}
-        for row in tasks:
-            by_status.setdefault(row["status"], []).append(f"#{row['id']} {row['title']}")
-        lines.append("Board:")
-        # core.TASK_STATUSES order, not alphabetical. A status outside the tuple is
-        # still printed.
-        ordered = [s for s in core.TASK_STATUSES if s in by_status]
-        ordered += [s for s in by_status if s not in core.TASK_STATUSES]
-        for status in ordered:
-            lines.append(f"  {status}: " + "; ".join(by_status[status]))
+    tasks = core.board(conn)
+    if work and work["task_id"] is not None:
+        lines.append("Your work's task, then each task above it:")
+        lines.extend("  " + core.task_line(t) for t in core.task_chain(tasks, work["task_id"]))
+    # Work under way first, ideas last: the cap must not spend itself on ideas.
+    top = sorted(
+        (t for t in tasks.values() if t["parent_task_id"] is None and t["status"] != "done"),
+        key=lambda t: _SNAPSHOT_STATUS_ORDER.index(t["status"]),
+    )
+    if top:
+        lines.append("Top-level tasks not done:")
+        lines.extend("  " + core.task_line(t) for t in top[:_SNAPSHOT_TASKS])
+        if len(top) > _SNAPSHOT_TASKS:
+            lines.append(f"  {len(top) - _SNAPSHOT_TASKS} more left out")
+    lines.append("task(op=list) and task(op=read) read the board.")
 
     # Open tickets addressed to THIS participant, and only to it. A ticket wakes
     # nobody, so a fresh session has no other way to learn one is waiting.

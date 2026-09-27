@@ -77,7 +77,8 @@ reach nobody.
   notifies when the job ends.
 - `work` — your own work: `op=show` gives back the brief, the branch, who
   assigned it and its status; `op=finish` reports it done.
-- `task` — the board: what is planned, what is in progress, what is done.
+- `task` — the board, a tree of tasks: `op=list` reads one level of it or searches
+  it, `op=read` gives one task in full.
 - `pr` — pull requests: open one, read one with its review, comment.
 - `ticket` — a decision that waits on whoever it is addressed to.
 - `note` — the team's wiki: read a page, search the pages, write, comment. A page
@@ -149,7 +150,8 @@ survives it. Nothing here watches that number or interrupts you because of it.
 
 If the conversation does end, the next session's first message carries the
 picture again: who you are and who your manager is, the team, your assignment
-with its branch, status and assigner, the open PRs, the board and the tickets
+with its branch, status and assigner and its task, the open PRs, the top-level
+tasks not done and the tickets
 waiting on you; your workspace is as you left it. Anything worth keeping belongs
 in a commit message, a PR description, the wiki or your `work(op=finish)`
 summary. **The wiki is where knowledge that has to outlive a session is kept** —

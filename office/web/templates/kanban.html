@@ -2,7 +2,7 @@
 {% block title %}Kanban — Office.AI{% endblock %}
 {% block content %}
 
-  <div id="kanban-board" hx-get="/fragments/kanban" hx-trigger="office:tasks[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+  <div id="kanban-board" hx-get="/fragments/kanban?{{ view_query }}" hx-trigger="office:tasks[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
     {% include "partials/kanban_board.html" %}
   </div>
 

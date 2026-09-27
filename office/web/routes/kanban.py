@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Request
 
@@ -19,14 +20,7 @@ COLUMNS = [
     ("done", "Done"),
 ]
 NEW_TASK_STATUS = "idea"
-
-
-def _by_status(conn: sqlite3.Connection) -> dict[str, list[sqlite3.Row]]:
-    rows = db.query(conn, "SELECT * FROM tasks ORDER BY status, position, created_at")
-    by_status: dict[str, list[sqlite3.Row]] = {}
-    for r in rows:
-        by_status.setdefault(r["status"], []).append(r)
-    return by_status
+DONE_SHOWN = 20
 
 
 def _signals(conn: sqlite3.Connection) -> dict[int, dict]:
@@ -49,97 +43,98 @@ def _signals(conn: sqlite3.Connection) -> dict[int, dict]:
     return {"works": works, "tickets": tickets}
 
 
-def _blocker_ids(conn: sqlite3.Connection) -> dict[int, list[int]]:
-    """Task id -> ids of its not-yet-done blockers."""
-    out: dict[int, list[int]] = {}
-    for r in db.query(
-        conn,
-        "SELECT DISTINCT td.blocked_task_id AS task_id, blocker.id AS blocker_id "
-        "FROM task_dependencies td "
-        "JOIN tasks t ON t.id = td.blocked_task_id "
-        "JOIN tasks blocker ON blocker.id = td.blocking_task_id "
-        "WHERE t.status != 'done' AND blocker.status != 'done' ORDER BY blocker.id",
-    ):
-        out.setdefault(r["task_id"], []).append(r["blocker_id"])
-    return out
+def _view_query(parent: int | None, flat: bool, all_done: bool) -> str:
+    """The query string of one view of the board."""
+    pairs = {"parent": parent, "flat": 1 if flat else None, "all_done": 1 if all_done else None}
+    return urlencode({k: v for k, v in pairs.items() if v})
 
 
-def _context(request: Request) -> dict:
+def _context(
+    request: Request, parent: int | None = None, flat: bool = False, all_done: bool = False, **extra
+) -> dict:
+    """The board of `parent`'s children, of the top-level tasks when `parent` is
+    None, or of every task when `flat`. The done column holds the DONE_SHOWN
+    most recently changed ones unless `all_done`."""
     conn = get_db(request)
+    tasks = core.board(conn)
+    if flat:
+        shown = list(tasks.values())
+    elif parent is None:
+        shown = [t for t in tasks.values() if t["parent_task_id"] is None]
+    else:
+        shown = [tasks[c] for c in tasks[parent]["children"]]
+    by_status: dict[str, list[dict]] = {}
+    for t in shown:
+        by_status.setdefault(t["status"], []).append(t)
+    done = sorted(by_status.pop("done", []), key=lambda t: t["updated_at"], reverse=True)
+    by_status["done"] = done if all_done else done[:DONE_SHOWN]
     return {
         "request": request,
         "active": "kanban",
         "columns": COLUMNS,
-        "by_status": _by_status(conn),
-        "blocker_ids": _blocker_ids(conn),
+        "by_status": by_status,
+        "done_total": len(done),
+        "done_shown": DONE_SHOWN,
+        "parent": parent,
+        "flat": flat,
+        "all_done": all_done,
+        "chain": [] if parent is None else core.task_chain(tasks, parent)[::-1],
+        "view_query": _view_query(parent, flat, all_done),
+        "all_done_query": _view_query(parent, flat, not all_done),
         "signals": _signals(conn),
+        **extra,
     }
 
 
 @router.get("/kanban")
-def kanban_page(request: Request):
-    return templates.TemplateResponse(request, "kanban.html", _context(request))
+def kanban_page(request: Request, parent: int | None = None, flat: bool = False, all_done: bool = False):
+    return templates.TemplateResponse(request, "kanban.html", _context(request, parent, flat, all_done))
 
 
 @router.get("/fragments/kanban")
-def kanban_fragment(request: Request):
-    return templates.TemplateResponse(request, "partials/kanban_board.html", _context(request))
-
-
-def _task_detail(conn: sqlite3.Connection, task_id: int) -> dict:
-    task = db.query_one(conn, "SELECT * FROM tasks WHERE id = ?", (task_id,))
-    works = db.query(
-        conn,
-        "SELECT w.id, a.name AS agent, w.status, w.branch, w.brief, w.fail_reason, w.pause_reason "
-        "FROM works w JOIN agents a ON a.id = w.agent_id WHERE w.task_id = ? ORDER BY w.id",
-        (task_id,),
+def kanban_fragment(request: Request, parent: int | None = None, flat: bool = False, all_done: bool = False):
+    return templates.TemplateResponse(
+        request, "partials/kanban_board.html", _context(request, parent, flat, all_done)
     )
-    tickets = db.query(
-        conn,
-        "SELECT id, title, kind, status, addressee, author FROM tickets WHERE task_id = ? ORDER BY id",
-        (task_id,),
-    )
-    blocked_by = db.query(
-        conn,
-        "SELECT t.id, t.title, t.status FROM task_dependencies td "
-        "JOIN tasks t ON t.id = td.blocking_task_id WHERE td.blocked_task_id = ? ORDER BY t.id",
-        (task_id,),
-    )
-    blocks = db.query(
-        conn,
-        "SELECT t.id, t.title, t.status FROM task_dependencies td "
-        "JOIN tasks t ON t.id = td.blocked_task_id WHERE td.blocking_task_id = ? ORDER BY t.id",
-        (task_id,),
-    )
-    return {
-        "task": task, "works": works, "tickets": tickets,
-        "blocked_by": blocked_by, "blocks": blocks,
-    }
 
 
 @router.get("/fragments/kanban/task/{task_id}")
-def task_detail_fragment(request: Request, task_id: int):
-    ctx = _task_detail(get_db(request), task_id)
+def task_detail_fragment(
+    request: Request, task_id: int, parent: int | None = None, flat: bool = False, all_done: bool = False
+):
     return templates.TemplateResponse(
-        request, "partials/kanban_task.html", {"request": request, **ctx}
+        request, "partials/kanban_task.html",
+        {"request": request, **core.get_task(get_db(request), task_id),
+         "view_query": _view_query(parent, flat, all_done)},
     )
 
 
 @router.post("/kanban/tasks")
-async def create_task(request: Request):
+async def create_task(request: Request, parent: int | None = None, flat: bool = False, all_done: bool = False):
     conn = get_db(request)
     data = await read_form(request)
     title = data.get("title", "").strip()
     body = data.get("body", "").strip() or None
-    core.create_task(conn, title, body, status=NEW_TASK_STATUS)
-    return templates.TemplateResponse(request, "partials/kanban_board.html", _context(request))
+    under = int(data["parent"]) if data.get("parent", "").strip() else None
+    try:
+        core.create_task(conn, title, body, status=NEW_TASK_STATUS, parent=under)
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request, "partials/kanban_board.html",
+            _context(request, parent, flat, all_done, notice_error=str(exc), form=data), status_code=400,
+        )
+    return templates.TemplateResponse(
+        request, "partials/kanban_board.html", _context(request, parent, flat, all_done)
+    )
 
 
 @router.post("/kanban/tasks/{task_id}")
-async def edit_task(request: Request, task_id: int):
+async def edit_task(request: Request, task_id: int, parent: int | None = None, flat: bool = False, all_done: bool = False):
     conn = get_db(request)
     data = await read_form(request)
     title = data.get("title", "").strip() or None
     body = data["body"].strip() or None
     core.update_task(conn, task_id, title=title, body=body)
-    return templates.TemplateResponse(request, "partials/kanban_board.html", _context(request))
+    return templates.TemplateResponse(
+        request, "partials/kanban_board.html", _context(request, parent, flat, all_done)
+    )
