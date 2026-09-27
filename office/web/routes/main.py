@@ -109,7 +109,6 @@ def _chat_context(
         "runtimes": RUNTIMES,
         "notice_error": error,
         "form": form or {},
-        "instructions": core.get_setting(conn, "director_instructions", ""),
     }
 
 
@@ -298,13 +297,13 @@ async def hire_director(request: Request):
             model=model,
             effort=effort,
             kind="director",
+            instructions=instructions,
             actor=owner_name,
         )
     except Exception as exc:  # noqa: BLE001 - git.py can raise several types; show whatever comes back
         ctx = _chat_context(request, error=str(exc), form=data)
         return templates.TemplateResponse(request, "partials/main_chat_panel.html", ctx, status_code=400)
 
-    core.set_setting(conn, "director_instructions", instructions, actor=owner_name)
     return templates.TemplateResponse(request, "partials/main_chat_panel.html", _chat_context(request))
 
 

@@ -12,15 +12,11 @@
     <input id="s-silence-minutes" name="silence_minutes" type="number" step="any"
            value="{{ silence_minutes }}">
     <span class="hint">
-      How long an agent may print nothing before the office mentions it to the director.
-      It only tells the director — nothing is stopped and nothing is killed.
+      How long an agent may print nothing before the office mentions it to its manager.
+      It only tells the manager — nothing is stopped and nothing is killed. The director's
+      own silence is not reported.
       Enter <strong>0</strong> to never report; clear the box to go back to the default.
     </span>
-  </div>
-  <div class="form-row mb-0" style="margin-top: 16px;">
-    <label for="s-instructions">Instructions</label>
-    <textarea id="s-instructions" name="instructions">{{ instructions or '' }}</textarea>
-    <span class="hint">Project rules and wiki are injected separately — this is the standing brief.</span>
   </div>
   <div class="form-actions">
     <button type="submit" class="primary" disabled>Save</button>
@@ -32,6 +28,21 @@
 {% if not director %}
   <div class="empty">No director hired yet — hire one from the Main page to get started.</div>
 {% else %}
+<form method="post" action="/settings/director-instructions" hx-post="/settings/director-instructions"
+      hx-target="#settings-form" hx-swap="innerHTML">
+  <div class="form-row mb-0">
+    <label for="s-instructions">{{ director.name }}'s standing instructions</label>
+    <textarea id="s-instructions" name="instructions">{{ instructions }}</textarea>
+    <span class="hint">Project rules and wiki are injected separately — this is the standing brief.
+      Leave it empty for none.</span>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="primary">Save instructions</button>
+  </div>
+</form>
+
+<hr style="border: none; border-top: 1px solid var(--border); margin: 22px 0;">
+
 <p class="text-dim" style="margin-top: 0; font-size: 12.5px;">
   Replacing the director happens here, in place.
 </p>

@@ -103,6 +103,7 @@ async def lifespan(app: FastAPI):
     mcp.set_drain_hook(bus.piggyback)
     mcp.set_stop_hook(bus.stop_agent)
     mcp.set_compact_hook(bus.compact)
+    mcp.set_new_session_hook(bus.new_session)
     mcp.set_fire_hook(bus.fire_agent)
 
     async with mcp.session_manager.run():
@@ -119,6 +120,7 @@ async def lifespan(app: FastAPI):
     mcp.set_drain_hook(None)
     mcp.set_stop_hook(None)
     mcp.set_compact_hook(None)
+    mcp.set_new_session_hook(None)
     mcp.set_fire_hook(None)
     conn.close()
 

@@ -231,8 +231,7 @@ _NON_FAST_FORWARD = re.compile(
 
 #: Ends every refusal that leaves work behind.
 _LATER = (
-    " The work is complete in the office; the merge can be repeated once this is cleared, "
-    "and it then carries everything that piled up meanwhile."
+    " Nothing moved: the pull request stays open and is merged again once this is cleared."
 )
 
 
@@ -662,7 +661,7 @@ while read -r _old _new ref
 do
 \tif [ "$ref" = "$main" ]
 \tthen
-\t\techo "'${main#refs/heads/}' is the office's main branch, and only a merge writes to it. Put this work on a branch of your own (git switch -c <name>), push that, and open a pull request into it." >&2
+\t\techo "'${main#refs/heads/}' is the office's main branch, and only a merge writes to it. Put this work on the branch your assignment names." >&2
 \t\tstatus=1
 \tfi
 done
@@ -1034,8 +1033,7 @@ def _publish_refusal(branch: str, output: str) -> str:
     if "[rejected]" in output and _NON_FAST_FORWARD.search(output):
         return (
             f"branch '{branch}' in the office repository has moved ahead — somebody else is "
-            "writing to it. Fetch it and reconcile (merge or rebase) before publishing again, "
-            "or publish under a branch name of your own."
+            f"writing to it. Fetch it and merge origin/{branch} into yours, then publish again."
         )
     return f"could not publish branch '{branch}' to the office repository."
 
@@ -1245,8 +1243,9 @@ def merge(
                 "behind",
                 detail=(
                     f"'{source_branch}' does not contain '{target_branch}', which has moved on "
-                    f"since it was branched. Bring {target_branch} into the workspace, settle "
-                    "any conflict there, publish again, and merge this request again."
+                    f"since it was branched. Whoever works on the branch takes {target_branch} "
+                    "into it in the workspace it comes from and publishes it again; then merge "
+                    "this request again."
                 ),
                 intake=intake,
             )

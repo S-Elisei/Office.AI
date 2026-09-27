@@ -9,6 +9,7 @@
   <thead>
     <tr>
       <th>Name</th>
+      <th>Title</th>
       <th>Role</th>
       <th>Runtime</th>
       <th>Model</th>
@@ -21,7 +22,8 @@
     {% for a in agents %}
     {% set awaits = expectations | selectattr("agent", "equalto", a.name) | list %}
     <tr{% if awaits %} class="has-sub-row"{% endif %}>
-      <td>{{ a.name }}</td>
+      <td style="padding-left: {{ 8 + a.depth * 20 }}px;">{% if a.depth %}<span class="text-faint">└ </span>{% endif %}{{ a.name }}</td>
+      <td>{{ a.title or "—" }}</td>
       <td>{{ a.kind }}</td>
       <td>{{ a.runtime }}</td>
       <td>{{ a.model }}</td>
@@ -35,7 +37,7 @@
     </tr>
     {% if awaits %}
     <tr class="sub-row">
-      <td colspan="7">
+      <td colspan="8">
         {% for e in awaits %}
         <div class="expectation">
           <span class="work-brief-label">awaits</span> {{ e.about }}

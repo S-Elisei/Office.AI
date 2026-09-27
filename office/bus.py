@@ -36,7 +36,7 @@ FUSE_TURNS = 6
 FUSE_WINDOW_SECONDS = 300.0
 
 # How long an agent may produce no output at all before the office mentions it
-# to the director (_report_silent_turn). Stored in minutes.
+# to its manager (_report_silent_turn). Stored in minutes.
 SILENCE_NOTICE_SETTING = "silence_notice_minutes"
 SILENCE_NOTICE_DEFAULT_MINUTES = 20.0
 
@@ -72,7 +72,7 @@ class _AgentState:
     # after that gets a higher id.
     wake_floor: int = 0
     expectation_floor: int = 0
-    # True once this turn's silence has been reported to the director
+    # True once this turn's silence has been reported to the agent's manager
     # (_report_silent_turn); cleared when the next turn is installed.
     silence_reported: bool = False
     # True once this agent has been nudged for ending a turn without saying
@@ -276,7 +276,7 @@ class Bus:
             warnings.append(
                 f"context fill is unknown for codex agent(s) {blind}: their session files under "
                 f"{codex.codex_home()}/sessions could not be read or held no token_count event. "
-                "The office reports no number rather than an estimate, so the director is "
+                "The office reports no number rather than an estimate, so their managers are "
                 "staffing those agents blind. Check that codex is writing rollout files and "
                 "that nothing passes --ephemeral, which switches them off."
             )
@@ -290,7 +290,7 @@ class Bus:
                 "the project to read another agent's branch, which leaves a clone with a "
                 "push-capable remote to the office's own repository sitting in the data root."
             )
-        # A runtime that is configured but has never answered leaves the director
+        # A runtime that is configured but has never answered leaves the managers
         # with no ceiling to reason about.
         answered = {row["runtime"] for row in db.query(self.conn, "SELECT DISTINCT runtime FROM quota")}
         silent = []
@@ -303,8 +303,8 @@ class Bus:
                 silent.append(runtime)
         if silent:
             warnings.append(
-                f"no quota reading yet for {silent}: the director sees no remaining quota for "
-                "those runtimes and cannot weigh them when distributing work. codex has nothing "
+                f"no quota reading yet for {silent}: the director and the leads see no remaining "
+                "quota for those runtimes and cannot weigh them when distributing work. codex has nothing "
                 "to report until it has run one turn (its quota is read from the session file it "
                 "writes); for the others this means the free /usage call failed."
             )
@@ -704,11 +704,11 @@ class Bus:
                 # Its output tail has nothing left to explain.
                 self._discard_tail(name)
                 return
-            agent = db.query_one(self.conn, "SELECT kind FROM agents WHERE name = ?", (name,))
+            agent = db.query_one(self.conn, "SELECT id FROM agents WHERE name = ?", (name,))
             if agent is None:
                 return  # fired while its own turn was closing out; nothing to nudge
             if state.ending_nudged:
-                self._escalate_wordless_turn(name, agent["kind"])
+                self._escalate_wordless_turn(name, agent["id"])
             else:
                 _log.info("%s's turn ended without a word; nudging %s", name, name)
                 core.send_message(self.conn, core.OFFICE_SENDER, name, _ending_nudge())
@@ -726,26 +726,19 @@ class Bus:
             except OSError:
                 pass
 
-    def _escalate_wordless_turn(self, name: str, kind: str) -> None:
+    def _escalate_wordless_turn(self, name: str, agent_id: int) -> None:
         """The second silent ending in a row: over the offender's head.
 
-                An executor's goes to the director; the director's own goes to the
+                It goes to the agent's manager; the director's own goes to the
                 owner's journal and to the plate on his main page, as 'critical'.
-
-                With no director hired there is nobody to tell about an executor, and
-                the office says nothing.
         """
-        if kind == "director":
+        manager = core.manager_name(self.conn, agent_id)
+        if manager is None:
             _log.info("the director's turn ended without a word again; the owner's plate")
             core.record_notice(self.conn, "critical", _wordless_turn_journal(name))
             return
-        director = db.query_one(self.conn, "SELECT name FROM agents WHERE kind = 'director'")
-        if director is None:
-            return
-        _log.info("%s's turn ended without a word again; telling the director", name)
-        core.send_message(
-            self.conn, core.OFFICE_SENDER, director["name"], _wordless_turn_notice(name)
-        )
+        _log.info("%s's turn ended without a word again; telling %s", name, manager)
+        core.send_message(self.conn, core.OFFICE_SENDER, manager, _wordless_turn_notice(name))
 
     def _silence_notice_seconds(self) -> float | None:
         """The owner's silence threshold in seconds, or None for "never report".
@@ -771,7 +764,7 @@ class Bus:
 
     def _report_silent_turn(self, agent: dict, state: "_AgentState") -> None:
         """A running agent that has said nothing for the owner's silence threshold,
-                told to the director as a message from `office` with the last few things
+                told to its manager as a message from `office` with the last few things
                 it was seen doing.
 
                 It has no power over the agent: no stop, no flag, nothing written
@@ -789,20 +782,18 @@ class Bus:
             if turn is None or not turn.alive:
                 # It ended between the tick's check and here.
                 return
-            if agent["kind"] == "director":
+            manager = core.manager_name(self.conn, agent["id"])
+            if manager is None:
                 _log.info("the director has been quiet for %.0fs; the owner's page already shows it",
                           turn.quiet_for)
                 return
-            director = db.query_one(self.conn, "SELECT name FROM agents WHERE kind = 'director'")
-            if director is None:
-                return  # nobody to tell, and nothing about the agent to change
             # Parsed off the ring buffer before send_message opens its
             # transaction, never inside one: no writing transaction is held
             # across anything slower than it has to be.
             actions = _last_actions(turn)
-            _log.info("%s has been quiet for %.0fs; telling the director", name, turn.quiet_for)
+            _log.info("%s has been quiet for %.0fs; telling %s", name, turn.quiet_for, manager)
             core.send_message(
-                self.conn, core.OFFICE_SENDER, director["name"],
+                self.conn, core.OFFICE_SENDER, manager,
                 _silent_turn_notice(name, turn.quiet_for, turn.running_for, actions),
             )
         except Exception:
@@ -1008,7 +999,7 @@ class Bus:
             _log.exception("could not set status %s for agent %s", status, agent_id)
 
     def _record_context(self, agent_id: int, used, limit) -> None:
-        """The numbers roster() and the director's prompt both promise."""
+        """The context figures roster() and the pages show."""
         if used is None and limit is None:
             return
         with db.transaction(self.conn) as conn:
@@ -1216,11 +1207,30 @@ class Bus:
             core.fail_work(
                 self.conn, work["id"], "killed", output_tail="\n".join(turn.tail()), actor=actor
             )
-            # The director hears about a work that failed, unless the director is
+            # Whoever hears about a failed work hears about this one, unless it is
             # the one who asked for it.
-            self._tell_director_work_ended(work["id"], agent_name, "killed", caused_by=actor)
+            self._tell_work_ended(work["id"], agent_name, "killed", caused_by=actor)
         turn.kill()
         return {"ok": True, "work_id": work["id"] if work else None}
+
+    def new_session(self, agent_name: str, actor: str) -> dict:
+        """Drop an agent's conversation (core.start_new_session), but only while
+                nothing is speaking on its session: a turn or a compaction would write
+                its session id back. Decided and done under the lock that starts turns.
+        """
+        state = self._state(agent_name)
+        with state.lock:
+            busy = self._busy_reason(agent_name)
+            if busy is not None:
+                return {"ok": False, "reason": (
+                    f"{busy} — {agent_name}'s session cannot be dropped while a process is "
+                    "speaking on it. Ask again when it is idle, or stop the turn first."
+                )}
+            agent = db.query_one(self.conn, "SELECT id FROM agents WHERE name = ?", (agent_name,))
+            if agent is None:
+                return {"ok": False, "reason": f"no agent named {agent_name!r}"}
+            core.start_new_session(self.conn, agent["id"])
+        return {"ok": True}
 
     def fire_agent(self, agent_name: str, actor: str) -> dict:
         """Remove an agent, but only while nothing is speaking on its session.
@@ -1259,45 +1269,67 @@ class Bus:
             )
 
     def _record_death(self, name: str, turn) -> None:
-        """Record a classified death, through core like every other mutation.
+        """Record a classified death, through core like every other mutation, and
+                tell whoever has to hear of it.
 
-                Only a work still 'running' is touched.
+                Only a work still 'running' is touched. A quota death pauses the work
+                rather than failing it; a context overflow additionally clears the
+                session id.
 
-                A quota death pauses the work rather than failing it; a context
-                overflow additionally clears the session id.
+                A lead's death for any reason but a stop is told to its manager, in the
+                same message as the work's notice when that goes to the same manager.
         """
-        tail = "\n".join(turn.death.tail)
-        work = db.query_one(
-            self.conn,
-            "SELECT w.id, a.runtime FROM works w JOIN agents a ON a.id = w.agent_id "
-            "WHERE w.status = 'running' AND a.name = ? ORDER BY w.id DESC",
-            (name,),
-        )
-        if work is not None:
-            try:
+        reason = turn.death.reason
+        # recipient -> the notices for it, in order
+        notices: dict[str, list[str]] = {}
+        try:
+            agent = db.query_one(
+                self.conn, "SELECT id, kind, runtime FROM agents WHERE name = ?", (name,)
+            )
+            if agent is None:
+                return  # fired once its turn was over and before this ran
+            resume_after = (
+                core.quota_reset_for(self.conn, agent["runtime"])
+                if reason == "quota_exhausted" else None
+            )
+            work = db.query_one(
+                self.conn,
+                "SELECT id FROM works WHERE status = 'running' AND agent_id = ? ORDER BY id DESC",
+                (agent["id"],),
+            )
+            if work is not None:
                 # actor stays None throughout: the supervisor observed this, no
                 # participant caused it, and core reads None as "the system".
-                if turn.death.reason == "quota_exhausted":
+                if reason == "quota_exhausted":
                     # Not a failure: the vendor stopped answering. The work stands down
                     # with the reason and the time it could resume.
-                    resume_after = core.quota_reset_for(self.conn, work["runtime"])
                     core.pause_work(
                         self.conn, work["id"], "quota_exhausted", resume_after=resume_after,
                     )
-                    self._tell_director_work_ended(
-                        work["id"], name, "quota_exhausted", paused=True, resume_after=resume_after
-                    )
                 else:
-                    core.fail_work(self.conn, work["id"], turn.death.reason, output_tail=tail)
-                    self._tell_director_work_ended(work["id"], name, turn.death.reason)
-            except Exception:
-                _log.exception("could not record %s's death (%s)", name, turn.death.reason)
-        if turn.death.reason == "context_overflow":
+                    core.fail_work(
+                        self.conn, work["id"], reason, output_tail="\n".join(turn.death.tail)
+                    )
+                told = self._work_ended_text(
+                    work["id"], name, reason, paused=reason == "quota_exhausted",
+                    resume_after=resume_after,
+                )
+                if told is not None:
+                    notices.setdefault(told[0], []).append(told[1])
+            if agent["kind"] == "lead" and reason != "killed":
+                notices.setdefault(core.manager_name(self.conn, agent["id"]), []).append(
+                    _lead_turn_died_notice(name, reason, resume_after)
+                )
+            for recipient, texts in notices.items():
+                core.send_message(self.conn, core.OFFICE_SENDER, recipient, "\n\n".join(texts))
+        except Exception:
+            _log.exception("could not record %s's death (%s)", name, reason)
+        if reason == "context_overflow":
             # The session is unusable; the next turn must start a fresh one.
             with db.transaction(self.conn) as conn:
                 conn.execute("UPDATE agents SET session_id = NULL WHERE name = ?", (name,))
 
-    def _tell_director_work_ended(
+    def _work_ended_text(
         self,
         work_id: int,
         agent_name: str,
@@ -1306,29 +1338,37 @@ class Bus:
         paused: bool = False,
         resume_after=None,
         caused_by: str | None = None,
-    ) -> None:
-        """Tell the director a work failed or went to pause, as a message from
-                `office`.
+    ) -> tuple[str, str] | None:
+        """(recipient, text) of the notice that a work failed or went to pause.
 
-                Silent with no director hired, and silent when the director itself
-                caused it (agent(op=stop)).
+                The recipient is core.work_notice_recipient's. For a work the director
+                assigned itself the notice is written to the owner's journal here
+                instead, and None is returned. Nothing is said to whoever caused it
+                with a stop, `caused_by`, the owner included.
         """
+        recipient = core.work_notice_recipient(self.conn, work_id)
+        brief = db.query_one(self.conn, "SELECT brief FROM works WHERE id = ?", (work_id,))["brief"]
+        if recipient is None:
+            if caused_by != core.get_owner_name(self.conn):
+                core.record_notice(
+                    self.conn, "info",
+                    _work_ended_journal(work_id, agent_name, brief, reason, paused, resume_after),
+                )
+            return None
+        if recipient == caused_by:
+            return None
+        return recipient, _work_ended_notice(work_id, agent_name, brief, reason, paused, resume_after)
+
+    def _tell_work_ended(self, work_id: int, agent_name: str, reason: str, *, caused_by: str) -> None:
+        """Send the notice that a work was failed by a stop (_work_ended_text).
+                Never raises."""
         try:
-            director = db.query_one(
-                self.conn, "SELECT name FROM agents WHERE kind = 'director'"
-            )
-            if director is None or director["name"] == caused_by:
-                return
-            work = db.query_one(self.conn, "SELECT brief FROM works WHERE id = ?", (work_id,))
-            brief = work["brief"] if work else ""
-            core.send_message(
-                self.conn, core.OFFICE_SENDER, director["name"],
-                _work_ended_notice(work_id, agent_name, brief, reason, paused, resume_after),
-            )
+            told = self._work_ended_text(work_id, agent_name, reason, caused_by=caused_by)
+            if told is not None:
+                core.send_message(self.conn, core.OFFICE_SENDER, told[0], told[1])
         except Exception:
             _log.exception(
-                "could not tell the director that work %s (%s) ended as %s",
-                work_id, agent_name, reason,
+                "could not tell anybody that work %s (%s) ended as %s", work_id, agent_name, reason
             )
 
     # -- the owner's journal ----------------------------------------------
@@ -1408,7 +1448,10 @@ class Bus:
     # -- hub restart -------------------------------------------------------
 
     def recover_after_restart(self) -> None:
-        """Every work that had a turn on it died with the hub. Say so.
+        """Every work whose assignee had a turn in progress died with the hub. Say
+                so: to the director, all of them; to every other agent that would be
+                told of such a work (core.work_notice_recipient) or of a lead's dead
+                turn, those.
 
                 The predicate is `agents.turn_start_message_id IS NOT NULL`: the column
                 is set when a turn spawns and cleared when it ends.
@@ -1423,6 +1466,19 @@ class Bus:
             "JOIN agents a ON a.id = w.agent_id "
             "WHERE w.status = 'running' AND a.turn_start_message_id IS NOT NULL",
         )
+        killed_leads = db.query(
+            self.conn,
+            "SELECT a.name, m.name AS manager FROM agents a JOIN agents m ON m.id = a.manager_agent_id "
+            "WHERE a.kind = 'lead' AND a.turn_start_message_id IS NOT NULL ORDER BY a.name",
+        )
+        # recipient -> (its interrupted works, its leads whose turn died)
+        told: dict[str, tuple[list, list[str]]] = {}
+        for work in interrupted:
+            recipient = core.work_notice_recipient(self.conn, work["id"])
+            if recipient is not None:
+                told.setdefault(recipient, ([], []))[0].append(work)
+        for lead in killed_leads:
+            told.setdefault(lead["manager"], ([], []))[1].append(lead["name"])
         # Through core, not raw SQL: core owns the only writer into `events`.
         for work in interrupted:
             tail_file = self.config.tails_dir / f"{work['agent']}.log"
@@ -1470,17 +1526,24 @@ class Bus:
         for row in db.query(self.conn, "SELECT id FROM agents WHERE status = 'running'"):
             self._set_status(row["id"], "idle")
 
-        director = db.query_one(self.conn, "SELECT * FROM agents WHERE kind = 'director'")
+        director = db.query_one(self.conn, "SELECT name FROM agents WHERE kind = 'director'")
         if director is None:
             return
-        try:
-            # Sent as "office", the same participant name the inbox and the notices
-            # already use.
-            core.send_message(
-                self.conn, core.OFFICE_SENDER, director["name"], _restart_delta(interrupted)
-            )
-        except Exception:
-            _log.exception("could not deliver the restart delta to %s", director["name"])
+        # The director hears of every interrupted work; everybody else only of
+        # what it would have been told of, and only when there is something.
+        messages = {director["name"]: (list(interrupted), told.get(director["name"], ([], []))[1])}
+        for recipient, (works, leads) in told.items():
+            if recipient != director["name"]:
+                messages[recipient] = (works, leads)
+        for recipient, (works, leads) in messages.items():
+            try:
+                # Sent as "office", the same participant name the inbox and the
+                # notices already use.
+                core.send_message(
+                    self.conn, core.OFFICE_SENDER, recipient, _restart_delta(works, leads)
+                )
+            except Exception:
+                _log.exception("could not deliver the restart delta to %s", recipient)
         self._schedule()
 
     # -- composition -------------------------------------------------------
@@ -1491,16 +1554,15 @@ class Bus:
             "name": agent["name"],
             # A system prompt is fixed when the session is created (_start_turn).
             # The team, the quota and the model catalogue are roster()'s.
-            "rules": _rules(self.conn),
+            "rules": _rules(self.conn, agent["kind"]),
             "workspace": str(self._workspace_of(agent["name"]) or "(none yet)"),
             "sandbox": str(self._sandbox_of(agent["name"]) or "(none yet)"),
             # Through core, like every other reader of the owner's name.
             "owner": core.get_owner_name(self.conn),
-            "instructions": _setting(self.conn, "director_instructions", "(none yet)"),
+            "instructions": agent["instructions"] or "(none)",
         }
-        # The executor template names fewer fields; format_map with a full dict
-        # ignores the ones a template does not mention.
-
+        # format_map with a full dict ignores the fields a template does not
+        # mention.
         return template.format_map(fields)
 
     def _compose(
@@ -1631,31 +1693,22 @@ _PROMPT_DIR = Path(__file__).parent / "prompts"
 
 
 def _template(kind: str) -> str:
-    name = "director" if kind == "director" else "executor"
-    return (_PROMPT_DIR / f"{name}.md").read_text(encoding="utf-8")
+    """The system prompt template for an agent of `kind`: director, lead or
+    executor. Its placeholders are {name}, {owner}, {rules}, {workspace},
+    {sandbox} and {instructions}."""
+    return (_PROMPT_DIR / f"{kind}.md").read_text(encoding="utf-8")
 
 
-def _rules(conn: sqlite3.Connection) -> str:
-    """The standing conventions, substituted into both templates on every turn
-        of every agent.
-
-        A titled rule reads `- [id] Title: text`, an untitled one `- [id] text`.
-        The id is the address note(op=update|delete, kind=rule) takes.
+def _rules(conn: sqlite3.Connection, kind: str) -> str:
+    """The standing conventions, substituted into every template on every turn
+        of every agent, as core.render_rules() prints them. The director's also
+        says that the number is the address note(op=update|delete, kind=rule)
+        takes.
     """
-    rows = db.query(conn, "SELECT id, title, text FROM rules ORDER BY id")
-    if not rows:
-        return "(none yet)"
-    lines = [
-        f"- [{r['id']}] {r['title']}: {r['text']}" if r["title"] else f"- [{r['id']}] {r['text']}"
-        for r in rows
-    ]
-    lines.append("([n] is the rule_id note(op=update|delete, kind=rule) takes.)")
-    return "\n".join(lines)
-
-
-def _setting(conn: sqlite3.Connection, key: str, default: str) -> str:
-    row = db.query_one(conn, "SELECT value FROM settings WHERE key = ?", (key,))
-    return row["value"] if row and row["value"] else default
+    rules = core.render_rules(conn)
+    if kind == "director" and rules != core.NO_RULES:
+        rules += "\n([n] is the rule_id note(op=update|delete, kind=rule) takes.)"
+    return rules
 
 
 def _fmt_epoch(value) -> str:
@@ -1673,21 +1726,50 @@ def _fmt_epoch(value) -> str:
 def _work_ended_notice(
     work_id: int, agent_name: str, brief: str, reason: str, paused: bool, resume_after
 ) -> str:
-    """What the office says to the director about a work that failed or paused.
+    """What the office says to the work's assigner, or to its assignee's manager,
+    about a work that failed or paused.
     """
     head = f"[office] work {work_id} ({agent_name}): {_excerpt(brief)}".rstrip(": ")
     if paused:
         when = _fmt_epoch(resume_after) if resume_after else None
         return (
             f"{head}\nPaused: {reason}" + (f", earliest resume {when}" if when else "") + ". "
-            "Nothing is waiting on it — decide whether to wait, move the workspace to another "
-            "runtime, or re-cut the job."
+            "Nothing is waiting on it — decide whether to wait — then resume it with "
+            f"work_reassign(work={work_id}, to_agent={agent_name}, workspace='inherit') — move "
+            "the workspace to another runtime, or re-cut the job."
         )
     return (
-        f"{head}\nFailed: {reason}. The output tail is on the work record. The workspace outlived "
-        "the turn: work_reassign(workspace='inherit') carries its commits, uncommitted changes and "
-        "branch to whoever continues it — the same agent included — while a new work starts from a "
-        "clean clone and leaves all of that behind."
+        f"{head}\nFailed: {reason}. Read its output tail with work(op=show, work={work_id}). The "
+        "workspace outlived the turn: work_reassign(workspace='inherit') carries its commits, "
+        "uncommitted changes and branch to whoever continues it — the same agent included — and "
+        "workspace='fresh' starts the brief again in a clean clone."
+    )
+
+
+def _work_ended_journal(
+    work_id: int, agent_name: str, brief: str, reason: str, paused: bool, resume_after
+) -> str:
+    """The owner's journal line about a work the director assigned itself that
+    failed or paused."""
+    head = f"Work {work_id} ({agent_name}): {_excerpt(brief)}".rstrip(": ")
+    if paused:
+        when = _fmt_epoch(resume_after) if resume_after else None
+        return f"{head} — paused: {reason}" + (f", earliest resume {when}." if when else ".")
+    return f"{head} — failed: {reason}. The output tail is on the work record."
+
+
+def _lead_turn_died_notice(name: str, reason: str, resume_after) -> str:
+    """What the office says to a lead's manager when the lead's turn died."""
+    if reason == "quota_exhausted":
+        when = _fmt_epoch(resume_after) if resume_after else None
+        cause = "its runtime is out of quota" + (f", earliest return {when}" if when else "")
+    elif reason == "context_overflow":
+        cause = "its context overflowed, and its next turn starts a fresh session"
+    else:
+        cause = reason
+    return (
+        f"[office] {name}'s turn died: {cause}. Whatever it was in the middle of stopped there; "
+        f"ask {name} where it had got to once it can answer."
     )
 
 
@@ -1711,7 +1793,7 @@ def _ending_nudge() -> str:
 
 
 def _wordless_turn_notice(agent_name: str) -> str:
-    """What the office says to the director about an executor that has ended two
+    """What the office says to an agent's manager when the agent has ended two
         turns in a row without a word to anybody (_escalate_wordless_turn).
     """
     return (
@@ -1774,7 +1856,7 @@ def _last_actions(turn, limit: int = 5) -> list[str]:
 
 
 def _silent_turn_notice(agent_name: str, quiet_for: float, running_for: float, actions: list[str]) -> str:
-    """What the office says to the director about an agent that has gone quiet
+    """What the office says to an agent's manager when the agent has gone quiet
         (_report_silent_turn).
     """
     head = (
@@ -1802,7 +1884,7 @@ def _silent_turn_notice(agent_name: str, quiet_for: float, running_for: float, a
 
 
 def _wordless_turn_journal(agent_name: str) -> str:
-    """The owner's line for the one case the notice above cannot be sent in:
+    """The owner's line for the one case the notice above has no recipient in:
         the turn was the director's own.
     """
     return (
@@ -1826,9 +1908,14 @@ def _undelivered_notice(recipient: str, reason: str, resume_after, bodies: list[
     else:
         cause = f"the turn died: {reason}"
     what = "message was" if len(bodies) == 1 else f"{len(bodies)} messages were"
+    if reason == "quota_exhausted":
+        after = f"after {_fmt_epoch(resume_after)}" if resume_after else "later"
+        again = f"if it still matters, remind() it to them for {after}"
+    else:
+        again = "send it again if it still matters"
     lines = [
         f"[office] Your {what} not processed by {recipient} — {cause}. "
-        "Nothing is re-delivered automatically; send it again if it still matters."
+        f"Nothing is re-delivered automatically; {again}."
     ]
     lines.extend(f"  - {_excerpt(body)}" for body in bodies)
     return "\n".join(lines)
@@ -1979,27 +2066,66 @@ def _restart_killed_director(interrupted: list) -> str:
     return "\n".join(lines)
 
 
-def _restart_delta(interrupted: list) -> str:
-    summary = _restart_summary(interrupted)
-    if not interrupted:
-        return f"[office] {summary} Pick up wherever you left off."
-    return f"[office] {summary}\nDecide what to restart."
+def _restart_delta(interrupted: list, leads: list[str]) -> str:
+    """The office's message after a restart: the interrupted works and the leads
+    reporting to the recipient whose turn died."""
+    if not interrupted and not leads:
+        return f"[office] {_restart_summary(interrupted)} Pick up wherever you left off."
+    if interrupted:
+        lines = [
+            f"[office] {_restart_summary(interrupted)}",
+            "work(op=show, work=<id>) shows a work's output tail.",
+        ]
+    else:
+        lines = ["[office] The hub restarted and every turn that was running died with it."]
+    if leads:
+        lines.append(
+            f"These leads of yours were in a turn, which died with the hub: {', '.join(leads)}."
+        )
+    lines.append(
+        "Decide what to continue: work_reassign(workspace='inherit') carries each one on in the "
+        "tree it has, the same agent included."
+    )
+    return "\n".join(lines)
 
 
 def _snapshot(conn: sqlite3.Connection, agent: dict) -> str:
     """The one-off picture a brand-new session gets instead of a delta.
 
-        Assembled from what the office already holds: the team, this agent's own
-        work, the open PRs, the board, and any open ticket addressed to it.
+        Assembled from what the office already holds: who this agent is, the
+        team, this agent's own work, the open PRs, the board, and any open ticket
+        addressed to it.
     """
-    lines = [f"[office] You are {agent['name']} ({agent['kind']}). New session."]
-    roster = db.query(conn, "SELECT name, kind, runtime, status FROM agents ORDER BY id")
-    if roster:
-        lines.append("Team: " + ", ".join(f"{r['name']}({r['kind']}/{r['runtime']}/{r['status']})" for r in roster))
+    who = f"{agent['name']} ({agent['kind']}"
+    if agent["title"]:
+        who += f", {agent['title']}"
+    who += ")"
+    manager = core.manager_name(conn, agent["id"])
+    if manager is not None:
+        who += f", reporting to {manager}"
+    lines = [f"[office] You are {who}. New session."]
+    roster = core.team_tree(conn)
+    lines.append("Team, each agent under its manager:")
+    lines.extend(
+        "  " * (r["depth"] + 1) + r["name"] + (f" — {r['title']}" if r["title"] else "")
+        + f" ({r['kind']}/{r['runtime']}/{r['status']})"
+        for r in roster
+    )
     # core's own reader, not a query of our own.
     work = core.current_work(conn, agent["id"])
     if work:
-        lines.append(f"Your work: {work['brief']} (branch {work['branch']})")
+        assigner = (
+            "you" if work["assigned_by_agent_id"] == agent["id"]
+            else db.query_one(
+                conn, "SELECT name FROM agents WHERE id = ?", (work["assigned_by_agent_id"],)
+            )["name"]
+        )
+        lines.append(
+            f"Your work: work {work['id']} "
+            f"[{ {'running': 'open', 'done': 'reported'}.get(work['status'], work['status']) }] "
+            f"on branch {work['branch']}, "
+            f"assigned by {assigner}: {work['brief']}"
+        )
 
     # Open PRs. Merged and closed ones are deleted rather than archived.
     prs = db.query(

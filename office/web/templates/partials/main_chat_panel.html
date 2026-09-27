@@ -78,8 +78,8 @@
 </div>
 {% else %}
 <p class="text-dim" style="margin-top: 0; font-size: 13px;">
-  No director yet. Hiring the director is the one staffing decision that is yours — the director
-  staffs everyone else.
+  No director yet. Hiring the director is the one staffing decision that is yours — everyone
+  else is hired by the director or by the leads under it.
 </p>
 <form method="post" action="/agents/director" hx-post="/agents/director" hx-target="#main-chat" hx-swap="outerHTML"
       data-office-required="owner_name name runtime model">
@@ -101,7 +101,7 @@
   </div>
   <div class="form-row mb-0">
     <label for="hd-instructions">Instructions</label>
-    <textarea id="hd-instructions" name="instructions" style="min-height: 100px;">{{ form.instructions if form else (instructions or '') }}</textarea>
+    <textarea id="hd-instructions" name="instructions" style="min-height: 100px;">{{ form.instructions or '' }}</textarea>
     <span class="hint">
       The standing brief, the same one the Settings page holds — project rules and wiki are
       injected separately.

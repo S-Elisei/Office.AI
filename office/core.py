@@ -19,9 +19,6 @@ TASK_STATUSES = ("idea", "planned", "needs_clarification", "in_progress", "pause
 
 DEFAULT_OWNER_NAME = "Owner"
 
-#: The owner's standing brief to the director.
-DIRECTOR_INSTRUCTIONS_SETTING = "director_instructions"
-
 # The office's own name in the participant namespace.
 OFFICE_SENDER = "office"
 
@@ -111,7 +108,6 @@ def get_setting(conn, key: str, default: str | None = None) -> str | None:
 
 
 def set_setting(conn, key: str, value: str, actor: str | None = None) -> None:
-    previous = get_setting(conn, key, None)
     with db.transaction(conn):
         db.execute(
             conn,
@@ -120,22 +116,6 @@ def set_setting(conn, key: str, value: str, actor: str | None = None) -> None:
             (key, value),
         )
         _emit(conn, "settings", "setting", None, {"key": key}, actor=actor)
-    # The standing brief is printed into the director's system prompt, which is
-    # fixed when its session is created. The new text is sent, whole, to whoever
-    # is working under it.
-    if key == DIRECTOR_INSTRUCTIONS_SETTING and value != previous:
-        # To the director and nobody else.
-        try:
-            row = db.query_one(conn, "SELECT name FROM agents WHERE kind = 'director'")
-            if row is not None and row["name"] != actor:
-                tell_quietly(
-                    conn, row["name"],
-                    "[office] Your standing instructions have been rewritten. This replaces what "
-                    "stands under Instructions in your system prompt — work from this text from "
-                    "now on." + chr(10) + chr(10) + value,
-                )
-        except Exception:
-            log.exception("could not tell the director its instructions changed")
 
 
 def get_owner_name(conn) -> str:
@@ -336,15 +316,11 @@ def drop_scheduled_message(conn, wake_id: int, actor: str | None = None) -> None
         _emit(conn, "messages", "scheduled_message", wake_id, {"deleted": True}, actor=actor)
 
 
-def scheduled_messages(conn, sender: str | None = None) -> list[dict]:
-    """Wakes that have not fired, soonest first: all of them, or one sender's."""
-    if sender is None:
-        rows = db.query(conn, "SELECT * FROM scheduled_messages ORDER BY due_at, id")
-    else:
-        rows = db.query(
-            conn, "SELECT * FROM scheduled_messages WHERE sender = ? ORDER BY due_at, id", (sender,)
-        )
-    return [dict(r) for r in rows]
+def scheduled_messages(conn) -> list[dict]:
+    """Every wake that has not fired, soonest first."""
+    return [
+        dict(r) for r in db.query(conn, "SELECT * FROM scheduled_messages ORDER BY due_at, id")
+    ]
 
 
 # --------------------------------------------------------------------------- expectations
@@ -590,6 +566,9 @@ def hire(
     model: str,
     effort: str | None,
     kind: str = "executor",
+    title: str | None = None,
+    manager_agent_id: int | None = None,
+    instructions: str | None = None,
     adopt_workspace_id: str | None = None,
     actor: str | None = None,
 ) -> dict:
@@ -598,9 +577,10 @@ def hire(
     Blocking: call this off the event loop, never from an async request handler.
 
     The hire composition is exactly {runtime, model, effort}; there is no toolset
-    and no MCP server to choose. `adopt_workspace_id` takes over an existing
-    workspace instead of cloning a new one, and leaves it standing where the
-    previous owner left it, branch and uncommitted changes alike.
+    and no MCP server to choose. A lead or an executor is hired with its title
+    and its manager, the director with neither. `adopt_workspace_id` takes over
+    a workspace that belongs to nobody instead of cloning a new one, and leaves it standing
+    where the previous owner left it, branch and uncommitted changes alike.
 
     A fresh workspace is handed out on the source repository's own default
     branch, and nothing here moves it.
@@ -628,17 +608,32 @@ def hire(
     existing = db.query_one(conn, "SELECT id FROM agents WHERE name = ?", (name,))
     if existing is not None:
         raise ValueError(f"an agent named '{name}' already exists")
+    if adopt_workspace_id is not None:
+        ws_row = db.query_one(
+            conn,
+            "SELECT w.*, a.name AS owner FROM workspaces w "
+            "LEFT JOIN agents a ON a.id = w.owner_agent_id WHERE w.id = ?",
+            (adopt_workspace_id,),
+        )
+        if ws_row is None:
+            raise ValueError(f"no such workspace '{adopt_workspace_id}' — roster() lists the ones that belong to nobody")
+        if ws_row["owner"] is not None:
+            raise ValueError(
+                f"workspace '{adopt_workspace_id}' belongs to {ws_row['owner']} — only a workspace "
+                "that belongs to nobody can be adopted; roster() lists them"
+            )
 
     with db.transaction(conn):
         cur = db.execute(
             conn,
             """
-            INSERT INTO agents (name, kind, runtime, model, effort, status,
-                                last_seen_message_id)
-            VALUES (?, ?, ?, ?, ?, 'provisioning',
+            INSERT INTO agents (name, kind, manager_agent_id, title, instructions, runtime,
+                                model, effort, status, last_seen_message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'provisioning',
                     (SELECT COALESCE(MAX(id), 0) FROM messages))
             """,
-            (name, kind, runtime, model, effort),
+            (name, kind, manager_agent_id, title, _instructions_value(instructions),
+             runtime, model, effort),
         )
         agent_id = cur.lastrowid
         # The watermark starts at "everything so far", not at NULL: a brand-new
@@ -655,9 +650,6 @@ def hire(
 
     try:
         if adopt_workspace_id is not None:
-            ws_row = db.query_one(conn, "SELECT * FROM workspaces WHERE id = ?", (adopt_workspace_id,))
-            if ws_row is None:
-                raise ValueError(f"no such workspace '{adopt_workspace_id}'")
             git.transfer_workspace(ws_row["path"], name)
             workspace_id, path = ws_row["id"], ws_row["path"]
         else:
@@ -696,8 +688,9 @@ def hire(
 def fire(conn, agent_id: int, actor: str | None = None) -> None:
     """Remove an agent.
 
-    Refuses while it still has an active work; works.agent_id cascades on agent
-    deletion.
+    Refuses while it still has an active work or a subordinate. Its failed works
+    and its expectations go with the row (ON DELETE CASCADE), and the deferred
+    messages it set are deleted here.
 
     The workspace is never deleted: workspaces.owner_agent_id -> NULL, so it
     sits free for the next hire, standing on whatever branch its last owner left
@@ -705,7 +698,7 @@ def fire(conn, agent_id: int, actor: str | None = None) -> None:
     """
     agent = _row(conn, "agents", "id", agent_id)
     # 'done' is here because a work that has reported and has not been closed is
-    # an unanswered result; agents.id is an ON DELETE CASCADE parent of works.
+    # an unanswered result.
     active = db.query(
         conn,
         "SELECT id FROM works WHERE agent_id = ? AND status IN ('running', 'paused', 'done')",
@@ -713,8 +706,16 @@ def fire(conn, agent_id: int, actor: str | None = None) -> None:
     )
     if active:
         raise ValueError(
-            f"agent '{agent['name']}' has {len(active)} active work(s) — reassign, close or "
-            "finish them before firing"
+            f"agent '{agent['name']}' has {len(active)} active work(s) — reassign or close them "
+            "before firing"
+        )
+    subordinates = db.query(
+        conn, "SELECT name FROM agents WHERE manager_agent_id = ? ORDER BY name", (agent_id,)
+    )
+    if subordinates:
+        raise ValueError(
+            f"agent '{agent['name']}' still has {', '.join(r['name'] for r in subordinates)} "
+            "under it — move them to another manager (agent(op=move)) or fire them first"
         )
     # `prs.author_agent_id` is NOT NULL and carries no ON DELETE clause, so
     # deleting an agent that opened a PR still standing fails the foreign key.
@@ -730,8 +731,194 @@ def fire(conn, agent_id: int, actor: str | None = None) -> None:
             "firing them; a pull request keeps the name of whoever wrote it"
         )
     with db.transaction(conn):
+        wakes = db.execute(
+            conn, "DELETE FROM scheduled_messages WHERE sender = ?", (agent["name"],)
+        ).rowcount
+        if wakes:
+            _emit(conn, "messages", "scheduled_message", None, {"deleted": True}, actor=actor)
         db.execute(conn, "DELETE FROM agents WHERE id = ?", (agent_id,))
         _emit(conn, "agents", "agent", agent_id, {"name": agent["name"], "status": "fired"}, actor=actor)
+
+
+# --------------------------------------------------------------------------- the team tree
+#
+# Every agent but the director has a manager. An agent's subtree is everyone
+# whose chain of managers reaches it, itself excluded.
+
+
+def subtree_ids(conn, agent_id: int) -> set[int]:
+    """The ids of every agent in `agent_id`'s subtree."""
+    return {
+        r["id"]
+        for r in db.query(
+            conn,
+            "WITH RECURSIVE sub(id) AS ("
+            "SELECT id FROM agents WHERE manager_agent_id = ? "
+            "UNION SELECT a.id FROM agents a JOIN sub ON a.manager_agent_id = sub.id"
+            ") SELECT id FROM sub",
+            (agent_id,),
+        )
+    }
+
+
+def manager_name(conn, agent_id: int) -> str | None:
+    """The name of the agent's manager, or None for the director."""
+    row = db.query_one(
+        conn,
+        "SELECT m.name FROM agents a JOIN agents m ON m.id = a.manager_agent_id WHERE a.id = ?",
+        (agent_id,),
+    )
+    return row["name"] if row is not None else None
+
+
+def check_in_subtree(conn, caller: dict, target: dict, what: str) -> None:
+    """Refuse unless `target` is in `caller`'s subtree. `what` names the call in
+    the refusal."""
+    if target["id"] not in subtree_ids(conn, caller["id"]):
+        raise PermissionError(
+            f"{what} reaches only the agents under you, and '{target['name']}' is not one of "
+            "them — roster() shows the tree"
+        )
+
+
+def check_work_reach(conn, caller: dict, work: dict, what: str) -> None:
+    """Refuse unless `caller` assigned `work` or the work's assignee is in its
+    subtree. `what` names the call in the refusal."""
+    if work["assigned_by_agent_id"] == caller["id"]:
+        return
+    if work["agent_id"] in subtree_ids(conn, caller["id"]):
+        return
+    assignee = _agent_name(conn, work["agent_id"])
+    assigner = _agent_name(conn, work["assigned_by_agent_id"])
+    raise PermissionError(
+        f"{what} takes a work you assigned or one whose assignee is under you; work "
+        f"{work['id']} is {assignee}'s, assigned by {assigner} — ask {assigner}"
+    )
+
+
+def work_notice_recipient(conn, work_id: int) -> str | None:
+    """Who is told that this work failed or paused: its assigner, or, for a work
+    its assignee assigned itself, the assignee's manager. None for a work the
+    director assigned itself."""
+    work = _row(conn, "works", "id", work_id)
+    if work["assigned_by_agent_id"] != work["agent_id"]:
+        return _agent_name(conn, work["assigned_by_agent_id"])
+    return manager_name(conn, work["agent_id"])
+
+
+def _instructions_value(text: str | None) -> str | None:
+    """Standing instructions as stored: None for no text or only whitespace."""
+    return text if text and text.strip() else None
+
+
+def set_instructions(conn, agent_id: int, text: str, actor: str | None = None) -> bool:
+    """Replace an agent's standing instructions; empty text clears them.
+    Returns whether anything changed.
+
+    A change is sent to the agent as a quiet line. Text equal to what is stored
+    writes and sends nothing.
+    """
+    agent = _row(conn, "agents", "id", agent_id)
+    value = _instructions_value(text)
+    if value == agent["instructions"]:
+        return False
+    with db.transaction(conn):
+        db.execute(conn, "UPDATE agents SET instructions = ? WHERE id = ?", (value, agent_id))
+        _emit(conn, "agents", "agent", agent_id, {"name": agent["name"], "instructions": True},
+              actor=actor)
+    if value is None:
+        line = (
+            "[office] Your standing instructions have been cleared. Disregard the standing "
+            "instructions in your system prompt from now on."
+        )
+    else:
+        line = (
+            "[office] Your standing instructions have been rewritten. This replaces the standing "
+            "instructions in your system prompt — work from this text from now on."
+            "\n\n" + value
+        )
+    tell_quietly(conn, agent["name"], line)
+    return True
+
+
+def move_agent(conn, agent_id: int, manager_id: int, actor: str) -> dict:
+    """agent(op=move): put `agent_id` under `manager_id`, its subtree with it.
+
+    `actor` is the calling manager. The target is in its subtree; the new
+    manager is the caller or a lead in its subtree, and neither the target nor
+    under it. Refused while the moved subtree holds a work whose assigner would
+    afterwards be neither its assignee nor above it.
+
+    The moved agent is told its new manager as a quiet line; nobody else is told.
+
+    The decision and the write are one transaction.
+    """
+    with db.transaction(conn):
+        caller = _row(conn, "agents", "name", actor)
+        target = _row(conn, "agents", "id", agent_id)
+        manager = _row(conn, "agents", "id", manager_id)
+        check_in_subtree(conn, caller, target, "agent(op=move)")
+        if manager["id"] != caller["id"] and not (
+            manager["kind"] == "lead" and manager["id"] in subtree_ids(conn, caller["id"])
+        ):
+            raise PermissionError(
+                f"the new manager has to be you or a lead under you, and '{manager['name']}' is "
+                "neither — roster() shows the tree"
+            )
+        moved = {target["id"]} | subtree_ids(conn, target["id"])
+        if manager["id"] in moved:
+            raise ValueError(
+                f"'{manager['name']}' is '{target['name']}' or under it — an agent cannot be "
+                "moved under itself"
+            )
+        parent = {
+            r["id"]: r["manager_agent_id"]
+            for r in db.query(conn, "SELECT id, manager_agent_id FROM agents")
+        }
+        parent[target["id"]] = manager["id"]
+        works = db.query(
+            conn,
+            "SELECT w.id, w.agent_id, w.assigned_by_agent_id, w.status, a.name AS assignee, "
+            "b.name AS assigner FROM works w JOIN agents a ON a.id = w.agent_id "
+            "JOIN agents b ON b.id = w.assigned_by_agent_id ORDER BY w.id",
+        )
+        for w in works:
+            if w["agent_id"] not in moved or w["assigned_by_agent_id"] == w["agent_id"]:
+                continue
+            above = set()
+            at = parent[w["agent_id"]]
+            while at is not None:
+                above.add(at)
+                at = parent[at]
+            if w["assigned_by_agent_id"] not in above:
+                if w["status"] == "done":
+                    remedy = "It has reported: close it with work_close, then move again"
+                elif w["status"] == "failed":
+                    remedy = (
+                        f"work_reassign it to {w['assignee']} with workspace=inherit, which opens "
+                        "it again with you as its assigner, or write it off with work_dismiss, "
+                        "then move again"
+                    )
+                else:
+                    remedy = (
+                        f"work_reassign it to {w['assignee']} with workspace=inherit to become "
+                        "its assigner, or close it with work_close, then move again"
+                    )
+                raise ValueError(
+                    f"'{target['name']}' cannot move under '{manager['name']}': work {w['id']} "
+                    f"({w['assignee']}) was assigned by {w['assigner']}, who would no longer be "
+                    f"above {w['assignee']}. {remedy}"
+                )
+        db.execute(
+            conn, "UPDATE agents SET manager_agent_id = ? WHERE id = ?", (manager["id"], target["id"])
+        )
+        _emit(conn, "agents", "agent", target["id"],
+              {"name": target["name"], "manager": manager["name"]}, actor=actor)
+    tell_quietly(
+        conn, target["name"],
+        f"[office] You have been moved: your manager is now {manager['name']}.",
+    )
+    return _row(conn, "agents", "id", target["id"])
 
 
 def set_agent_status(conn, agent_id: int, status: str, actor: str | None = None) -> None:
@@ -1055,29 +1242,51 @@ def ownerless_workspaces(conn) -> list[dict]:
     ]
 
 
-def roster(conn) -> dict:
-    """roster(): who exists, who's busy, quota, context fill.
-
-    `works` carries every work that is still on the books - a row exists exactly
-    as long as the work is open, so there is no status filter here at all - with
-    the reason each one stopped and, for a pause, the earliest it could resume.
-    """
-    agents = [
+def team_tree(conn) -> list[dict]:
+    """Every agent, each followed by its subordinates, depth first and by name
+    among siblings. Each row carries `depth`, 0 for the director."""
+    rows = [
         dict(r)
         for r in db.query(
             conn,
-            "SELECT id, name, kind, runtime, model, effort, status, context_used, context_limit "
-            "FROM agents ORDER BY (kind = 'director') DESC, name COLLATE NOCASE",
+            "SELECT id, name, kind, manager_agent_id, title, runtime, model, effort, status, "
+            "context_used, context_limit FROM agents ORDER BY name COLLATE NOCASE",
         )
     ]
+    children: dict[int | None, list[dict]] = {}
+    for row in rows:
+        children.setdefault(row["manager_agent_id"], []).append(row)
+    ordered: list[dict] = []
+
+    def _walk(manager_id: int | None, depth: int) -> None:
+        for row in children.get(manager_id, []):
+            ordered.append({**row, "depth": depth})
+            _walk(row["id"], depth + 1)
+
+    _walk(None, 0)
+    return ordered
+
+
+def roster(conn) -> dict:
+    """roster(): who exists, who's busy, quota, context fill.
+
+    `agents` is team_tree(). `works` carries every work that is still on the
+    books - a row exists exactly as long as the work is open, so there is no
+    status filter here at all - with its assigner, the reason it stopped and,
+    for a pause, the earliest it could resume.
+    """
+    agents = team_tree(conn)
     quota = quota_buckets(conn)
     works = [
         dict(r)
         for r in db.query(
             conn,
-            "SELECT works.id, works.agent_id, agents.name AS agent_name, works.brief, works.branch, "
-            "works.status, works.fail_reason, works.pause_reason, works.resume_after "
-            "FROM works JOIN agents ON agents.id = works.agent_id ORDER BY works.id",
+            "SELECT works.id, works.agent_id, agents.name AS agent_name, "
+            "works.assigned_by_agent_id, assigner.name AS assigner_name, works.brief, "
+            "works.branch, works.status, works.fail_reason, works.pause_reason, "
+            "works.resume_after "
+            "FROM works JOIN agents ON agents.id = works.agent_id "
+            "JOIN agents assigner ON assigner.id = works.assigned_by_agent_id ORDER BY works.id",
         )
     ]
     # A task marked 'planned'/'in_progress' whose blocker isn't 'done' looks
@@ -1158,20 +1367,25 @@ def move_task(conn, task_id: int, status: str, position: int | None = None, acto
 # sets.
 
 
-def close_task(conn, task_id: int, result: str, actor: str | None = None) -> dict:
+def close_task(conn, task_id: int, result: str, actor: str) -> dict:
     """Close a task with a one-line result: the works behind it collapse into that
     line and their rows are deleted.
 
-    Refuses on a work that has REPORTED and not been closed, and names it. A
-    still-running work is not checked.
+    `actor` is the calling agent. Every work on the task has to be within its
+    reach as work_close measures it (check_work_reach). Refuses on a work that
+    has REPORTED and not been closed, and names it. A still-running work is not
+    otherwise checked.
     """
+    caller = _row(conn, "agents", "name", actor)
+    for work in db.query(conn, "SELECT * FROM works WHERE task_id = ? ORDER BY id", (task_id,)):
+        check_work_reach(conn, caller, dict(work), f"moving task {task_id} to done")
     reported = db.query_one(
         conn, "SELECT id FROM works WHERE task_id = ? AND status = 'done' ORDER BY id", (task_id,)
     )
     if reported is not None:
         raise ValueError(
             f"work {reported['id']} on task {task_id} has reported and is waiting to be closed — "
-            "close it (close_work) and then close the task"
+            "close it (work_close) and then close the task"
         )
     with db.transaction(conn):
         db.execute(
@@ -1233,38 +1447,43 @@ def unlink_tasks(conn, blocking_task_id: int, blocked_task_id: int, actor: str |
 
 
 def assign_work(
-    conn, *, agent_id: int, brief: str, task_id: int | None, branch: str, actor: str | None = None
+    conn, *, agent_id: int, brief: str, task_id: int | None, branch: str, actor: str
 ) -> dict:
     """assign(agent, brief, task, branch).
+
+    `actor` is the calling manager, recorded as the assigner; the agent is the
+    caller itself or one in its subtree.
 
     Branch is mandatory; the office never guesses one and never acts on one.
     This writes a work row and sends the brief: no git call, no checkout, no
     reservation. It takes no Config.
 
-    The name lives in works.branch as what the director asked for; the agent
+    The name lives in works.branch as what the assigner asked for; the agent
     creates the branch itself.
+
+    The decision and the write are one transaction.
     """
-    agent = _row(conn, "agents", "id", agent_id)
-    # 'done' belongs in this tuple: a work that has reported and has not been
-    # closed is still an obligation on both sides. 'failed' is deliberately NOT
-    # here.
-    active = db.query_one(
-        conn,
-        "SELECT id FROM works WHERE agent_id = ? AND status IN ('running', 'paused', 'done')",
-        (agent_id,),
-    )
-    if active is not None:
-        raise ValueError(f"agent '{agent['name']}' already has an active work ({active['id']})")
-
-    ws_row = workspace_of(conn, agent_id) if agent["status"] != "provisioning" else None
-    workspace_id = ws_row["id"] if ws_row is not None else None
-
     with db.transaction(conn):
+        caller = _row(conn, "agents", "name", actor)
+        agent = _row(conn, "agents", "id", agent_id)
+        if agent_id != caller["id"]:
+            check_in_subtree(conn, caller, agent, "assign")
+        # 'done' belongs in this tuple: a work that has reported and has not been
+        # closed is still an obligation on both sides. 'failed' is not here.
+        active = db.query_one(
+            conn,
+            "SELECT id FROM works WHERE agent_id = ? AND status IN ('running', 'paused', 'done')",
+            (agent_id,),
+        )
+        if active is not None:
+            raise ValueError(f"agent '{agent['name']}' already has an active work ({active['id']})")
+        ws_row = workspace_of(conn, agent_id) if agent["status"] != "provisioning" else None
+        workspace_id = ws_row["id"] if ws_row is not None else None
         cur = db.execute(
             conn,
-            "INSERT INTO works (task_id, agent_id, brief, branch, workspace_id, status) "
-            "VALUES (?, ?, ?, ?, ?, 'running')",
-            (task_id, agent_id, brief, branch, workspace_id),
+            "INSERT INTO works (task_id, agent_id, assigned_by_agent_id, brief, branch, "
+            "workspace_id, status) VALUES (?, ?, ?, ?, ?, ?, 'running')",
+            (task_id, agent_id, caller["id"], brief, branch, workspace_id),
         )
         work_id = cur.lastrowid
         _emit(
@@ -1325,11 +1544,9 @@ def current_work(conn, agent_id: int) -> dict | None:
 def finish_work(conn, work_id: int, summary: str | None = None, actor: str | None = None) -> dict:
     """work(op=finish). Any PR creation is the caller's job.
 
-    The summary reaches the director as a direct message from the agent that
-    finished. The row is marked before the message is sent.
-
-    Silent with no director hired, and silent for a director finishing its own
-    work.
+    The summary reaches the work's assigner as a direct message from the agent
+    that finished, and nobody when the assignee is its own assigner. The row is
+    marked before the message is sent.
 
     The row is marked `done`, not deleted, and nothing is written to the task:
     close_work() does both.
@@ -1350,15 +1567,17 @@ def finish_work(conn, work_id: int, summary: str | None = None, actor: str | Non
         _emit(conn, "works", "work", work_id, {"status": "done", "agent": agent_name}, actor=actor)
     # Outside the transaction: send_message opens its own. The sender is the
     # agent the work belonged to rather than `actor`.
-    director = db.query_one(conn, "SELECT name FROM agents WHERE kind = 'director'")
-    if summary and director is not None and director["name"] != agent_name:
-        send_message(conn, agent_name, director["name"], summary)
+    if summary and work["assigned_by_agent_id"] != work["agent_id"]:
+        send_message(conn, agent_name, _agent_name(conn, work["assigned_by_agent_id"]), summary)
     return _row(conn, "works", "id", work_id)
 
 
-def close_work(conn, work_id: int, summary: str | None = None, actor: str | None = None) -> dict:
+def close_work(conn, work_id: int, summary: str | None = None, *, actor: str) -> dict:
     """Accept a reported work and close it: the row goes, and the accepted summary
     becomes the work's one line on its task.
+
+    `actor` is the calling manager, and the work is within its reach
+    (check_work_reach).
 
     The only thing that deletes a work that did not fail.
 
@@ -1373,11 +1592,13 @@ def close_work(conn, work_id: int, summary: str | None = None, actor: str | None
     work = _row(conn, "works", "id", work_id)
     if work is None:
         raise ValueError(f"no such work {work_id}")
+    check_work_reach(conn, _row(conn, "agents", "name", actor), work, "work_close")
     if work["status"] == "failed":
         raise ValueError(
             f"work {work_id} died ({work['fail_reason']}) — it delivered no result and cannot be "
-            "closed as though it had. Write it off with work_dismiss once you have read its "
-            "output tail, or hand the tree on with work_reassign(workspace='inherit')"
+            "closed as though it had. Read its output tail with work(op=show, "
+            f"work={work_id}), then write it off with work_dismiss or hand the tree on with "
+            "work_reassign(workspace='inherit')"
         )
     agent_name = _agent_name(conn, work["agent_id"])
     with db.transaction(conn):
@@ -1390,19 +1611,15 @@ def close_work(conn, work_id: int, summary: str | None = None, actor: str | None
             )
         db.execute(conn, "DELETE FROM works WHERE id = ?", (work_id,))
         _emit(conn, "works", "work", work_id, {"status": "closed", "agent": agent_name}, actor=actor)
-    # The one who did it is told, quietly.
-    closed_by = f" by {actor}" if actor else ""
-    try:
+    # The one who did it is told, quietly, unless it closed the work itself.
+    if actor != agent_name:
         tell_quietly(
             conn, agent_name,
-            f"[office] Work {work_id} is closed{closed_by} — it is off your hands. Nothing "
+            f"[office] Work {work_id} is closed by {actor} — it is off your hands. Nothing "
             "further is expected on it and it is not reported again; anything more on this "
             "subject would come as a new assignment."
             + (f" Accepted as: {summary}" if summary else ""),
         )
-    except Exception:
-        # The work IS closed; the row is gone and the task has its line.
-        log.exception("could not tell %s that work %s was closed", agent_name, work_id)
     # The row no longer exists, so this is the last copy of it.
     return {**work, "status": "closed"}
 
@@ -1454,8 +1671,11 @@ def pause_work(
     return _row(conn, "works", "id", work_id)
 
 
-def dismiss_work(conn, work_id: int, actor: str | None = None) -> dict:
+def dismiss_work(conn, work_id: int, *, actor: str) -> dict:
     """Write off a work that died: delete the row and the output tail with it.
+
+    `actor` is the calling manager, and the work is within its reach
+    (check_work_reach).
 
     The one way a failed work stops being state, and it takes only a work whose
     status is `failed`. A running work is stopped; a paused or reported one is
@@ -1466,10 +1686,14 @@ def dismiss_work(conn, work_id: int, actor: str | None = None) -> dict:
     work = _row(conn, "works", "id", work_id)
     if work is None:
         raise ValueError(f"no such work {work_id}")
+    check_work_reach(conn, _row(conn, "agents", "name", actor), work, "work_dismiss")
     if work["status"] != "failed":
         raise ValueError(
-            f"work {work_id} is {work['status']}, not failed — only a work that has already died "
-            "can be written off (stop a running one, reassign or close a paused one)"
+            f"work {work_id} is "
+            f"{ {'running': 'open', 'done': 'reported'}.get(work['status'], work['status']) }, "
+            "not failed — only a work that has already died can be written off. Close it with "
+            "work_close, or hand it on with work_reassign; agent(op=stop) ends a turn that is "
+            "running on it"
         )
     agent_name = _agent_name(conn, work["agent_id"])
     with db.transaction(conn):
@@ -1500,57 +1724,39 @@ def quota_reset_for(conn, runtime: str) -> int | None:
 
 
 def reassign_work(
-    conn, config: Config, work_id: int, to_agent_id: int, *, workspace: str = "inherit", actor: str | None = None
+    conn, config: Config, work_id: int, to_agent_id: int, *, workspace: str = "inherit", actor: str
 ) -> dict:
     """work_reassign(work, to_agent, workspace=inherit|fresh).
 
-    'inherit' hands the same workspace on, uncommitted changes and all; 'fresh'
-    clones a clean one, which arrives on the repository's default branch.
+    `actor` is the calling manager: the work is within its reach
+    (check_work_reach), `to_agent` is the caller or in its subtree, and the
+    caller becomes the work's assigner. Nothing is sent but the quiet lines
+    below.
 
-    In both modes the recipient's own previous workspace becomes ownerless
-    rather than deleted.
+    'inherit' hands the work's workspace to the recipient, uncommitted changes
+    and all. The workspace the recipient held until then goes to the agent that
+    owned the work's workspace, so the two swap; to the agent that already owns
+    the work's workspace nothing moves. It is refused while the work's
+    workspace belongs to a third agent that has an active work. 'fresh' clones a clean one for the
+    recipient, which arrives on the repository's default branch, and the
+    recipient's previous workspace becomes ownerless rather than deleted. A
+    sandbox belongs to its workspace and goes where it goes.
+
+    Every agent whose workspace changes is told its new workspace and sandbox
+    paths as a quiet line.
 
     The work is revived: status 'running', and every reason column cleared.
+
+    The decision and the writes are one transaction; with 'fresh' the decision
+    is also taken before the clone, so a refusal clones nothing.
     """
     if workspace not in ("inherit", "fresh"):
         raise ValueError("workspace must be 'inherit' or 'fresh'")
-    work = _row(conn, "works", "id", work_id)
-    if work is None:
-        raise ValueError(f"no such work {work_id}")
+    caller = _row(conn, "agents", "name", actor)
     to_agent = _row(conn, "agents", "id", to_agent_id)
-    # The same tuple assign_work() refuses on, 'done' included.
-    active = db.query_one(
-        conn,
-        "SELECT id FROM works WHERE agent_id = ? AND status IN ('running', 'paused', 'done') AND id != ?",
-        (to_agent_id, work_id),
-    )
-    if active is not None:
-        raise ValueError(f"agent '{to_agent['name']}' already has an active work ({active['id']})")
-
-    old_ws = db.query_one(conn, "SELECT * FROM workspaces WHERE id = ?", (work["workspace_id"],)) if work["workspace_id"] else None
-
-    if workspace == "inherit":
-        if old_ws is None:
-            raise ValueError(f"work {work_id} has no workspace yet to inherit")
-        git.transfer_workspace(old_ws["path"], to_agent["name"])
-        new_workspace_id = old_ws["id"]
-        existing = workspace_of(conn, to_agent_id)
-        with db.transaction(conn):
-            if existing is not None and existing["id"] != old_ws["id"]:
-                # Freed before the new one is attached: the unique index would refuse the
-                # second owner otherwise.
-                db.execute(
-                    conn, "UPDATE workspaces SET owner_agent_id = NULL WHERE id = ?", (existing["id"],)
-                )
-            db.execute(conn, "UPDATE workspaces SET owner_agent_id = ? WHERE id = ?", (to_agent_id, old_ws["id"]))
-    else:
-        existing = workspace_of(conn, to_agent_id)
-        if existing is not None:
-            # Same rule as 'inherit': whatever the recipient held becomes unowned.
-            with db.transaction(conn):
-                db.execute(
-                    conn, "UPDATE workspaces SET owner_agent_id = NULL WHERE id = ?", (existing["id"],)
-                )
+    new_ws = None
+    if workspace == "fresh":
+        _check_reassign(conn, caller, work_id, to_agent)
         # The intake is held as it is taken rather than read off the result: a clone
         # that fails must still leave everyone told that the branch moved.
         intake: git.Intake | None = None
@@ -1560,30 +1766,101 @@ def reassign_work(
             intake = taken
 
         try:
-            new_ws = git.create_workspace(config, to_agent["name"], on_intake=_took)
+            cloned = git.create_workspace(config, to_agent["name"], on_intake=_took)
         except Exception:
             _announce_intake_quietly(conn, intake, f"the reassignment of work {work_id}")
             raise
         announce_intake(conn, intake)
-        with db.transaction(conn):
-            db.execute(
-                conn, "INSERT INTO workspaces (id, path, owner_agent_id) VALUES (?, ?, ?)",
-                (new_ws.id, new_ws.path, to_agent_id),
-            )
-        new_workspace_id = new_ws.id
+        new_ws = {"id": cloned.id, "path": cloned.path}
 
+    # (agent id, workspace row) for every agent whose workspace changes here.
+    handed: list[tuple[int, dict]] = []
     with db.transaction(conn):
+        work = _check_reassign(conn, caller, work_id, to_agent)
+        held = workspace_of(conn, to_agent_id)
+        if new_ws is None:
+            if work["workspace_id"] is None:
+                raise ValueError(f"work {work_id} has no workspace yet to inherit")
+            new_ws = _row(conn, "workspaces", "id", work["workspace_id"])
+            previous_owner = new_ws["owner_agent_id"]
+            if previous_owner not in (None, work["agent_id"], to_agent_id):
+                busy = db.query_one(
+                    conn,
+                    "SELECT id FROM works WHERE agent_id = ? "
+                    "AND status IN ('running', 'paused', 'done')",
+                    (previous_owner,),
+                )
+                if busy is not None:
+                    raise ValueError(
+                        f"work {work_id}'s workspace now belongs to "
+                        f"{_agent_name(conn, previous_owner)}, who has work {busy['id']} open — "
+                        "hand this work on with workspace=fresh instead"
+                    )
+            if previous_owner != to_agent_id:
+                # Released before either is taken: the unique index allows one
+                # workspace per owner at every step.
+                db.execute(conn, "UPDATE workspaces SET owner_agent_id = NULL WHERE id = ?",
+                           (new_ws["id"],))
+                db.execute(conn, "UPDATE workspaces SET owner_agent_id = ? WHERE id = ?",
+                           (previous_owner, held["id"]))
+                if previous_owner is not None:
+                    handed.append((previous_owner, held))
+                db.execute(conn, "UPDATE workspaces SET owner_agent_id = ? WHERE id = ?",
+                           (to_agent_id, new_ws["id"]))
+                handed.append((to_agent_id, new_ws))
+        else:
+            db.execute(conn, "UPDATE workspaces SET owner_agent_id = NULL WHERE id = ?",
+                       (held["id"],))
+            db.execute(conn, "INSERT INTO workspaces (id, path, owner_agent_id) VALUES (?, ?, ?)",
+                       (new_ws["id"], new_ws["path"], to_agent_id))
+            handed.append((to_agent_id, new_ws))
         # fail_reason goes with the status: a revived work carries no reason for a
         # death it was brought back from.
         db.execute(
             conn,
-            "UPDATE works SET agent_id = ?, workspace_id = ?, status = 'running', "
-            "fail_reason = NULL, pause_reason = NULL, resume_after = NULL "
+            "UPDATE works SET agent_id = ?, assigned_by_agent_id = ?, workspace_id = ?, "
+            "status = 'running', fail_reason = NULL, pause_reason = NULL, resume_after = NULL "
             "WHERE id = ?",
-            (to_agent_id, new_workspace_id, work_id),
+            (to_agent_id, caller["id"], new_ws["id"], work_id),
         )
         _emit(conn, "works", "work", work_id, {"agent_id": to_agent_id, "workspace": workspace}, actor=actor)
+    for agent_id, ws in handed:
+        name = _agent_name(conn, agent_id)
+        if workspace == "inherit":
+            git.transfer_workspace(ws["path"], name)
+        tell_quietly(
+            conn, name,
+            f"[office] Your workspace is now {ws['path']} and your sandbox "
+            f"{config.scratch_dir / ws['id']}. Work there from now on; the paths in your "
+            "system prompt are out of date.",
+        )
     return _row(conn, "works", "id", work_id)
+
+
+def _check_reassign(conn, caller: dict, work_id: int, to_agent: dict) -> dict:
+    """The work reassign_work() may hand to `to_agent`, read afresh. Refuses a
+    work that is gone or out of `caller`'s reach, a recipient outside its
+    subtree, a recipient still provisioning, and a recipient that already has
+    another active work."""
+    work = _row(conn, "works", "id", work_id)
+    if work is None:
+        raise ValueError(f"no such work {work_id}")
+    check_work_reach(conn, caller, work, "work_reassign")
+    if to_agent["id"] != caller["id"]:
+        check_in_subtree(conn, caller, to_agent, "work_reassign")
+    if _row(conn, "agents", "id", to_agent["id"])["status"] == "provisioning":
+        raise ValueError(
+            f"'{to_agent['name']}' is still provisioning — reassign once it is ready"
+        )
+    # The same tuple assign_work() refuses on, 'done' included.
+    active = db.query_one(
+        conn,
+        "SELECT id FROM works WHERE agent_id = ? AND status IN ('running', 'paused', 'done') AND id != ?",
+        (to_agent["id"], work_id),
+    )
+    if active is not None:
+        raise ValueError(f"agent '{to_agent['name']}' already has an active work ({active['id']})")
+    return work
 
 
 def publish_workspace(conn, config: Config, agent_id: int) -> git.PublishResult:
@@ -1724,7 +2001,20 @@ def create_pr(
 
     The caller passes the branch that publish_workspace() just pushed
     (git.PublishResult.branch, read off that working tree).
+
+    A PR already open from `source_branch` into `target_branch` is returned as
+    it stands, with `republished` true, and no second one is opened; `title`
+    and `body` then go unused. Otherwise `republished` is false.
     """
+    existing = db.query_one(
+        conn, "SELECT * FROM prs WHERE source_branch = ? AND target_branch = ?",
+        (source_branch, target_branch),
+    )
+    if existing is not None:
+        with db.transaction(conn):
+            _emit(conn, "prs", "pr", existing["id"], {"published": True},
+                  actor=_agent_name(conn, author_agent_id))
+        return {**dict(existing), "republished": True}
     with db.transaction(conn):
         cur = db.execute(
             conn,
@@ -1738,7 +2028,7 @@ def create_pr(
             {"title": title, "source_branch": source_branch, "target_branch": target_branch},
             actor=_agent_name(conn, author_agent_id),
         )
-    return _row(conn, "prs", "id", pr_id)
+    return {**_row(conn, "prs", "id", pr_id), "republished": False}
 
 
 def comment_pr(conn, pr_id: int, author: str, body: str) -> dict:
@@ -1787,6 +2077,21 @@ def get_pr(conn, pr_id: int) -> dict | None:
         (pr_id,),
     )
     return {**dict(pr), "comments": [dict(r) for r in comments]}
+
+
+def _check_pr_reach(conn, pr: dict, actor: str, what: str) -> None:
+    """Refuse unless the PR's author is `actor` or in its subtree. `what` names
+    the call in the refusal."""
+    caller = _row(conn, "agents", "name", actor)
+    if pr["author_agent_id"] == caller["id"]:
+        return
+    if pr["author_agent_id"] in subtree_ids(conn, caller["id"]):
+        return
+    author = _agent_name(conn, pr["author_agent_id"])
+    raise PermissionError(
+        f"{what} takes a PR by you or by an agent under you; PR {pr['id']} is {author}'s — "
+        f"ask {manager_name(conn, pr['author_agent_id']) or author}"
+    )
 
 
 def _comment_digest(conn, pr_id: int) -> str:
@@ -1847,8 +2152,8 @@ def announce_intake(conn, intake: git.Intake | None) -> None:
         OFFICE_SENDER,
         "all",
         f"The main branch '{intake.branch}' has moved to {intake.commit[:10]}: work done outside "
-        "the office has come in. Take it into anything you have open before you publish again "
-        f"(git fetch origin, then merge or rebase onto origin/{intake.branch}); a branch that "
+        "the office has come in. Take it into anything you have open now "
+        f"(git fetch origin, then git merge origin/{intake.branch}); a branch that "
         "does not contain it cannot be merged.",
     )
 
@@ -1882,7 +2187,7 @@ def merge_pr(
     conn,
     config: Config,
     pr_id: int,
-    actor: str | None = None,
+    actor: str,
     *,
     delete_branch: bool,
 ) -> dict:
@@ -1899,10 +2204,14 @@ def merge_pr(
 
     `delete_branch` takes the source branch out of the office's repository on
     the two outcomes that delete the row, and on no other.
+
+    `actor` is the calling manager; the PR's author is the caller or in its
+    subtree (_check_pr_reach).
     """
     pr = _row(conn, "prs", "id", pr_id)
     if pr is None:
         raise ValueError(f"no such PR {pr_id}")
+    _check_pr_reach(conn, pr, actor, "pr(op=merge)")
 
     digest = _comment_digest(conn, pr_id)
     parts = [pr["title"], "", pr["body"] or ""]
@@ -1956,8 +2265,11 @@ def merge_pr(
     return {"status": result.status, "detail": result.detail}
 
 
-def close_pr(conn, pr_id: int, actor: str | None = None) -> dict:
+def close_pr(conn, pr_id: int, actor: str) -> dict:
     """pr(op=close) - abandon a request without merging it.
+
+    `actor` is the calling manager; the PR's author is the caller or in its
+    subtree (_check_pr_reach).
 
     The row is deleted and the event carries status 'closed'. Nothing durable is
     written: the branch stands and the workspace is untouched.
@@ -1965,6 +2277,7 @@ def close_pr(conn, pr_id: int, actor: str | None = None) -> dict:
     pr = _row(conn, "prs", "id", pr_id)
     if pr is None:
         raise ValueError(f"no such PR {pr_id}")
+    _check_pr_reach(conn, pr, actor, "pr(op=close)")
     with db.transaction(conn):
         db.execute(conn, "DELETE FROM prs WHERE id = ?", (pr_id,))
         _emit(conn, "prs", "pr", pr_id, {"status": "closed", "title": pr["title"]}, actor=actor)
@@ -2009,6 +2322,25 @@ def list_wiki_pages(conn) -> list[dict]:
             """,
         )
     ]
+
+
+def search_wiki_pages(conn, pattern: str) -> list[dict]:
+    """note(op=search, kind=wiki): every page whose title or some body line
+    matches `pattern`, a regular expression taken case-insensitively, ordered
+    by path. Each page carries `lines`, the (1-based number, text) of every
+    matching body line; a page matched on its title alone has none. Comments
+    are not searched.
+    """
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        raise ValueError(f"note: query is not a valid regular expression — {e}") from None
+    found = []
+    for page in db.query(conn, "SELECT path, title, version, body FROM wiki ORDER BY path"):
+        lines = [(n, line) for n, line in enumerate(page["body"].splitlines(), 1) if regex.search(line)]
+        if lines or regex.search(page["title"]):
+            found.append({"path": page["path"], "title": page["title"], "version": page["version"], "lines": lines})
+    return found
 
 
 def comment_wiki_page(conn, path: str, author: str, body: str) -> dict:
@@ -2107,8 +2439,22 @@ def delete_wiki_page(conn, path: str, expected_version: int, actor: str | None =
         _emit(conn, "wiki", "wiki", existing["id"], {"path": path, "deleted": True}, actor=actor)
 
 
-# There is no list_rules(). Every rule is already in every system prompt
-# verbatim, and the knowledge page runs its own query.
+#: What render_rules() prints when there are none.
+NO_RULES = "(none yet)"
+
+
+def render_rules(conn) -> str:
+    """Every rule, one line each, oldest first: a titled rule reads
+    `- [id] Title: text`, an untitled one `- [id] text`. The system prompts and
+    note(op=list, kind=rule) print this; the knowledge page runs its own query.
+    """
+    rows = db.query(conn, "SELECT id, title, text FROM rules ORDER BY id")
+    if not rows:
+        return NO_RULES
+    return "\n".join(
+        f"- [{r['id']}] {r['title']}: {r['text']}" if r["title"] else f"- [{r['id']}] {r['text']}"
+        for r in rows
+    )
 
 
 def _announce_rule(conn, actor: str | None, line: str) -> None:

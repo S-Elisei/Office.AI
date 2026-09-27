@@ -28,13 +28,22 @@ TURN_SECONDS = 6.0
 # --------------------------------------------------------------------------- helpers
 
 
-def make_agent(conn, name, *, kind="executor", runtime="claude", model="stub-model", status="idle"):
+def make_agent(
+    conn, name, *, kind="executor", manager=None, runtime="claude", model="stub-model", status="idle"
+):
     with db.transaction(conn) as c:
         c.execute(
-            "INSERT INTO agents (name, kind, runtime, model, status) VALUES (?, ?, ?, ?, ?)",
-            (name, kind, runtime, model, status),
+            "INSERT INTO agents (name, kind, manager_agent_id, runtime, model, status) "
+            "VALUES (?, ?, (SELECT id FROM agents WHERE name = ?), ?, ?, ?)",
+            (name, kind, manager, runtime, model, status),
         )
     return db.query_one(conn, "SELECT * FROM agents WHERE name = ?", (name,))["id"]
+
+
+def mark_mid_turn(conn, agent_id):
+    """The spawn-time watermark a turn in flight carries."""
+    with db.transaction(conn) as c:
+        c.execute("UPDATE agents SET turn_start_message_id = 0 WHERE id = ?", (agent_id,))
 
 
 def make_workspace(config, conn, agent_id, ws_id):
@@ -479,19 +488,18 @@ def test_fresh_session_gets_snapshot_continuing_session_gets_delta_only(conn, co
 
 
 def test_restart_recovery_fails_only_the_work_that_had_a_turn_on_it(conn, config):
-    director_id = make_agent(conn, "director1", kind="director")
-    exec_id = make_agent(conn, "exec1", kind="executor", status="running")
-    waiting_id = make_agent(conn, "exec2", kind="executor", status="idle")
-    with db.transaction(conn) as c:
-        c.execute(
-            "INSERT INTO works (agent_id, brief, branch, status) VALUES (?, ?, ?, 'running')",
-            (exec_id, "refactor the widget", "feature-x"),
-        )
-        c.execute(
-            "INSERT INTO works (agent_id, brief, branch, status) VALUES (?, ?, ?, 'running')",
-            (waiting_id, "waiting on an answer", "feature-y"),
-        )
-        c.execute("UPDATE agents SET turn_start_message_id = 0 WHERE id = ?", (exec_id,))
+    make_agent(conn, "director1", kind="director")
+    exec_id = make_agent(conn, "exec1", manager="director1", status="running")
+    waiting_id = make_agent(conn, "exec2", manager="director1", status="idle")
+    core.assign_work(
+        conn, agent_id=exec_id, brief="refactor the widget", task_id=None, branch="feature-x",
+        actor="director1",
+    )
+    core.assign_work(
+        conn, agent_id=waiting_id, brief="waiting on an answer", task_id=None, branch="feature-y",
+        actor="director1",
+    )
+    mark_mid_turn(conn, exec_id)
 
     bus = Bus(conn, config)
     bus._wakeup.clear()
@@ -534,3 +542,58 @@ def test_restart_recovery_with_nothing_interrupted_still_wakes_the_director(conn
     assert bus._wakeup.is_set()
 
 
+
+
+# --------------------------------------------------------------------------- who hears of a work
+
+
+def test_a_report_reaches_its_assigner_and_a_restart_tells_the_assigner_or_the_self_assigners_manager(
+    conn, config
+):
+    make_agent(conn, "director1", kind="director")
+    make_agent(conn, "upper", kind="lead", manager="director1")
+    lower = make_agent(conn, "lower", kind="lead", manager="upper")
+    hand = make_agent(conn, "hand", manager="lower")
+    reported = core.assign_work(
+        conn, agent_id=hand, brief="paint the fence", task_id=None, branch="fence",
+        actor="lower",
+    )
+
+    def last_from(sender, recipient):
+        row = db.query_one(
+            conn,
+            "SELECT body FROM messages WHERE channel = 'dm' AND sender = ? AND recipient = ? "
+            "ORDER BY id DESC",
+            (sender, recipient),
+        )
+        return row["body"] if row is not None else None
+
+    core.finish_work(conn, reported["id"], summary="fence painted", actor="hand")
+    assert last_from("hand", "lower") == "fence painted"
+    assert last_from("hand", "director1") is None
+    core.close_work(conn, reported["id"], actor="lower")
+
+    core.assign_work(
+        conn, agent_id=hand, brief="mend the gate", task_id=None, branch="gate", actor="lower"
+    )
+    core.assign_work(
+        conn, agent_id=lower, brief="plan the garden", task_id=None, branch="garden",
+        actor="lower",
+    )
+    mark_mid_turn(conn, hand)
+    mark_mid_turn(conn, lower)
+
+    Bus(conn, config).recover_after_restart()
+
+    to_lower = last_from(core.OFFICE_SENDER, "lower")
+    assert "mend the gate" in to_lower
+    assert "plan the garden" not in to_lower
+
+    to_upper = last_from(core.OFFICE_SENDER, "upper")
+    assert "plan the garden" in to_upper
+    assert "These leads of yours were in a turn, which died with the hub: lower." in to_upper
+    assert "mend the gate" not in to_upper
+
+    to_director = last_from(core.OFFICE_SENDER, "director1")
+    assert "mend the gate" in to_director and "plan the garden" in to_director
+    assert last_from(core.OFFICE_SENDER, "hand") is None

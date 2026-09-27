@@ -14,18 +14,19 @@ The office provides workspaces, git, stages, communication, a board, knowledge,
 visible quota and context figures, and the mechanics that wake an agent.
 
 The office does not impose a method. It does not require review, does not block a
-merge and does not decide for the director. Behaviour is set by text — the
-director's standing instructions and the project's rules — not by code.
+merge and does not decide for the director or a lead. Behaviour is set by text —
+each agent's standing instructions and the project's rules — not by code.
 
 Code enforces two things only: integrity (merge preconditions, an agent that
-cannot be deleted mid-turn) and authority (tickets, tools split by role).
+cannot be deleted mid-turn) and authority (tickets, tools split by role, a
+manager's reach bounded by its subtree).
 
 **Authority is about tools, not about the disk.** Agents run with permissions
 bypassed, so the office's database, its files and other agents' workspaces are
 physically reachable from a workspace — they are a few levels up from the working
 directory. There is no technical wall and there will not be one: it cannot be
 built against a process that is allowed everything. The prohibition on writing
-past the tools lives as a line in the executor's system prompt.
+past the tools lives as a line in every system prompt.
 
 ---
 
@@ -33,9 +34,30 @@ past the tools lives as a line in the executor's system prompt.
 
 | Role | What they do |
 |---|---|
-| **Owner** (a human) | Sets the director's model; writes rules and wiki; files tasks and edits their titles and bodies; takes part in the conversation |
-| **Director** | Hires, fires and assigns executors; runs the board; merges; stops turns. The main chat is wired to it |
+| **Owner** (a human) | Sets the director's model and standing instructions; writes rules and wiki; files tasks and edits their titles and bodies; takes part in the conversation |
+| **Director** | Heads the team: hires, fires, moves, instructs and assigns anywhere in it; runs the board; merges; writes rules; manages the stages; stops turns. The main chat is wired to it |
+| **Lead** | Hires, fires, moves, instructs and assigns within its own subtree; runs the board with the director; merges its subtree's PRs; stops its subtree's turns; works in its own workspace |
 | **Executor** | Works in its own workspace |
+
+**The team is a tree.** Every agent but the director has a manager,
+`agents.manager_agent_id` — the agent it reports to, the director or a lead; the
+director has none. The director and the leads are the managers. An agent's
+subtree is everyone whose chain of managers reaches it, itself excluded; the
+director's subtree is every agent but itself. What a manager may do to whom is
+section 14's.
+
+Every agent an agent hires has a title, `agents.title`: one line, such as "Economy
+architect" or "Advisor to the economy lead", required by the hire. The director has
+none.
+
+**Standing instructions.** Every agent has optional standing instructions,
+`agents.instructions`. The owner writes the director's on the settings page;
+anyone else's are written by any manager above it, with
+`agent(op=instruct, agent, text)`, and empty text clears them. A moved agent keeps
+its instructions, for the managers above it in its new place to rewrite or clear.
+They go into the agent's system prompt (section 4). A manager above the agent reads
+them with `agent(op=instructions, agent)`; `roster()` prints the caller's own as they
+stand now, and nobody else's.
 
 Every participant's name lives in one namespace; there are no role constants. The
 owner is a named participant like any other — the setting `owner_name`, default
@@ -58,9 +80,10 @@ target; no tool lets an agent change anyone's model, its own included.
 The owner's interface carries authority (rules, wiki, the director's settings,
 resolving tickets addressed to him), conversation (common chat, direct messages,
 comments) and observation. Of planning he has only filing a task into the "idea"
-column and editing titles and bodies: the board is the director's instrument.
-Merging, assigning work, hiring executors and moving cards do not exist in the
-interface. The exceptions are in section 16.
+column and editing titles and bodies: the board is the managers' instrument — the
+director's and the leads'.
+Merging, assigning work, hiring leads and executors and moving cards do not exist
+in the interface. The exceptions are in section 16.
 
 The message bus restricts nobody: any participant may write to any other.
 
@@ -116,9 +139,9 @@ it.
   monitor beside every live work, and on the main page beside the director's stop
   button;
 - stopping: the button on a work card in the monitor, the button beside the
-  director's chat, and the director's own `agent(op=stop)`. Any active work is
-  failed as `killed` **before** the process is killed; with no work, only the turn
-  ends. A work that has already reported is left alone;
+  director's chat, and a manager's `agent(op=stop)` on an agent in its subtree.
+  Any active work is failed as `killed` **before** the process is killed; with no
+  work, only the turn ends. A work that has already reported is left alone;
 - stderr lines carrying a vendor marker (`[agy]`, `codex:`, `claude:`,
   `warning:`) become events;
 - the output tail is written for every turn and deleted only for a turn that both
@@ -213,13 +236,16 @@ At startup the hub:
 1. sweeps by mark everything left from this office's previous life — before
    recovery, and before anything is started;
 2. recovers the stages (section 12);
-3. moves every `running` work to `failed` with reason `hub_restart` and attaches
-   the output tails spilled to disk;
+3. moves to `failed`, with reason `hub_restart`, every work whose assignee had a
+   turn in progress when the hub died, and attaches the output tails spilled to
+   disk;
 4. closes the turn of every agent carrying a turn-start marker: drops the marker
    and tells the senders whose messages that turn consumed that they were not
    processed (section 4);
 5. moves agents from `running` to `idle`;
-6. sends the director a message from `office` listing the interrupted works;
+6. sends the director a message from `office` listing the interrupted works, and
+   every other agent that section 4 would tell of an interrupted work or of a
+   lead's killed turn one message listing those;
 7. writes a line to the owner's journal; if the restart killed the director's
    turn the line is critical and raises the plate.
 
@@ -415,7 +441,7 @@ this turn took", not a rollback point. **On an abnormal end, every sender of a
 direct message in that range gets a message from `office` saying it was not
 processed, with the reason and, for quota, the time of return.** The message
 itself counts as read and is not repeated; the sender repeats it if they think
-fit. On a clean end the marker is simply dropped. The marker lives in the
+fit — for quota, the notice says to `remind()` it for after the time of return. On a clean end the marker is simply dropped. The marker lives in the
 database, because the death of the hub is also an abnormal end.
 
 The notices go out before the marker is dropped, and the marker is dropped either
@@ -431,25 +457,26 @@ context is a delivered message.
 ### What the office says in its own name
 
 **Text addressed to a participant is always delivered as a message from whoever
-wrote it.** Assigning work sends the brief as the director's message; finishing
-work sends the report as the executor's message. Tickets, PR comments, opening
-and merging PRs, moving tasks, hiring and firing send nothing: they come in
-batches, the decision of when to wake somebody belongs to their author, and the
+wrote it.** Assigning work sends the brief as the assigner's message; finishing
+work sends the report to the assigner as the assignee's message. Tickets, PR
+comments, opening and merging PRs, moving tasks, hiring, firing and reassigning
+work send nothing: they come in batches, the decision of when to wake somebody belongs to their author, and the
 state is readable through the tools in section 14.
 
-**In its own name the office says eight things**, all of them messages from the
+**In its own name the office says nine things**, all of them messages from the
 participant `office`:
 
 | Occasion | Told to | Buys a turn |
 |---|---|---|
-| A work failed or was paused (unless the director caused it with `agent(op=stop)`) | the director | yes |
-| Hub restart, with the list of interrupted works | the director | yes |
+| A work failed or was paused (unless whoever would be told caused it with `agent(op=stop)`) | the work's assigner; for a work its assignee assigned itself, the assignee's manager, and for the director the owner's journal | yes; the journal buys nothing |
+| A lead's turn ended abnormally — for any reason but a stop | its manager | yes |
+| Hub restart, with the list of interrupted works | the director, with all of them; every other agent the two rows above name for an interrupted work or a killed turn, with those | yes |
 | Your message was not processed | the sender | yes |
 | A deferred message has nowhere to go (the recipient was fired) | the sender | yes |
 | Your turn ended without a word to anybody | that agent | yes |
 | Your expectation ran out of time: nothing came, and its address is closed | that agent | yes |
-| The same agent did it a second time in a row | the director (for an executor); the owner's plate and journal (for the director) | yes |
-| A running agent has said nothing for the owner's silence threshold | the director | yes |
+| The same agent did it a second time in a row | its manager; the owner's plate and journal for the director, which buy nothing | yes, for a manager |
+| A running agent has said nothing for the owner's silence threshold | its manager | yes |
 
 **Every turn ends with one of three things: a question to whoever can answer it,
 an answer to whoever asked, or a report handing the work on.** Nothing in this
@@ -460,38 +487,45 @@ post, a ticket, a PR, a comment, a wiki page and a moved task all count for
 nothing here, because each of them announces itself to nobody.
 
 The first nudge goes to the offender and buys it one turn. A second silent ending
-in a row goes over its head instead, and nothing loops: an executor's escalation
-buys the director a turn, the director's own is a critical notice on the owner's
+in a row goes over its head instead, and nothing loops: an escalation buys the
+agent's manager a turn, the director's own is a critical notice on the owner's
 plate, and the owner is the one participant not obliged to reply.
 
 The silence report is about a turn that has not ended and may never. It has no
 power over the agent — no stop, no flag, nothing written but a message. The
 threshold is the owner's, on the settings page: absent, empty or unparseable
 means twenty minutes; zero or less means never. The director's own silence is not
-reported — the only recipient would be the director itself, and the owner already
-has `quiet_for` live on the main page.
+reported — the director has no manager, and the owner already has `quiet_for` live
+on the main page.
+
+When the dead turn of a lead also failed or paused a work whose notice goes to that
+same manager, the manager gets one message carrying both.
 
 A message from a service that dies with a turn is given back, whole, to the agent
 whose turn it was, as a quiet line. A message from `office` that dies with a turn
-is lost silently. The compensation
+is lost silently; for a lead, the notice of its dead turn goes to its manager. The
+director's own dead turn is on the owner's plate (section 15). The compensation
 is observability, which is the rule the whole tool surface obeys: **no state may
 be knowable only from a message that was received.**
 
-Five more things the office says buy nobody a turn:
+Seven more things the office says buy nobody a turn:
 
 | Occasion | Told to | Shape |
 |---|---|---|
-| The main branch has moved — work done outside the office has come in | everyone | common chat |
+| The main branch has moved — work done outside the office has come in; take it in with `git merge origin/<branch>` | everyone | common chat |
 | The project's rules have changed | every agent but the one who changed them | quiet line |
-| The owner has rewritten the director's standing instructions | the director | quiet line |
-| The work you did has been closed | the executor who did it | quiet line |
+| Your standing instructions have been rewritten | the agent they belong to | quiet line |
+| Your workspace has changed, with its workspace and sandbox paths | every agent whose workspace a `work_reassign` changed | quiet line |
+| The work you did has been closed | the agent who did it, unless it closed the work itself | quiet line |
+| You have been moved, with the name of your new manager | the moved agent, and nobody else | quiet line |
 | A service's message died with your turn | the agent whose turn it was | quiet line |
 
-The first three exist because a system prompt is fixed when a session is created, on
-every runtime: a rule or an instruction written today is invisible to every session
-already open until that session is replaced. The fourth exists because a brief
-arrives as a message and as the snapshot a session opened with, and neither changes
-when the work ends.
+The second, third and fourth exist because a system prompt is fixed when a session
+is created, on every runtime: a rule, an instruction or a workspace path written
+today is invisible to every session already open until that session is replaced.
+The fifth and the sixth exist because a brief and a manager arrive in the snapshot a
+session opened with, the brief also as a message, and neither changes when the work
+ends or the agent is moved.
 
 ### What a wake carries
 
@@ -501,14 +535,21 @@ when the work ends.
 
 **A system prompt is fixed when its session is created, on every runtime.** claude is
 handed `--append-system-prompt-file` on every turn and applies it only at session
-creation; agy and codex take theirs in the first message. It carries the agent's own
-name, the owner's name, the project's rules, the director's standing instructions and
-the workspace and sandbox paths; a change to the rules or to the instructions reaches
-sessions already open as a quiet line. The team, the works, quota and the model
-catalogue are not in it at all — they are `roster()`'s, which is always current.
+creation; agy and codex take theirs in the first message. There are three system
+prompts, one per role: director, lead and executor. Each carries the agent's own
+name, the owner's name,
+the project's rules, the agent's own standing instructions — the director's under a
+heading naming the owner, anyone else's under one saying they come from its
+managers — and the workspace and sandbox paths; a
+change to the rules, to the instructions or to the workspace reaches sessions
+already open as a quiet line. In the director's prompt the block of rules ends with
+a line saying that each rule's number is the `rule_id` its changes take. The team,
+the works, quota and the model catalogue are not in it at all — they are
+`roster()`'s, which is always current.
 
-The snapshot is assembled from what the office already holds: the team; this
-agent's own work (brief and branch, `failed` included); open PRs; the board by
+The snapshot is assembled from what the office already holds: who this agent is —
+name, kind, title and manager; the team; this agent's own work (its id, status,
+branch, assigner and brief, `failed` included); open PRs; the board by
 column, titles only; open tickets addressed to this participant — number, title
 and author, no bodies, with a note of how to read one. A ticket wakes nobody, so
 a fresh session would otherwise have no way to learn that one is waiting on it.
@@ -572,9 +613,13 @@ figure while a turn is alive.
 In every case a new session starts from nothing and gets the full snapshot.
 Reasoning that lived only in the conversation is lost.
 
+`agent(op=new_session)` is refused while a turn or a compaction is running on the
+agent's session, the same condition compaction refuses on; the decision and the
+dropping of the session id happen under the lock that starts turns.
+
 ### Manual compaction
 
-`agent(op=compact)` is the director's, on any agent but itself; the owner has a
+`agent(op=compact)` is a manager's, on any agent in its subtree; the owner has a
 button for the director.
 
 **Compaction happens at once or not at all.** There is no deferral and no queue.
@@ -587,7 +632,7 @@ the office does not use. For those two the answer is `agent(op=new_session)`. A 
 is always explicit and always named: the runtime cannot, there is no session,
 there is no workspace, a turn is running, a compaction is already running, or
 claude declined (it does not produce a boundary on a short conversation). Both
-callers — the director's command and the owner's button — ask the same predicate.
+callers — a manager's command and the owner's button — ask the same predicate.
 
 Success returns `before`, `after` and `freed`, and writes a line to the owner's
 journal.
@@ -598,15 +643,15 @@ is set and read under the same lock that starts turns.
 ### The cost of a model change
 
 Changing model within a runtime keeps the session and drops the cache; changing
-runtime ends the session. `core.update_agent_model` classifies this in one place
-and returns the classification in the tool's answer, and in the settings page
-before confirmation (`dry_run`). The interface offers it for the director only.
+runtime ends the session. `core.update_agent_model` classifies this in one place,
+and the settings page shows the classification before confirmation (`dry_run`). No
+agent tool changes a model; the settings page offers it for the director only.
 
 ---
 
 ## 6. Tasks, works, workspaces
 
-**A task** is a record of something to be done. It may have no executor and no
+**A task** is a record of something to be done. It may have no assignee and no
 works. Statuses: `idea` · `planned` · `needs_clarification` · `in_progress` ·
 `paused` · `done`.
 
@@ -615,16 +660,21 @@ Dependencies live in `task_dependencies`: `blocking_task_id` finishes before
 `planned` or `in_progress` task whose blocker is not `done` is reported by
 `roster()` as its own list.
 
-**A work** is activity on a task: brief, executor, workspace, branch, session.
-Statuses: `running` · `paused` · `failed` · `done`.
+**A work** is activity on a task: brief, assignee, assigner, workspace, branch,
+session. Statuses: `running` · `paused` · `failed` · `done`.
 
 `assign(agent, brief, task_id, branch)` — the branch is required, the task is not.
-The branch name travels to the executor in the brief; the executor creates the
-branch itself.
+The caller is recorded as the assigner, `works.assigned_by_agent_id`; a manager
+that assigns a work to itself is its own assigner. `work_reassign` records its
+caller as the assigner in the same way, and the work's report and notices go to
+that caller from then on. `work_reassign` sends nobody anything; the caller writes
+to whoever should know. The branch name travels to the assignee in the brief; the
+assignee creates the branch itself.
 
 Invariants checked explicitly:
 
-- one active work per agent — in `assign` and in `work_reassign`;
+- one active work per agent — in `assign` and in `work_reassign`, where the work
+  being reassigned does not count against its own assignee;
 - one workspace per agent — the partial unique index
   `workspaces(owner_agent_id) WHERE NOT NULL`.
 
@@ -632,7 +682,7 @@ Invariants checked explicitly:
 
 There is no branch reservation. The office keeps no list of taken branches, does
 not switch anyone's working copy and does not forbid writing to the default
-branch. The director names a branch when assigning, having looked at what exists.
+branch. The assigner names a branch when assigning, having looked at what exists.
 
 **The only truth about which branch a working copy is on is the copy itself.**
 Publishing reads the branch from it and refuses only on a detached HEAD. A PR
@@ -644,7 +694,7 @@ ahead, somebody else is writing to it.
 
 Because a branch is required, a work with no code in it is given the default
 branch. A wiki page, a review or a QA run produces nothing to commit, and a branch
-of its own invites a commit. This is a convention stated in both prompts, not a
+of its own invites a commit. This is a convention stated in every prompt, not a
 check in code: the office does not read the meaning of a brief.
 
 Synchronising with a colleague is ordinary git: a working copy is a full clone of
@@ -660,14 +710,32 @@ Workspace { id, path, owner_agent }
 The path is `<root>/ws/<workspace-id>/`. The id is assigned at creation and never
 changes; the owner is a column. There is no branch in the record — that is git's.
 
-A workspace outlives its owner: on firing it stays on disk with no owner,
-`hire(adopt_workspace_id=…)` adopts it, and `work_reassign(workspace=inherit)`
-hands it on together with everything uncommitted.
+A workspace outlives its owner: on firing it stays on disk with no owner, and
+`hire(adopt_workspace_id=…)` adopts it; `hire` refuses a workspace that has an owner,
+naming it. A sandbox belongs to its workspace (`<root>/scratch/<workspace-id>/`) and
+goes wherever the workspace goes.
 
+`work_reassign(workspace=inherit)` hands the work's workspace to the recipient
+together with everything uncommitted, and the workspace the recipient held until
+then goes to the agent that held the work's workspace: the two swap, and neither is
+left without one. It is refused while the work's workspace belongs to an agent that
+is neither nobody, the work's assignee nor the recipient and that has an active work,
+and the refusal names that agent and points to `workspace=fresh`.
 `work_reassign(workspace=fresh)` clones a new workspace on the default branch:
 "start again" rather than "carry on". The previous agent's tree, uncommitted work
-and all, stays with it. In both modes the recipient's previous workspace becomes
-ownerless rather than deleted.
+and all, stays with it, and the recipient's previous workspace becomes ownerless
+rather than deleted. `work_reassign` refuses a recipient that is still provisioning.
+A session resumes in a workspace other than the one it began in with its context
+intact, on every runtime, so a change of workspace takes effect from each agent's
+next turn and clears no session.
+
+`work_reassign` to the work's current assignee with `inherit` moves nothing: only the
+assigner and the work's status change, and the work is open again. That is how a
+reported work is sent back to its assignee, and how a work is taken up again after a
+dead turn.
+
+Every agent whose workspace changes by `work_reassign` gets a quiet line naming its
+workspace and sandbox paths (section 4).
 
 ### How an agent's work ends
 
@@ -676,7 +744,7 @@ ownerless rather than deleted.
 | `context_overflow` | `session_id` cleared, new session with a full snapshot |
 | `quota_exhausted` | the work is moved to `paused` with `resume_after` |
 | `tool_error` / `crash` | the output tail is stored on the work record |
-| `killed` | stopped by the director or the owner |
+| `killed` | stopped by a manager above the agent or by the owner |
 | `hub_restart` | the turn died with the hub |
 
 The reason is decided in this order: `killed` from the kill flag;
@@ -687,18 +755,25 @@ otherwise `crash`.
 The output tail is a 200-line ring buffer in memory, mirrored to
 `<root>/tails/<agent>.log` every 5 seconds and again at process exit. A snapshot of
 it is stored on the work row when a work fails, and lives until that row is deleted.
+`work(op=show, work=N)` prints it, with the rest of the work, to the work's assignee
+and to any caller with the reach `work_close` requires.
 
-`finish_work` is the executor **reporting**: the row is marked `done`, the summary
-goes to the director as a message from the executor, and nothing is written to the
-task. `close_work` is the director **accepting**: the row is deleted and the
-accepted one-line result — the closer's own words — is appended to the task. It
-refuses a `failed` work by name.
+`finish_work` is the assignee **reporting**: the row is marked `done`, the summary
+goes to the assigner as a message from the assignee — to nobody when the assignee
+is its own assigner — and nothing is written to the task. `close_work` is a manager
+**accepting**: the row is deleted and the accepted one-line result — the closer's
+own words — is appended to the task. It refuses a `failed` work by name.
 
-`fail_work` keeps the row: it holds the tail, and the director sees it in
-`roster()` until the work is reassigned, its task is closed, or it is written off.
-`work_dismiss` (director only) deletes a failed work together with its tail and
-refuses anything that is not failed. `pause_work` is not a failure: branch, tree
-and brief are intact.
+Moving a task to `done` deletes every work still on it, so it is an act on those
+works: it is refused unless each of them is within the caller's reach for
+`work_close` — its assignee in the caller's subtree, or the caller its assigner. An
+executor can move to `done` only a task with no works.
+
+`fail_work` keeps the row: it holds the tail, and its assigner and every manager
+above its assignee see it in `roster()` until the work is reassigned, its task is
+closed, or it is written off. `work_dismiss` (a manager's) deletes a failed work
+together with its tail and refuses anything that is not failed. `pause_work` is not
+a failure: branch, tree and brief are intact.
 
 The supervisor's copy of the tail in `<root>/tails/<agent>.log` survives a
 dismissal, until that agent's next turn.
@@ -898,8 +973,12 @@ hang there would stall the recording of work already delivered.
 
 ### Publishing
 
-`publish()` is the only place a branch enters `project.git`. The branch name comes
-from the working copy; a detached HEAD is refused with an explanation.
+`publish()` is how the office puts a branch into `project.git`: opening a PR, or
+reporting a work with one, calls it. An agent's own `git push` from its workspace
+puts a branch there too, for a colleague to fetch; the workspace's LFS store is the
+shared one, so a pushed branch's large files are already where any other workspace
+reads them. The branch name comes from the working copy; a detached HEAD is
+refused with an explanation.
 
 The branch's large files go first: `git lfs push origin <branch>` into
 `project.git`, which sends the objects of the commits no remote-tracking ref of
@@ -925,14 +1004,26 @@ publish under a name of one's own.
 
 A PR is an office entity in SQLite, always against the superproject.
 
+`pr(op=create)` and `work(op=finish, pr=…)` publish the caller's branch first. When a
+PR from that source branch into the same target is already open, they answer with
+that PR, "updated … published again", and open no second one: that is how a branch is
+published again, after it has taken its target in.
+
 **Only a branch that already contains the target is merged.** If it does not, the
-answer is `behind` with one known action: bring the target into the workspace,
-settle the conflict there, publish again.
+answer is `behind` with one known action: bring the target into the branch in the
+workspace it comes from, settle the conflict there, publish it again. The merging
+manager does not do it in its own workspace.
 
 The consequence is that the result's tree is exactly the source's tree, there is
 nothing to reconcile, and **a conflict inside the office is impossible by
 construction**. Conflicts exist only in a workspace — where the files, the history
 and the person who wrote the code are.
+
+An agent whose merge of the target conflicts asks the authors of the conflicting
+changes and resolves once they answer. It writes to an author on the roster
+directly; for an author no longer on it, to its own manager, and the director,
+having none, decides itself; for an address outside the office, to the owner. This
+is a line in the prompts, not a check in code.
 
 The hub performs the merge in `project.git`, without a working copy, under a lock:
 
@@ -969,7 +1060,7 @@ question separates them: a branch lying wholly inside the target has nothing to
 take in. Such a request is closed as answered, in its own words rather than in the
 word "merged".
 
-Merging takes a `delete_source` decision and will not run without one. It removes
+Merging takes a `delete_branch` decision and will not run without one. It removes
 `refs/heads/<source>` on exactly the two outcomes that answer the request — after
 the target has actually moved onto the merge commit, and on the `up_to_date` the
 ancestor check reaches. On both, the work stays reachable from the surviving
@@ -1085,7 +1176,9 @@ and the team repeats the merge when the owner says he has cleared the way.
 Untracked files do not obstruct an intake.
 
 `behind`, `blocked`, `diverged` and `missing` all leave the PR open and hand the
-sentence back to whoever merged. `merged` and `up_to_date` both delete the row: the
+sentence back to whoever merged. In front of a `blocked` or `diverged` sentence the
+tool puts "This is <owner>'s to clear in his own repository — send it to him as it
+stands and change nothing there." `merged` and `up_to_date` both delete the row: the
 request has been answered, and the merge commit carries the PR's description and a
 digest of its comments into the history.
 
@@ -1125,18 +1218,27 @@ it can be undone.
 so each comment records the version it was written against, and both readers print
 it. A comment wakes nobody.
 
-Reading a page costs a round trip, and there is no grep over page bodies.
+`note(op=search, kind=wiki, query=…)` greps the wiki. `query` is a regular
+expression, matched case-insensitively against each page's title and each line of
+its body; an invalid one is refused. The answer lists every matching page — path,
+title and version — followed by its matching body lines numbered as `grep -n`
+numbers them, at most 20 per page with a count of the rest; a page matched on its
+title alone has no lines. The whole answer is capped in size and says how many
+pages it left out. Comments are not searched, and rules have no search.
 
 A page's `path` is an identifier, not a path on disk.
 
-**Rules are the director's to write.** `note(kind=rule)` has `create`, `update` and
-`delete`, and refuses for any other role; `title` is required on create and
-optional on update. Rules are not read through the tool: all of them go verbatim
-into every system prompt, which means a change takes effect from an agent's next
-session. An urgent change is delivered to a running session as a direct message.
+**Rules are the director's to write and everyone's to read.** `note(kind=rule)` has
+`list` for everyone, and `create`, `update` and `delete`, which it refuses for any
+role but the director; `title` is required on create and optional on update.
+`list` prints every rule as it stands now. All of them also go verbatim into every
+system prompt as they stood when the session was created, which means a change
+takes effect in the prompt from an agent's next session. The office always tells
+the sessions already open with a quiet line (section 4); an urgent change the
+director also sends as a direct message itself.
 
-The block of rules carries each rule's number, which is the address for changing or
-deleting it. A rule with no title prints as its own text.
+Both prints carry each rule's number, which is the address for changing or
+deleting it: `- [id] Title: text`. A rule with no title prints as its own text.
 
 ---
 
@@ -1181,13 +1283,13 @@ entirely — the one place where part of a vendor's answer is not shown.
 There are no derived figures: no burn rate, no estimate of hours left.
 
 A quota change publishes the SSE event `quota` and the page redraws itself. Quota
-is not substituted into any system prompt; the director reads it through
-`roster()`.
+is not substituted into any system prompt; the director and the leads read it
+through `roster()`.
 
 There is no notion of paid overflow: the vendors' overdraft fields are not read. An
 exhausted window arrives as a turn error and is classified as `quota_exhausted`.
-Nobody waits for a reset. The work is paused, the director gets a message from
-`office`, and the owner gets a plate (if it was the director's turn) or a journal
+Nobody waits for a reset. The work is paused, a message from `office` goes to
+whoever section 4 names for it, and the owner gets a plate (if it was the director's turn) or a journal
 line. The vendor's return to answering also goes to the journal.
 
 **The model catalogue** is read the same way: free, with no turn, once an hour on
@@ -1206,7 +1308,7 @@ profile lives longer. The catalogue is shown under the hire and settings model
 fields, so what is offered and what is accepted are one text.
 
 The ceiling on parallelism is quota, not hardware. This is a line in the director's
-prompt, not a limit in code.
+and the lead's prompts, not a limit in code.
 
 ---
 
@@ -1428,11 +1530,11 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 
 | Stored | Why |
 |---|---|
-| Agents: composition, runtime/model/effort, workspace path | Not recoverable |
+| Agents: role, manager, title, standing instructions, composition, runtime/model/effort, workspace path | Not recoverable |
 | Tasks and their dependencies | This is the plan |
 | Rules and wiki | What the database exists for |
 | Open PRs and their comments | git holds no metadata |
-| Works that are still on the books: brief, executor, session id | Live state |
+| Works that are still on the books: brief, assignee, assigner, session id | Live state |
 | Tickets and comments, resolved ones included | The wording of a product decision |
 | **Messages — all of them, forever** | `DELETE FROM messages` exists nowhere |
 | The current quota snapshot | One row per bucket |
@@ -1478,6 +1580,11 @@ does nothing else.
 So: a new **table** appears in an existing database by itself at the next startup;
 a new **column** only if it is nullable and listed in that additive list. State that
 has to reach a running office without recreating the database is given a table.
+A `CHECK` never reaches an existing database, and neither does a column that is
+not in the additive list. The tree — `agents.kind` with `director`, `lead` and
+`executor`, `agents.manager_agent_id`, `title` and `instructions`, and
+`works.assigned_by_agent_id`, which is `NOT NULL` — is of that kind: a database
+created before it is recreated.
 
 Consequently a database created earlier keeps columns and indexes the schema no
 longer has. They are neither read nor written. For the same reason the `CHECK` on
@@ -1506,43 +1613,90 @@ chat(before_id?)                 # the common chat, newest page first, cursor ba
 remind(to, text, in_seconds)     # the same message, sent later; wakes the addressee
 expect(about, within_seconds)    # an address a service notifies; its answer or the due time wakes you
 task(op, ...)                    # create | update | move | link (link with remove=true drops it)
-work(op, ...)                    # show — your brief and branch
-                                 # finish — your report to the director, with a PR if you like
-pr(op, ...)                      # create | comment | merge | close | list | read
-note(op, kind, ...)              # wiki: list | read | comment | write | undo | delete
-                                 # rule: create | update | delete  (director only)
+work(op, ...)                    # show — your brief, branch and assigner
+                                 # show(work) — one work in full, its stored output tail included
+                                 # finish — your report to whoever assigned the work, with a PR if you like
+pr(op, ...)                      # create | comment | list | read
+                                 # merge | close  (managers only)
+note(op, kind, ...)              # wiki: list | read | search | comment | write | undo | delete
+                                 # rule: list; create | update | delete  (director only)
 ticket(op, ...)                  # create | comment | list | read | resolve | link
 run(op, ...)                     # start | wait | stop | list; start takes stage=
-roster()                         # the team; for the director, everything staffing turns on
+roster()                         # the team as a tree; for a manager, everything staffing its subtree turns on
 ```
 
-Director only:
+Managers only — the director and the leads:
 
 ```
-agent(op, ...)   # hire | fire | stop | compact | new_session
+agent(op, ...)   # hire | fire | stop | compact | new_session | instruct | instructions | move
                  # save_profile | hire_from_profile | list_profiles
 assign(agent, brief, task_id, branch)
 work_close(work, summary)        # accept a reported work: the row goes, the result lands on the task
 work_dismiss(work)               # write off a failed work together with its tail
 work_reassign(work, to_agent, workspace)   # workspace = inherit | fresh
+```
+
+Director only:
+
+```
 stage(op, ...)   # create | reset | delete (section 12)
 ```
+
+**A manager's reach is its subtree**, checked in code on every call:
+
+- `hire` and `hire_from_profile` make the caller the new agent's manager. They
+  take `title`, required, and `lead`: true makes a lead, otherwise an executor;
+- `fire`, `stop`, `compact`, `new_session`, `instruct`, `instructions` and `move`
+  take a target in the caller's subtree; `compact` and `new_session` are refused
+  while a turn or a compaction is running on the target's session;
+- `instruct(agent, text)` replaces the target's standing instructions; empty text
+  clears them. `instructions(agent)` returns them;
+- `move(agent, manager)` takes a new manager that is the caller or a lead in the
+  caller's subtree, and is neither the target nor inside the target's subtree. It
+  refuses while the moved subtree — the target and everyone under it — holds a work
+  still on the books (running, paused, reported and not closed, or failed) whose
+  assigner would afterwards be neither its assignee nor above it. It sends the
+  moved agent one quiet line naming its new manager, and nothing to anybody else;
+- `assign(agent)` takes the caller or an agent in its subtree, and records the
+  caller as the assigner;
+- `work_close`, `work_dismiss` and `work_reassign` take a work whose assignee is in
+  the caller's subtree or which the caller assigned; `work_reassign` also takes a
+  `to_agent` that is the caller or in its subtree, and records the caller as the
+  assigner;
+- `work(op=show, work=N)` takes the caller's own work or a work that passes the same
+  test as `work_close`;
+- `task(op=move, status=done)` is refused unless every work still on the task
+  passes the same test as `work_close`; for an executor, unless the task has no
+  works;
+- `pr(op=merge)` and `pr(op=close)` take a PR whose author is the caller or in its
+  subtree.
+
+Together these keep a work's assigner on the roster and either its assignee itself
+or above it for as long as the work's row exists: `assign` and `work_reassign`
+reach only the caller's own subtree and record the caller, `move` refuses as above,
+and `fire` refuses while its target has subordinates. `assign`, `work_reassign` and
+`move` each take their decision in the same transaction as their write.
 
 `task(op=move, status=done)` requires `result` and closes the task entirely: the
 records of its works are deleted.
 
 `pr(op=merge)` requires `delete_branch` and will not run without it.
 
-`roster()` answers by role. An executor gets the team — name, kind, runtime,
-model — and the deferred messages it set itself. The director additionally gets
-each agent's status and context fill, every deferred message in the office, every
-work that is not finished (running, paused, reported or failed, with the reason it
-stopped and, for a pause, the earliest it could resume), remaining quota per
-runtime with its reset time, tasks that look ready but whose dependency is not
-done, the model catalogue, directories under `ws/` the office did not create, and
-workspaces that belong to nobody. Both get the stages, as section 12 lists. Each
-agent gets its own open expectations, and the director everybody's. None of that is in any system prompt: a prompt is
-fixed when the session is created.
+`roster()` answers by role. Everyone gets the whole team as a tree — each agent's
+name, title, kind, runtime and model, indented under its manager — its own standing
+instructions as they stand now, its own workspace and sandbox paths, the stages, as
+section 12 lists, and the deferred
+messages and open expectations it set itself. A
+manager additionally gets, for its subtree, each agent's status and context fill
+and every deferred message and open expectation; every work that is not finished
+(running, paused, reported or failed, with the reason it stopped and, for a pause,
+the earliest it could resume) whose assignee is in its subtree or which it
+assigned; remaining quota per runtime with its reset time; tasks that look ready
+but whose dependency is not done; the model catalogue; and workspaces that belong
+to nobody. The director alone additionally gets the directories under `ws/` the
+office did not create. Apart from the caller's own instructions and paths, which its
+system prompt carries as they stood when the session was created, none of that is in
+any system prompt.
 
 `remind` is the only alarm in the system. A turn is bought by a message and by
 nothing else, so an agent that needs to continue later leaves itself a message and
@@ -1558,13 +1712,17 @@ seven days. It takes an offset, not an absolute instant: an agent's notion of "n
 comes from a system prompt fixed when the session was created. The tool has no
 cancel — only the owner has one, on the works page.
 
-`agent(op=fire)` refuses while the agent still has active work, while an open PR
-names it as author, and while any vendor process is speaking on its session — a
-turn or a compaction. The decision and the deletion happen under the same lock that
-starts turns.
+`agent(op=fire)` refuses while the agent still has active work — running, paused,
+or reported and not closed — while it has subordinates (they are moved or fired
+first), while an open PR names it as author, and while any vendor process is
+speaking on its session — a turn or a compaction. The decision and the deletion
+happen under the same lock that starts turns. The fired agent's failed works are
+deleted with it, and so are the deferred messages it set and its expectations.
 
-The director's tools are hidden from `tools/list` for everyone else and rejected by
-name if called directly.
+The managers' tools are hidden from an executor's `tools/list` and rejected by name
+if it calls them; `stage` is hidden from a lead and rejected the same way.
+`note(kind=rule)` refuses `create`, `update` and `delete` to anyone but the director,
+and `pr(op=merge|close)` refuses an executor.
 
 **No tool exists whose only purpose is to check whether anything has happened.**
 There is no `inbox_check`, no `poll`, and no file standing in for them. Everything
@@ -1577,9 +1735,10 @@ from the rule in section 4: no state may be knowable only from a message that wa
 received. So the reason a work failed, the text of PR comments, one's own brief and
 the common chat's history are all readable.
 
-An executor's composition at hire is `{runtime, model, effort}`. Runtime and model
+An agent's composition at hire is `{runtime, model, effort}`. Runtime and model
 are required, effort is not; the environment proposes no default. A composition
-that works is saved by the director as a named profile.
+that works is saved by a manager as a named profile; the profiles are shared by
+all managers.
 
 ### The toolset is not configurable by anything
 
@@ -1598,7 +1757,7 @@ agent off from servers the owner configured for himself; codex through
 once machine-globally (`agy mcp add`), which reads the address out of the turn's
 environment.
 
-Nothing else can be attached: neither the director nor the owner has such an
+Nothing else can be attached: neither an agent nor the owner has such an
 operation.
 
 ---
@@ -1635,7 +1794,7 @@ All times are shown local and stored UTC.
    carries the list of them, in any column.
 4. **Works** — who, what, branch, context, a stop button. Finished works do not
    appear. State is stated both ways: either "a turn is running" with `running_for`
-   and `quiet_for`, or "nobody is working" naming the idle executor. The brief is
+   and `quiet_for`, or "nobody is working" naming the idle assignee. The brief is
    collapsed and rendered as the markdown it is written in. The turn's output is a
    collapsed block, parsed by the same parser the office listens to the turn with:
    speech, tool calls with their start and end, errors. A call with a start and no end
@@ -1644,9 +1803,9 @@ All times are shown local and stored UTC.
    works are the deferred messages the office is holding, and cancelling one is the
    owner's alone.
 5. **Common chat** — paginated.
-6. **Team** — who exists, on what, how much context, and under each agent what it
-   awaits from a service, since when and until when; under them the stages: each
-   one's state with its timers while preparing, the run in progress with its timers,
+6. **Team** — the team as a tree, each agent under its manager with its title; on
+   what, how much context, and under each agent what it awaits from a service,
+   since when and until when; under them the stages: each one's state with its timers while preparing, the run in progress with its timers,
    who is waiting, a pending reset or delete, the preparation command, and the reason
    for a broken one. No hiring or firing here, and no control over stages.
 7. **Knowledge** — wiki and rules.
@@ -1732,7 +1891,6 @@ stays where the reader left it.
 
 ```
 owner_name              the owner's name (default "Owner")
-director_instructions   the standing brief for the director
 silence_notice_minutes  the silence threshold; 0 or less means never report
 delivery_last           the outcome of the last delivery (JSON), for the settings page
 ```
@@ -1747,8 +1905,8 @@ There are five; everything else is observation and conversation.
 without it, and no agent may change anyone's model.
 
 **The stop button** — in the monitor and beside the director's chat. There is no limit
-on a turn's length, and the director, which decides about stopping through
-`agent(op=stop)`, runs on the same mechanics and can be wedged itself.
+on a turn's length, and the managers, which decide about stopping through
+`agent(op=stop)`, run on the same mechanics and can be wedged themselves.
 
 **The compact button** for the director's context. The director cannot compact itself:
 `agent(op=compact)` on itself is its own turn, which the compaction would refuse.

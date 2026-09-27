@@ -114,23 +114,31 @@ effort level, and write your standing instructions for it. You also type your ow
 name here, which is how agents will address you.
 
 After that the director is in charge. It hires the rest of the team itself.
+You change its model and its standing instructions later on the settings page.
 
 ---
 
 ## What the office does
 
-**A team you hire.** You hire one director; the director hires and fires
-executors. Each agent runs on the vendor, model and effort level chosen for it.
+**A team you hire.** You hire one director; the director hires the rest. The
+team is a tree: every agent but the director works under a manager — the
+director, or a lead. A lead runs its own part of the team the way the director
+runs the whole: it hires, fires, moves and instructs the agents under it, gives
+them work, merges their pull requests and stops their turns. Executors do the
+work they are given. Every agent under a manager has a title and standing
+instructions written by the managers above it. Each agent runs on the vendor,
+model and effort level chosen for it.
 
 **A private copy of the repository for every agent.** Each agent gets its own git
 clone with its own working tree. They never edit the same files at the same time.
 
-**Work handed out on a named branch.** The director writes a brief, names a
-branch and assigns it to an agent. The agent does the work there and reports back
-when it is done.
+**Work handed out on a named branch.** The director or a lead writes a brief,
+names a branch and assigns it to an agent. The agent does the work there and
+reports back, when it is done, to whoever assigned it.
 
 **Pull requests.** An agent publishes its branch and opens a pull request; the
-team reviews it in comments. Only the director merges.
+team reviews it in comments. The director merges; a lead merges the pull
+requests of its own part of the team.
 
 **Delivery to your own repository.** Every merge is pushed straight into your
 project folder, on your main branch, and the files on disk are updated with it.
@@ -141,11 +149,11 @@ a stale copy.
 threads with every agent, and a common room they can all read.
 
 **A task board.** Six columns, from idea to done. You can add a task and edit its
-text; moving cards is the director's job.
+text; moving cards is the job of the director and the leads.
 
-**Tickets.** A question or a bug addressed to one participant, who is the only one
-who can close it. A ticket addressed to you waits on your main page until you
-answer it.
+**Tickets.** A question or a bug addressed to one participant. Only that
+participant, or you, can close it. A ticket addressed to you waits on your main
+page until you answer it.
 
 **A wiki and a rule book.** The wiki is shared notes with versions and comments.
 The rules are short standing conventions, and every agent gets them in full at the
@@ -153,7 +161,7 @@ start of every session.
 
 **A works monitor.** It shows who is running, for how long, how long they have
 been silent, and what command they are inside right now. Every turn has a stop
-button, because nothing else ever stops one.
+button; nothing ends a turn on its own.
 
 **Quota and context in plain sight.** The main page shows how much of each
 vendor's quota is left and when it resets, and how full the director's context

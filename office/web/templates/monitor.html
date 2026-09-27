@@ -3,8 +3,8 @@
 {% block content %}
   <p class="subtitle">
     Who is doing what, whether anybody is actually running it, and what that turn is writing
-    right now. A work leaves this page when the director closes it — a reported one stays,
-    waiting on that.
+    right now. A work leaves this page when it is closed — a reported one stays, waiting on
+    that.
   </p>
 
   <div id="monitor-list" hx-get="/fragments/monitor" hx-trigger="office:works[!officeShouldSkip(this)] from:body, office:agents[!officeShouldSkip(this)] from:body, every 10s" hx-swap="innerHTML">

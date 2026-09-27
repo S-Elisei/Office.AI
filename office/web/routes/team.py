@@ -1,30 +1,22 @@
-"""Team roster: agents, runtime/model/effort, status, context fill; the stages."""
+"""Team roster: the team as a tree, each agent under its manager with its title;
+runtime/model/effort, status, context fill; the stages."""
 
 from __future__ import annotations
 
-import sqlite3
-
 from fastapi import APIRouter, Request
 
-from office import core, db, git, stages
+from office import core, git, stages
 from office.web.deps import get_config, get_db
 from office.web.templating import templates
 
 router = APIRouter()
 
 
-def _agents(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return db.query(
-        conn,
-        "SELECT * FROM agents ORDER BY (kind = 'director') DESC, name COLLATE NOCASE",
-    )
-
-
 def _context(request: Request) -> dict:
     return {
         "request": request,
         "active": "team",
-        "agents": _agents(get_db(request)),
+        "agents": core.team_tree(get_db(request)),
         "expectations": core.open_expectations(get_db(request)),
         "project_state": git.project_state(get_config(request)),
     }

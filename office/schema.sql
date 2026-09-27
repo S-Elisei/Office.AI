@@ -4,7 +4,15 @@
 CREATE TABLE IF NOT EXISTS agents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    kind TEXT NOT NULL CHECK (kind IN ('director', 'executor')),
+    kind TEXT NOT NULL CHECK (kind IN ('director', 'lead', 'executor')),
+    -- The agent this one reports to, the director or a lead. NULL for the director
+    -- and for nobody else.
+    manager_agent_id INTEGER REFERENCES agents(id),
+    -- One line, set by the hire. NULL for the director.
+    title TEXT,
+    -- Standing instructions, printed into this agent's system prompt. NULL when
+    -- there are none.
+    instructions TEXT,
     runtime TEXT NOT NULL CHECK (runtime IN ('claude', 'codex', 'agy')),
     model TEXT NOT NULL,
     effort TEXT,
@@ -63,9 +71,11 @@ CREATE TABLE IF NOT EXISTS works (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    -- The assigner: whoever last called assign or work_reassign on this work. The
+    -- report and the failure and pause notices go to it.
+    assigned_by_agent_id INTEGER NOT NULL REFERENCES agents(id),
     brief TEXT NOT NULL,
-    -- The branch the DIRECTOR named when assigning this work. The agent creates it
-    -- in its own workspace.
+    -- The branch the assigner named. The agent creates it in its own workspace.
     branch TEXT NOT NULL,
     -- Nullable.
     workspace_id TEXT REFERENCES workspaces(id),
@@ -73,8 +83,7 @@ CREATE TABLE IF NOT EXISTS works (
     -- 'running' is the default the ordinary open work is written with.
     status TEXT NOT NULL DEFAULT 'running'
         CHECK (status IN ('running', 'paused', 'failed', 'done')),
-    -- hub_restart: every work still 'running' when the hub
-    -- starts up is a process that died with it.
+    -- hub_restart: the assignee's turn died with the hub.
     fail_reason TEXT
         CHECK (fail_reason IN (
             'context_overflow', 'quota_exhausted', 'tool_error', 'crash', 'killed', 'hub_restart'
@@ -211,7 +220,7 @@ CREATE TABLE IF NOT EXISTS rules (
     created_by TEXT NOT NULL
 );
 
--- Saved hiring compositions the director can reuse: runtime, model and effort.
+-- Saved hiring compositions every manager can reuse: runtime, model and effort.
 CREATE TABLE IF NOT EXISTS profiles (
     name TEXT PRIMARY KEY,
     runtime TEXT NOT NULL CHECK (runtime IN ('claude', 'codex', 'agy')),
@@ -261,7 +270,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender, id);
 
 -- Every ordering and every cursor in this office runs on `id`.
 
--- Director's runtime/model/effort/instructions and any other one-off key/value config.
+-- One-off key/value config.
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT

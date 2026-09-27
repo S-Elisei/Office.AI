@@ -1,6 +1,6 @@
-"""Settings: owner_name, director instructions and the silence threshold
-(core.set_setting), and the director's live runtime/model/effort
-(core.update_agent_model).
+"""Settings: owner_name and the silence threshold (core.set_setting), the
+director's standing instructions (core.set_instructions), and the director's
+live runtime/model/effort (core.update_agent_model).
 """
 
 from __future__ import annotations
@@ -118,7 +118,6 @@ def _context(
         "request": request,
         "active": "settings",
         "director": director,
-        "instructions": form.get("instructions", core.get_setting(conn, "director_instructions", "")),
         "owner_name": form.get("owner_name", get_owner_name(conn)),
         # The stored row, or the default when there is no row.
         "silence_minutes": form.get(
@@ -134,6 +133,7 @@ def _context(
         # Only when there is a director.
         # The selections drawn are the posted ones where a refused change posted
         # some, and the director's own otherwise.
+        ctx["instructions"] = director["instructions"] or ""
         ctx.update(
             _model_fields(
                 conn,
@@ -162,18 +162,27 @@ def settings_fragment(request: Request):
 
 @router.post("/settings")
 async def save_settings(request: Request):
-    """Owner-facing config only: owner_name, director_instructions and the
-    silence threshold. All three are plain settings rows.
+    """Owner-facing config only: owner_name and the silence threshold. Both are
+    plain settings rows.
     """
     conn = get_db(request)
     data = await read_form(request)
     owner_name = data.get("owner_name", "").strip()
-    instructions = data.get("instructions", "")
     silence_minutes = data.get("silence_minutes", "").strip()
     core.set_setting(conn, "owner_name", owner_name, actor=owner_name)
-    core.set_setting(conn, "director_instructions", instructions, actor=owner_name)
     # Written verbatim, empty string included.
     core.set_setting(conn, SILENCE_NOTICE_SETTING, silence_minutes, actor=owner_name)
+    return templates.TemplateResponse(request, "partials/settings_form.html", _context(request, saved=True))
+
+
+@router.post("/settings/director-instructions")
+async def save_director_instructions(request: Request):
+    """The director's standing instructions, written to its agents row."""
+    conn = get_db(request)
+    data = await read_form(request)
+    core.set_instructions(
+        conn, _director(conn)["id"], data.get("instructions", ""), actor=get_owner_name(conn)
+    )
     return templates.TemplateResponse(request, "partials/settings_form.html", _context(request, saved=True))
 
 

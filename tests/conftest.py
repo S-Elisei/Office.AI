@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 
 import pytest
 
@@ -32,4 +33,9 @@ def conn(tmp_path):
     connection = db.connect(tmp_path / "test.db")
     db.init_schema(connection)
     yield connection
+    # A turn's watcher writes to the database after its process ends: closing the
+    # connection under it crashes the interpreter.
+    for thread in threading.enumerate():
+        if thread.name.endswith("(_watch)"):
+            thread.join(timeout=30)
     connection.close()

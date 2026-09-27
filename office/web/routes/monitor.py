@@ -24,9 +24,10 @@ def _works(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         SELECT works.*, agents.name AS agent_name, agents.status AS agent_status,
                agents.runtime AS agent_runtime, agents.model AS agent_model,
                agents.context_used AS context_used, agents.context_limit AS context_limit,
-               tasks.title AS task_title
+               assigner.name AS assigner_name, tasks.title AS task_title
         FROM works
         JOIN agents ON agents.id = works.agent_id
+        JOIN agents assigner ON assigner.id = works.assigned_by_agent_id
         LEFT JOIN tasks ON tasks.id = works.task_id
         ORDER BY works.id DESC
         """,
@@ -51,7 +52,11 @@ def _context(request: Request, note: str | None = None) -> dict:
         "request": request,
         "active": "monitor",
         "works": [
-            dict(row) | {"derived_status": _derived_status(row, live)} for row in _works(conn)
+            dict(row) | {
+                "derived_status": _derived_status(row, live),
+                "told": core.work_notice_recipient(conn, row["id"]) or get_owner_name(conn),
+            }
+            for row in _works(conn)
         ],
         "live": live,
         "project_state": git.project_state(get_config(request)),
@@ -100,7 +105,7 @@ def _tail(request: Request, rows: list[dict] | None = None, note: str | None = N
 
 @router.get("/fragments/monitor/tail/{work_id}")
 def monitor_tail_fragment(request: Request, work_id: int):
-    """What this work's executor last wrote, parsed into a transcript."""
+    """What this work's assignee last wrote, parsed into a transcript."""
     conn = get_db(request)
     config = get_config(request)
     work = db.query_one(
