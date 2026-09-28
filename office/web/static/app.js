@@ -173,18 +173,25 @@
     { capture: true, passive: true }
   );
 
+  // The page's own scroll: a swapped region arrives with its details closed,
+  // and the page is shorter until they reopen.
+  let pageTop = 0;
+
   document.addEventListener("htmx:beforeSwap", (e) => {
+    pageTop = document.scrollingElement.scrollTop;
     rememberScrollIn(e.detail && e.detail.target);
   });
 
   document.addEventListener("htmx:afterSwap", (e) => {
     const root = e.target;
+    if (root && root.querySelectorAll) {
+      for (const el of root.querySelectorAll("details[data-office-details]")) {
+        if (detailsOpen.get(el.dataset.officeDetails) && !el.open) el.open = true;
+      }
+    }
+    document.scrollingElement.scrollTop = pageTop;
     placeScrollIn(document);
     reportSeen();
-    if (!root || !root.querySelectorAll) return;
-    for (const el of root.querySelectorAll("details[data-office-details]")) {
-      if (detailsOpen.get(el.dataset.officeDetails) && !el.open) el.open = true;
-    }
   });
 
   // ---- what the owner has actually read ----------------------------------
