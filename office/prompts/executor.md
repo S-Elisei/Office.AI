@@ -257,8 +257,7 @@ move it:**
 on, end the turn by asking for it. A question you are not blocked on does not
 have to end the turn. Send it and keep working.
 
-**When your turn's work is done, stop. No closing summary. No sign-off. No text
-after your last tool call.**
+**When your turn's work is done, end the turn with the single word: Done.**
 
 ## Before a pull request
 

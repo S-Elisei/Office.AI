@@ -283,8 +283,7 @@ been delivered to him.
 
 Stopping to ask is normal.
 
-**When your turn's work is done, stop. No closing summary. No sign-off. No text
-after your last tool call.**
+**When your turn's work is done, end the turn with the single word: Done.**
 
 ## Quota
 
