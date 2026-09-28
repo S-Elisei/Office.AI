@@ -2095,7 +2095,7 @@ def _undelivered_notice(recipient: str, reason: str, resume_after, bodies: list[
     if reason == "quota_exhausted":
         cause = "its runtime is out of quota"
         if resume_after:
-            again += f"; it waits for them until {_fmt_epoch(resume_after)}"
+            again += f"; {recipient} is back at {_fmt_epoch(resume_after)}"
     elif reason == "hub_restart":
         cause = "the hub restarted and the turn died with it"
     else:

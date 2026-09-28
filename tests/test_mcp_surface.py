@@ -412,26 +412,3 @@ def test_an_inherited_workspace_is_swapped_for_the_recipients_own(conn, config):
             ["git", "config", "user.name"], cwd=tree, capture_output=True, text=True, timeout=60
         ).stdout.strip()
         assert identity == agent
-
-
-def test_a_failed_work_is_read_in_full_only_within_reach(conn, config):
-    add_agent(conn, "boss", "director")
-    add_agent(conn, "north", "lead", manager="boss")
-    add_agent(conn, "south", "lead", manager="boss")
-    add_agent(conn, "s-hand", "executor", manager="south")
-    failed, text = answer_to(
-        conn, config, "south", "assign", {"agent": "s-hand", "brief": "dig", "branch": "main"}
-    )
-    assert not failed, text
-    work_id = db.query_one(conn, "SELECT id FROM works")["id"]
-    core.fail_work(conn, work_id, "crash", output_tail="the spade broke")
-
-    failed, refusal = answer_to(conn, config, "north", "work", {"op": "show", "work": work_id})
-    assert failed
-    assert "the spade broke" not in refusal
-
-    for reader in ("south", "boss", "s-hand"):
-        failed, text = answer_to(conn, config, reader, "work", {"op": "show", "work": work_id})
-        assert not failed, (reader, text)
-        assert "the spade broke" in text
-        assert "assigned by south" in text

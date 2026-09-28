@@ -849,8 +849,7 @@ otherwise `crash`.
 The output tail is a 200-line ring buffer in memory, mirrored to
 `<root>/tails/<agent>.log` every 5 seconds and again at process exit. A snapshot of
 it is stored on the work row when a work fails, and lives until that row is deleted.
-`work(op=show, work=N)` prints it, with the rest of the work, to the work's assignee
-and to any caller with the reach `work_close` requires.
+`work(op=show, work=N)` prints it, with the rest of the work, to any caller.
 
 `finish_work` is the assignee **reporting**: the row is marked `done`, the summary
 goes to the assigner as a message from the assignee — to nobody when the assignee
@@ -1797,8 +1796,6 @@ stage(op, ...)   # create | reset | delete (section 12)
   the caller's subtree or which the caller assigned; `work_reassign` also takes a
   `to_agent` that is the caller or in its subtree, and records the caller as the
   assigner;
-- `work(op=show, work=N)` takes the caller's own work or a work that passes the same
-  test as `work_close`;
 - `task(op=move, status=done)` is refused unless every work still on the task
   passes the same test as `work_close`; for an executor, unless the task has no
   works;

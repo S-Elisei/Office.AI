@@ -323,7 +323,7 @@ def _h_work(conn, config, agent_name, role, args) -> str:
     me = _agent_row(conn, agent_name)
 
     if op == "show" and args.get("work") not in (None, ""):
-        return _show_work(conn, me, args["work"])
+        return _show_work(conn, args["work"])
     if op == "show":
         work = core.current_work(conn, me["id"])
         if work is None:
@@ -407,15 +407,12 @@ def _h_work(conn, config, agent_name, role, args) -> str:
 _WORK_STATUS_WORDS = {"running": "open", "done": "reported"}
 
 
-def _show_work(conn, me: dict, work_id) -> str:
-    """work(op=show, work=N): one work in full, for its assignee or for a caller
-    that could close it (core.check_work_reach)."""
+def _show_work(conn, work_id) -> str:
+    """work(op=show, work=N): any work in full, for anyone."""
     row = db.query_one(conn, "SELECT * FROM works WHERE id = ?", (work_id,))
     if row is None:
-        raise ValueError(f"no such work {work_id} — roster() lists the works you can read")
+        raise ValueError(f"no work {work_id}: it has been closed, or the number is wrong")
     work = dict(row)
-    if work["agent_id"] != me["id"]:
-        core.check_work_reach(conn, me, work, "work(op=show, work=…)")
     status = _WORK_STATUS_WORDS.get(work["status"], work["status"])
     lines = [
         f"work {work['id']} [{status}]: {_name_of(conn, work['agent_id'])}, assigned by "
@@ -1603,8 +1600,7 @@ _TOOLS: dict[str, types.Tool] = {
         description="Your own current work: show | finish. "
         "show gives the brief you were assigned, the branch to do it on, who assigned it and "
         "its status. show with work=<id> gives one work in full: assignee, assigner, branch, "
-        "status, why it failed or paused, the brief and its stored output tail. It works for "
-        "your own work and for any work you could close with work_close. "
+        "status, why it failed or paused, the brief and its stored output tail, for any work. "
         "finish REPORTS your work. With pr, it first publishes your branch and then opens the "
         "PR in the same call. If a PR from that branch into the same target is already open, "
         "finish updates that PR instead of opening a second one: its title, and its "
@@ -1619,8 +1615,8 @@ _TOOLS: dict[str, types.Tool] = {
                 "op": {"type": "string", "enum": ["show", "finish"]},
                 "work": {
                     "type": "integer",
-                    "description": "Optional for show: the id of the work to read in full, as "
-                    "roster() shows it. Without it, show gives your own work.",
+                    "description": "Optional for show: the id of any work to read in full. "
+                    "Without it, show gives your own work.",
                 },
                 "summary": {
                     "type": "string",
