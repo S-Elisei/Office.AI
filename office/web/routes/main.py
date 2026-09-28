@@ -145,7 +145,7 @@ def _plate_context(request: Request) -> dict:
     return {"request": request, "plate_notices": notices, "plate_more": more}
 
 
-def _quota_context(request: Request) -> dict:
+def quota_context(request: Request) -> dict:
     return {"request": request, "quota": _quota(get_db(request))}
 
 
@@ -208,7 +208,7 @@ def _page_context(request: Request) -> dict:
         **_chat_context(request),
         **_stop_context(request),
         **_plate_context(request),
-        **_quota_context(request),
+        **quota_context(request),
         **_context_panel_context(request),
         "active": "main",
     }
@@ -329,7 +329,7 @@ async def stop_director(request: Request):
 
 @router.get("/fragments/main-quota")
 def main_quota_fragment(request: Request):
-    return templates.TemplateResponse(request, "partials/quota.html", _quota_context(request))
+    return templates.TemplateResponse(request, "partials/quota.html", quota_context(request))
 
 
 @router.get("/fragments/main-context")

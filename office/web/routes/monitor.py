@@ -11,6 +11,7 @@ from office import core, db, git
 from office.adapters import adapter_for
 from office.web import transcript
 from office.web.deps import get_bus, get_config, get_db, get_owner_name
+from office.web.routes.main import quota_context
 from office.web.templating import templates
 
 router = APIRouter()
@@ -52,10 +53,7 @@ def _context(request: Request, note: str | None = None) -> dict:
         "request": request,
         "active": "monitor",
         "works": [
-            dict(row) | {
-                "derived_status": _derived_status(row, live),
-                "told": core.work_notice_recipient(conn, row["id"]) or get_owner_name(conn),
-            }
+            dict(row) | {"derived_status": _derived_status(row, live)}
             for row in _works(conn)
         ],
         "live": live,
@@ -74,7 +72,9 @@ def _wake_context(request: Request) -> dict:
 
 @router.get("/monitor")
 def monitor_page(request: Request):
-    return templates.TemplateResponse(request, "monitor.html", _context(request) | _wake_context(request))
+    return templates.TemplateResponse(
+        request, "monitor.html", _context(request) | _wake_context(request) | quota_context(request)
+    )
 
 
 @router.get("/fragments/monitor")

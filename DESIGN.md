@@ -1934,9 +1934,10 @@ All times are shown local and stored UTC.
    parent by id, filled in with the current parent on a parent's board, and edits
    titles and bodies; there is no move control for him. A card with unclosed
    blocking tasks carries the list of them, in any column.
-4. **Works** — who, what, branch, context, a stop button. Finished works do not
-   appear. State is stated both ways: either "a turn is running" with `running_for`
-   and `quiet_for`, or "nobody is working" naming the idle assignee. The brief is
+4. **Works** — who, what, branch, context, a stop button, with the quota bars of the
+   main page beside them. Finished works do not appear. State is stated both ways:
+   either "a turn is running" with `running_for` and `quiet_for`, or "no turn" naming
+   the assignee's status; a reported work names who it waits on to close it. The brief is
    collapsed and rendered as the markdown it is written in. The turn's output is a
    collapsed block, parsed by the same parser the office listens to the turn with:
    speech, tool calls with their start and end, errors. A call with a start and no end
