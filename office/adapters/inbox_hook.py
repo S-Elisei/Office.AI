@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from office.adapters import shared
+import shared
 
 PREAMBLE = "Office messages that arrived during this turn:"
 

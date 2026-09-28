@@ -22,8 +22,7 @@ def _toplevel(cwd: Path, env: dict[str, str]) -> tuple[int, str]:
     return proc.returncode, proc.stdout.strip()
 
 
-def test_from_the_sandbox_git_does_not_reach_the_owners_repository(config, monkeypatch):
-    monkeypatch.setenv("OFFICE_ROOT", str(config.root))
+def test_from_the_sandbox_git_does_not_reach_the_owners_repository(config):
     owner = config.root.parent
     subprocess.run(["git", "init", "."], cwd=str(owner), capture_output=True, timeout=60)
     workspace = config.ws_dir / "ws-1"

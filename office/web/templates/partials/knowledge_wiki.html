@@ -18,7 +18,9 @@
         <input type="hidden" name="expected_version" value="0">
         <div class="form-row">
           <label for="wn-path">Path</label>
-          <input id="wn-path" name="path" type="text" placeholder="category/page-name" required>
+          <input id="wn-path" name="path" type="text" placeholder="category/page-name" required
+                 pattern="{{ page_path_pattern }}"
+                 title="Segments of lowercase letters, digits, '_' and '-', each starting with a letter or a digit, none a Windows device name, joined by '/'">
         </div>
         <div class="form-row">
           <label for="wn-category">Category</label>

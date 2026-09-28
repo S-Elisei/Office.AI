@@ -18,6 +18,7 @@ COLUMNS = [
     ("in_progress", "In progress"),
     ("paused", "Paused"),
     ("done", "Done"),
+    ("cancelled", "Cancelled"),
 ]
 NEW_TASK_STATUS = "idea"
 DONE_SHOWN = 20
@@ -53,8 +54,8 @@ def _context(
     request: Request, parent: int | None = None, flat: bool = False, all_done: bool = False, **extra
 ) -> dict:
     """The board of `parent`'s children, of the top-level tasks when `parent` is
-    None, or of every task when `flat`. The done column holds the DONE_SHOWN
-    most recently changed ones unless `all_done`."""
+    None, or of every task when `flat`. The done and cancelled columns hold
+    the DONE_SHOWN most recently changed ones each unless `all_done`."""
     conn = get_db(request)
     tasks = core.board(conn)
     if flat:
@@ -66,14 +67,17 @@ def _context(
     by_status: dict[str, list[dict]] = {}
     for t in shown:
         by_status.setdefault(t["status"], []).append(t)
-    done = sorted(by_status.pop("done", []), key=lambda t: t["updated_at"], reverse=True)
-    by_status["done"] = done if all_done else done[:DONE_SHOWN]
+    closed_totals = {}
+    for status in core.CLOSED_TASK_STATUSES:
+        closed = sorted(by_status.pop(status, []), key=lambda t: t["updated_at"], reverse=True)
+        by_status[status] = closed if all_done else closed[:DONE_SHOWN]
+        closed_totals[status] = len(closed)
     return {
         "request": request,
         "active": "kanban",
         "columns": COLUMNS,
         "by_status": by_status,
-        "done_total": len(done),
+        "closed_totals": closed_totals,
         "done_shown": DONE_SHOWN,
         "parent": parent,
         "flat": flat,

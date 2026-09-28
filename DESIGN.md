@@ -146,10 +146,9 @@ it.
   work, only the turn ends. A work that has already reported is left alone;
 - stderr lines carrying a vendor marker (`[agy]`, `codex:`, `claude:`,
   `warning:`) become events;
-- the output tail is written for every turn and deleted only for a turn that both
-  ended cleanly and handed something on. Exit code 0 is not the same statement as
-  "the turn happened" — agy's print timeout returns 0 with an empty response — nor
-  the same as "the turn said something".
+- the output tail is written for every turn, and the agent's next turn writes over
+  it. Exit code 0 is not the same statement as "the turn happened" — agy's print
+  timeout returns 0 with an empty response.
 
 `agent(op=stop)` against yourself is refused: that call is the turn that would be
 killed.
@@ -164,17 +163,24 @@ encode_message(text) -> str
 parse_line(line) -> Event | None
 prepare_session(ws, agent) -> None
 poll_quota(session_ids=()) -> list[QuotaSnapshot] | None
+quota_reset(error) -> int | None
 list_models() -> list[ModelInfo] | None
 ```
 
-Optional methods: `child_env()` (claude), `compact_command(ws, session_id)`
-(claude), `poll_context(session_id)` (codex).
+`quota_reset` reads the time of return out of the vendor's own quota refusal:
+claude's "resets 12:50am (<zone>)", with or without a date; codex's "try again at
+3:20 PM", with or without a date, in the machine's zone; agy's "Resets in 3h58m49s".
+Without a date, the moment is the next time the clock shows it.
+
+Optional methods: `child_env()` (claude), `compact_command(ws, model, effort,
+office_url, session_id)` (claude), `poll_context(session_id)` (codex), `turn_requests(session_id, since)` (codex).
 
 `Event` carries `kind`, `text`, `phase`, `session_id`, `context_used`,
-`context_limit`, `context_before` and `error`. `phase` is `started` or `finished`
-on a tool event: a started call with no finished twin is the diagnosis "the agent
-is sitting inside a command". There is no quota field — quota belongs to the
-vendor account, not to a turn.
+`context_limit`, `context_before`, `error`, `request` and `totals`.
+`phase` is `started` or `finished` on a tool event: a started call with no finished
+twin is the diagnosis "the agent is sitting inside a command". `request` is one
+model request's token counts, model and tools, keyed so that the events of one
+request fold into one; `totals` is the process's own sum on `turn_end`.
 
 `resume` is required and separate from `session_id`: an id alone cannot tell a
 first turn from a continuation. `office_url` is the address of this agent's
@@ -192,7 +198,8 @@ Vendor session variables are stripped (`CLAUDE_CODE_*`, `CLAUDE_SESSION*`,
 `CODEX_SESSION*`, `AGY_SESSION*`, `CLAUDECODE`, `CLAUDE_PID`, `CLAUDE_EFFORT`,
 `CLAUDE_AGENT_SDK_VERSION`). Credentials and config paths are left alone. Added:
 `OFFICE_AGENT`, `OFFICE_SESSION`, `OFFICE_MCP_URL`, `OFFICE_MARK`, and the
-variables that close outbound push (section 8).
+variables that close outbound push (section 8). A compaction gets the same
+environment as a turn of its session (`process.turn_env`).
 
 **Every git the office starts — an agent's process at any depth and the hub's own
 calls — runs with `GIT_CEILING_DIRECTORIES` naming the owner's repository**, written
@@ -274,7 +281,7 @@ a turn the message rides the prompt of the next turn — the third drain.
 
 The hook and the piggyback take the queue with the same atomic rename
 (`shared.claim_inbox`): one gets the bytes, the other gets nothing. Starting a
-turn uses the same call, plus what is unread in the database.
+turn reads the database only.
 
 Starting a turn and delivering a message are one action. An agent outside a turn
 is asleep; waking it and handing it the message are indistinguishable.
@@ -286,7 +293,7 @@ The durable queue is the database: one watermark per agent,
 second watermark over events — an agent receives messages and nothing else.
 
 `<ws>/.office/inbox` is the cache the hook reads: one JSON line per message,
-`{"to": name, "text": text}`, appended. Whoever claims it takes the lines
+`{"to": name, "text": text, "after": watermark}`, appended. Whoever claims it takes the lines
 addressed to itself and **appends the rest back**. The workspace's owner is
 recorded in `<ws>/.office/owner`, rewritten at the start of every turn; the hook
 delivers nothing unless the process's `OFFICE_AGENT` matches that file.
@@ -297,6 +304,11 @@ An agent with no workspace has no inbox and waits for a turn.
 forward cache for a turn already in progress; a hook fires only on the agent's
 own activity, which an idle agent has none of. Until a turn runs, unread messages
 stay in the database and ride the next turn's prompt.
+
+Each line carries the watermark as it stood before that line was written. When a
+turn ends, however it ends, the office takes back whatever the inbox still holds
+for its agent and moves the watermark back to the lowest of those marks: what the
+turn never received is unread again and rides the next turn.
 
 ### The owner's read mark
 
@@ -374,7 +386,9 @@ fit in a single model call, and then the message rides the next turn.
 For claude and codex the hook is a process per tool call, so the command starts
 with a shell test for the inbox file's existence. The hook config is rewritten at
 the start of every turn: the command carries absolute paths to the interpreter,
-to this copy of the office and to the workspace. agy's `hooks.json` is merged with
+to this copy of the office and to the workspace. The hook script imports the
+standard library and `shared.py` beside it, and `shared.py` imports the standard
+library only. agy's `hooks.json` is merged with
 whatever is there; only the office's entry is replaced.
 
 The hook's own stdin and stdout are set to UTF-8 explicitly. They are handed to
@@ -406,7 +420,8 @@ common chat it carries the newest 50 lines, after a line saying how many earlier
 ones were left out and which `chat(before_id=…)` call can read them. Wakes coalesce over a
 3-second window; the bus ticks once a second; the fuse allows at most 6 wakes per
 agent in 300 seconds, with extras collapsing while the queue keeps growing. The
-environment never interrupts a turn that has started.
+environment never interrupts a turn that has started. A quota hold (section 10)
+also defers a turn; the messages wait.
 
 ### Expectations
 
@@ -439,13 +454,16 @@ A turn is ordered because a message that buys one appeared, not because a hook
 failed. If the hook got there first the queue is empty, the prompt is empty and
 no turn starts.
 
-Writing to the inbox of a running turn advances the read mark in advance. At turn
+Writing to the inbox of a running turn advances the read mark in advance. What the
+turn did not take is given back when it ends (above), so a turn's range never
+holds a message the turn did not receive, and never misses one it did. At turn
 start, the mark as it stood is saved in `agents.turn_start_message_id` — "what
-this turn took", not a rollback point. **On an abnormal end, every sender of a
-direct message in that range gets a message from `office` saying it was not
-processed, with the reason and, for quota, the time of return.** The message
-itself counts as read and is not repeated; the sender repeats it if they think
-fit — for quota, the notice says to `remind()` it for after the time of return. On a clean end the marker is simply dropped. The marker lives in the
+this turn took". **On an abnormal end, every sender of a direct message in that
+range gets a message from `office` saying it was not processed, with the reason
+and, for quota, the time of return.** The brief of the agent's work is not among
+them. A
+message in the range counts as read and is not repeated; the sender repeats it if
+they think fit — for quota, the notice says it waits for them until the time of return. On a clean end the marker is simply dropped. The marker lives in the
 database, because the death of the hub is also an abnormal end.
 
 The notices go out before the marker is dropped, and the marker is dropped either
@@ -464,8 +482,7 @@ context is a delivered message.
 wrote it.** Assigning work sends the brief as the assigner's message; finishing
 work sends the report to the assigner as the assignee's message. Tickets, PR
 comments, opening and merging PRs, moving tasks, hiring, firing and reassigning
-work send nothing: they come in batches, the decision of when to wake somebody belongs to their author, and the
-state is readable through the tools in section 14.
+work send nothing; the state is readable through the tools in section 14.
 
 **In its own name the office says nine things**, all of them messages from the
 participant `office`:
@@ -477,23 +494,52 @@ participant `office`:
 | Hub restart, with the list of interrupted works | the director, with all of them; every other agent the two rows above name for an interrupted work or a killed turn, with those | yes |
 | Your message was not processed | the sender | yes |
 | A deferred message has nowhere to go (the recipient was fired) | the sender | yes |
-| Your turn ended without a word to anybody | that agent | yes |
 | Your expectation ran out of time: nothing came, and its address is closed | that agent | yes |
-| The same agent did it a second time in a row | its manager; the owner's plate and journal for the director, which buy nothing | yes, for a manager |
 | A running agent has said nothing for the owner's silence threshold | its manager | yes |
+| Nothing moves the open works an agent answers for | the agent; then each manager above it in turn; then the owner's journal (critical) | yes; the journal buys nothing |
+| Nothing in the office moves | the director | yes |
 
-**Every turn ends with one of three things: a question to whoever can answer it,
-an answer to whoever asked, or a report handing the work on.** Nothing in this
-office wakes by itself, so a turn that ends having said nothing ends the day. The
-check is on speech, not on work: speech means a direct message sent, a `remind`
-set, or an expectation opened, in that turn. A common-chat
-post, a ticket, a PR, a comment, a wiki page and a moved task all count for
-nothing here, because each of them announces itself to nobody.
+**The progress check** runs on the bus thread once a minute, and not at all without
+a director. It works from the database and from which turns are running. It keeps
+three things in memory: whether the owner has stopped the director's turn (set by
+that stop, cleared by the director's next turn), where each stuck agent's chain
+stands, and the last "nothing moves" notice. A hub restart forgets all three.
 
-The first nudge goes to the offender and buys it one turn. A second silent ending
-in a row goes over its head instead, and nothing loops: an escalation buys the
-agent's manager a turn, the director's own is a critical notice on the owner's
-plate, and the owner is the one participant not obliged to reply.
+An agent **answers for** a work: its holder while it runs; its assigner once it has
+reported (the holder, for a work it assigned itself); for a pause or a failure,
+whoever section 4 tells of it, and the director for a work of its own — except one
+of the director's own that the owner stopped, which nobody answers for.
+
+Something **moves** an agent's works when it has a turn running, or the other side
+of one of them does; a direct message it has not read; a deferred message it set
+or will receive, or an expectation it holds open; a running work it assigned to
+somebody else; or a direct message of its own that its addressee has not taken —
+unread, or inside the addressee's running turn — and, for one to the owner, that
+he has not written back after. The director has one more while the owner has
+stopped it. An agent that answers for works and has none of these is **stuck**.
+
+About a stuck agent the check says one thing at a time along a chain: level 0 is the
+agent itself, 1 its manager, and so on to the director; above the director is a
+critical line in the owner's journal. A level whose runtime and model are held for
+quota (section 10) is passed over, and so is the director's while the owner has
+stopped it. The bus keeps in memory, per stuck agent, its works and their statuses
+as last found, the level told last, that message, and `MAX(messages.id)` when it
+went; works found different drop the entry, and a hub restart starts every chain
+again at level 0. The next word waits until the last one has been
+taken — read, with no turn of its addressee running — and while that addressee has
+a deferred message set since then still waiting. Taken, and the agent still stuck
+on the same works, it goes one level up, or back to level 1 when the agent has had
+a direct message since. After the journal line nothing more is said until the
+agent has a direct message. The text is facts: each work's number, holder, status
+and the start of its brief.
+
+**Nothing in the office moves** when no turn runs, no direct message is unread, no
+deferred message and no expectation is waiting, and no work is running. Then, if a
+direct message other than one between the director and the owner has been sent
+since the director last wrote to the owner or was last told this (kept in memory),
+and the owner
+has not stopped the director, the director is told, with the list of open works.
+It is not sent in a pass that already wrote to the director about its own works.
 
 The silence report is about a turn that has not ended and may never. It has no
 power over the agent — no stop, no flag, nothing written but a message. The
@@ -554,7 +600,7 @@ the works, quota and the model catalogue are not in it at all — they are
 The snapshot is assembled from what the office already holds: who this agent is —
 name, kind, title and manager; the team; this agent's own work (its id, status,
 branch, assigner and brief, `failed` included) and, when the work has a task, that
-task with each task above it; open PRs; the top-level tasks that are not done, one
+task with each task above it; open PRs; the top-level tasks neither done nor cancelled, one
 line each as `task(op=list)` prints them, in progress first and ideas last, at
 most fifty, with the count of the rest;
 a line saying that `task(op=list)` and `task(op=read)` read the board; open tickets
@@ -642,8 +688,13 @@ there is no workspace, a turn is running, a compaction is already running, or
 claude declined (it does not produce a boundary on a short conversation). Both
 callers — a manager's command and the owner's button — ask the same predicate.
 
+The compaction runs with every flag and every variable a resumed turn of the same
+session runs with, except the turn's stdin input format and `--autocompact`: the
+prompt `/compact` is the argument.
+
 Success returns `before`, `after` and `freed`, and writes a line to the owner's
-journal.
+journal. Every compaction, done or declined, leaves a usage row (section 13), and
+its runtime's quota is polled once it ends.
 
 A "this agent is compacting" flag prevents a turn from starting while it runs; it
 is set and read under the same lock that starts turns.
@@ -661,7 +712,8 @@ agent tool changes a model; the settings page offers it for the director only.
 
 **A task** is a record of something to be done. It may have no assignee and no
 works. Statuses: `idea` · `planned` · `needs_clarification` · `in_progress` ·
-`paused` · `done`.
+`paused` · `done` · `cancelled`. `task(op=move)` to `done` or `cancelled` takes a
+result line. A cancelled task still blocks the tasks that depend on it.
 
 A task may sit under a parent task, `tasks.parent_task_id`; a task without one is
 top-level. `task(op=create)` takes an optional `parent`; `task(op=update)` takes
@@ -672,12 +724,12 @@ enforced: a parent may be `done` while its children are open, and a parent's sta
 does not follow its children's.
 
 `task(op=list)` and `task(op=read)` are open to everyone. `list` takes `parent`,
-`status` — one status, or `all`; without it every status but `done` — and `query`, a
+`status` — one status, or `all`; without it every status but `done` and `cancelled` — and `query`, a
 regular expression matched case-insensitively against titles; an invalid expression
 is refused. Without `parent` and `query` it lists the top-level tasks; with `query`
 alone, the whole board; with `parent` alone, that task's children; with both,
 everything under that task at any depth. One line per task: id, status, title, the
-children's counts (open / done) and `blocked by #…` naming each dependency that is
+children's counts (open / done; a cancelled child is in neither) and `blocked by #…` naming each dependency that is
 not done. The order is the board's: status in the order above, then position, then
 id. The answer stops at two hundred lines or sixteen thousand characters, and its
 last line counts the tasks left out and names the filters that narrow the list.
@@ -692,14 +744,16 @@ Dependencies live in `task_dependencies`: `blocking_task_id` finishes before
 `roster()` as its own list.
 
 **A work** is activity on a task: brief, assignee, assigner, workspace, branch,
-session. Statuses: `running` · `paused` · `failed` · `done`.
+session. Statuses: `running` · `paused` · `failed` · `done`. A paused work goes back
+to `running` when its holder's next turn starts; a failed one only by
+`work_reassign`.
 
 `assign(agent, brief, task_id, branch)` — the branch is required, the task is not.
 The caller is recorded as the assigner, `works.assigned_by_agent_id`; a manager
 that assigns a work to itself is its own assigner. `work_reassign` records its
 caller as the assigner in the same way, and the work's report and notices go to
 that caller from then on. `work_reassign` sends nobody anything; the caller writes
-to whoever should know. The branch name travels to the assignee in the brief; the
+to whoever has to act on it. The branch name travels to the assignee in the brief; the
 assignee creates the branch itself.
 
 Invariants checked explicitly:
@@ -758,7 +812,16 @@ and all, stays with it, and the recipient's previous workspace becomes ownerless
 rather than deleted. `work_reassign` refuses a recipient that is still provisioning.
 A session resumes in a workspace other than the one it began in with its context
 intact, on every runtime, so a change of workspace takes effect from each agent's
-next turn and clears no session.
+next turn and clears no session. **An agent's workspace never changes during its
+turn**: `work_reassign` is refused while an agent whose workspace it would change
+carries a turn-start marker (section 4), and whenever it would change the caller's
+own. It is also refused while the work's assignee, when that is neither the
+recipient nor the caller, carries the marker. The marker is set once a turn's
+process exists, so a turn being started at the moment of the reassignment is not
+seen by it. A manager reaches a work's code through git: its holder publishes the
+branch and the manager fetches it into its own workspace; a work that lies in the
+manager's own workspace is handed on with `workspace=fresh` once its branch is
+published.
 
 `work_reassign` to the work's current assignee with `inherit` moves nothing: only the
 assigner and the work's status change, and the work is open again. That is how a
@@ -851,7 +914,8 @@ layer.
 
 **`<root>` is always `<owner's repository>/.office-data`.** The office lives inside
 the project it works on; the delivery address is the parent of its data directory,
-and so is computed rather than stored or entered.
+and so is computed rather than stored or entered. The hub takes it from `OFFICE_ROOT`
+and does not start without it.
 
 ```
 <owner's repository>/          the owner's working tree, the delivery target
@@ -859,7 +923,7 @@ and so is computed rather than stored or entered.
 <root>/repo/project.git        bare — the office's repository, the push target from workspaces
 <root>/repo/seed/              an ordinary clone --recurse-submodules — the object donor
 <root>/ws/<workspace-id>/      workspaces
-<root>/scratch/<workspace-id>/ the agent's sandbox — outside every git tree
+<root>/scratch/<workspace-id>/ the agent's sandbox — outside every git tree; wiki/ holds the wiki's files
 <root>/stages/<name>/          stages (section 12)
 <root>/stages/<name>.prepare.log
 <root>/stages/.<handle>.index  a snapshot's temporary index
@@ -1040,8 +1104,9 @@ publish under a name of one's own.
 A PR is an office entity in SQLite, always against the superproject.
 
 `pr(op=create)` and `work(op=finish, pr=…)` publish the caller's branch first. When a
-PR from that source branch into the same target is already open, they answer with
-that PR, "updated … published again", and open no second one: that is how a branch is
+PR from that source branch into the same target is already open, they update that
+PR — its title to the one given and, when one is given, its description — answer
+"updated … published again", and open no second one: that is how a branch is
 published again, after it has taken its target in.
 
 **Only a branch that already contains the target is merged.** If it does not, the
@@ -1235,15 +1300,38 @@ search submodules for a live push address.
 statements, each with a short title and a number. The owner edits both from the
 Knowledge page; agents reach them through `note`.
 
-The source is SQLite and there are no copies. **The wiki is read and written only
-through the `note` tool**; there are no wiki files in a workspace.
+The source is SQLite. **Every agent reads and edits the wiki as files**: page
+`a/b` is `<sandbox>/wiki/a/b.md` in each workspace's sandbox, holding the page's
+body. `wiki_copies` keeps, per workspace and page, the version and the body the
+office last wrote into that file. A file whose text differs from that body and from
+the page holds edits its agent has not published, and the office leaves it as it
+is.
+
+The files are brought up to the pages at the start of every turn of the sandbox's
+agent, before its process starts, and one page's file when the agent reads, undoes
+or deletes that page: a missing file, or one that is what the office last wrote,
+gets the current page; for a page that is gone the copy is forgotten and the file
+removed unless it holds edits, which leaves it a draft of a new page. An agent drops its own edits by deleting the file and reading the page. The
+owner's edits on the Knowledge page reach the files the same way.
+
+`note(op=write, kind=wiki, path)` publishes the caller's file of the page. A new
+page needs `category` and `title`. For an existing page they rename or re-file it.
+Every new page, the owner's included, has a path of segments of lowercase letters,
+digits, `_` and `-`, each starting with a letter or a digit, none a Windows device
+name, joined by `/` (`core.note_wiki`, and the `pattern` of the owner's form). A
+page body is stored with LF line ends.
+When the page has changed since the caller's copy, the file is merged with it by
+`git merge-file`, the copy's body as the base; a clean merge is published and
+written into the file, and a merge with overlapping changes publishes nothing,
+writes the file with those places marked and says how many there are. A file that
+still holds a marker is refused. Two publishes of one page at once are settled by
+the version check of `core.note_wiki`: the second is refused and is written again.
 
 `note(op=list, kind=wiki)` returns the index — path, category, title, version and
-comment count per page, no bodies. `note(op=read)` returns one page with its body,
-version and every comment on it. Writing is one operation, `write`: a new page and
-an edit are not different verbs, they are told apart by the expected version, which
-`write` and `delete` take and refuse on a mismatch. Reading therefore has to return
-the version.
+comment count per page, no bodies. `note(op=read)` returns one page's version, who wrote it
+last, the state of the caller's file and every comment on it; no body.
+`note(op=delete)` is refused unless the caller's copy is at the page's version.
+There is no search: the files are searched with the agents' own tools.
 
 `note(op=undo)` returns a page body to its previous state — one step back, which is
 the whole of the wiki's history (`wiki.prev_body`). The undo is itself a write, so
@@ -1253,15 +1341,7 @@ it can be undone.
 so each comment records the version it was written against, and both readers print
 it. A comment wakes nobody.
 
-`note(op=search, kind=wiki, query=…)` greps the wiki. `query` is a regular
-expression, matched case-insensitively against each page's title and each line of
-its body; an invalid one is refused. The answer lists every matching page — path,
-title and version — followed by its matching body lines numbered as `grep -n`
-numbers them, at most 20 per page with a count of the rest; a page matched on its
-title alone has no lines. The whole answer is capped in size and says how many
-pages it left out. Comments are not searched, and rules have no search.
-
-A page's `path` is an identifier, not a path on disk.
+A page's `path` is also the path of its file under `wiki/`.
 
 **Rules are the director's to write and everyone's to read.** `note(kind=rule)` has
 `list` for everyone, and `create`, `update` and `delete`, which it refuses for any
@@ -1297,7 +1377,10 @@ Two numbers are normalised:
 - `remaining_fraction` is always what is left. agy reports the remainder, claude and
   codex report what is spent, and those two are subtracted from one;
 - `reset_time` is always epoch seconds, UTC. Unparseable is `NULL`; no local zone is
-  substituted.
+  substituted. claude's `/usage` names no year: the one that puts the moment
+  nearest to now is taken;
+- a bucket whose reset time has passed is stored as fully remaining, with no
+  reset time. The history keeps the vendor's figure.
 
 Reading it is free for all three, with no turn, at any moment:
 
@@ -1307,10 +1390,14 @@ Reading it is free for all three, with no turn, at any moment:
 | codex | `rate_limits` from the newest session file of a session the office itself started |
 | agy | `agy --output-format json --print /usage`, `command.data.groups[].buckets[]` |
 
-Polling is every 60 seconds plus one round at hub startup, on its own thread. A
-successful poll of a runtime deletes the buckets its answer did not mention. A
-failed poll deletes and changes nothing. A runtime that has never answered has no
-row, and `health()` says so.
+Polling is every 60 seconds plus one round at hub startup, on its own thread, and
+one round of a runtime as soon as a turn or a compaction on it ends. A successful
+poll of a runtime deletes the buckets its answer did not mention. A failed poll
+deletes and changes nothing. A runtime that has never answered has no row, and
+`health()` says so.
+
+**The history** (`quota_polls`) keeps every reading that differs from the one
+before it for its bucket, as the poll gave it.
 
 Only Gemini models are used from agy; the "Claude and GPT" group is dropped
 entirely — the one place where part of a vendor's answer is not shown.
@@ -1323,9 +1410,18 @@ through `roster()`.
 
 There is no notion of paid overflow: the vendors' overdraft fields are not read. An
 exhausted window arrives as a turn error and is classified as `quota_exhausted`.
-Nobody waits for a reset. The work is paused, a message from `office` goes to
-whoever section 4 names for it, and the owner gets a plate (if it was the director's turn) or a journal
-line. The vendor's return to answering also goes to the journal.
+Its time of return is the one the vendor's refusal names (`quota_reset`), worked
+out once per death. The work is paused, a message from `office`
+goes to whoever section 4 names for it, and the owner gets a plate (if it was the
+director's turn) or a journal line, naming the hold when there is one. The work
+resumes when its holder's next turn starts: after the time of return, a message to
+the agent is all it takes.
+
+**The hold.** Until the time of return no turn starts on that runtime and model:
+messages to its agents stay unread and ride the first turn after it. The hold is
+written before the dead turn is let go, is kept in the database across a hub
+restart, and ends at the time of return; a refusal that names no time holds
+nothing. A compaction is refused while a hold is in force.
 
 **The model catalogue** is read the same way: free, with no turn, once an hour on
 its own thread, and stored as a snapshot like quota — `claude -p /model` (plus the
@@ -1460,6 +1556,9 @@ and in every submodule. **The fill** runs `git lfs pull` in the superproject and
 every submodule: large files in a stage are content, not pointers. Commits the
 stage writes are signed `office`, passed per command.
 
+The stage's large files are written to `<root>/lfs` like a workspace's: what a run
+changes under LFS is in the shared store once C is written.
+
 **The switch** puts the tree at a commit: it removes every lock file git left in the
 superproject and its submodules, then `fetch` from `project.git`,
 `checkout --force`, `submodule update --init --recursive --force`, and `clean -fd`
@@ -1528,12 +1627,14 @@ The result is `run`'s, plus:
 - S's oid;
 - a step before the command that failed, with its output;
 - after the command: C's oid; the number of changed files, the first 20 paths
-  outside LFS and every path under LFS; and the commands that bring C into the
+  outside LFS and the first 20 under LFS; and the commands that bring C into the
   working copy — fetch the ref; write the diff from S to C, LFS paths excluded, to
-  `<root>/scratch/<workspace-id>/stage/<stage>.patch` and `git apply` it, or
+  `<root>/scratch/<workspace-id>/stage/<stage>.patch`, and the LFS paths the same
+  diff touches to `<root>/scratch/<workspace-id>/stage/<stage>.lfs-paths`, both
+  before anything is applied; `git apply` the patch without whitespace warnings, or
   `git add` the files it touches and `git apply --3way` it where plain `apply`
-  refuses; `restore --source=C` the LFS paths with the ordinary LFS filter. Or that
-  the command changed nothing;
+  refuses; `restore --source=C` the paths in the list, read as literal paths, with
+  the ordinary LFS filter. Or that the command changed nothing;
 - the artifacts folder and how many files it holds, once step 5 has emptied it.
 
 The ref is overwritten by that workspace's next run on the same stage and removed
@@ -1568,11 +1669,15 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | Agents: role, manager, title, standing instructions, composition, runtime/model/effort, workspace path | Not recoverable |
 | Tasks, each with its parent, and their dependencies | This is the plan |
 | Rules and wiki | What the database exists for |
+| Wiki copies: per workspace and page, the version and body last written into its file | The base a publish is merged from |
 | Open PRs and their comments | git holds no metadata |
 | Works that are still on the books: brief, assignee, assigner, session id | Live state |
 | Tickets and comments, resolved ones included | The wording of a product decision |
 | **Messages — all of them, forever** | `DELETE FROM messages` exists nowhere |
 | The current quota snapshot | One row per bucket |
+| Quota holds: runtime, model, the time of return | A hold outlives a hub restart |
+| Quota history: every reading that differs from the one before it for its bucket | Nothing in the office reads it; the owner does, with SQL |
+| Usage: one row per vendor process — a turn or a compaction — with the agent, its work and task, who woke it, its outcome and its token totals; one row per model request and per compaction inside it. Numbers and names, no text | Nothing in the office reads it; the owner does, with SQL |
 | Each runtime's model catalogue | A snapshot, overwritten hourly |
 | Owner notices | The record of what happened while he was not looking |
 | How far the owner has read each conversation | Not recoverable from anywhere else |
@@ -1585,7 +1690,6 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | Closed works | The result line on the task |
 | Merged and closed PRs | The merge commit in git |
 | Session ids after a work is closed | There is nothing to continue |
-| Quota history | The current snapshot |
 | Full stdout logs | A ring buffer in memory; only the tail on disk |
 | Wiki edit history beyond one step | The version and the version check on write |
 | A stage's queue, a pending reset or delete, the history of stage runs | Nothing; runs die with the hub |
@@ -1608,25 +1712,17 @@ grouped query.
 
 ### Schema
 
-`schema.sql` is `CREATE TABLE IF NOT EXISTS` only; there are no migrations. The one
-additive step in `db.py` adds a missing nullable column to an existing table and
-does nothing else.
+`schema.sql` is `CREATE TABLE IF NOT EXISTS` only; there are no migrations. A new
+**table** appears in an existing database by itself at the next startup. A new
+column, a changed column or a `CHECK` never reaches an existing database: the owner
+brings that database up to the schema by hand before the hub starts.
 
-So: a new **table** appears in an existing database by itself at the next startup;
-a new **column** only if it is nullable and listed in that additive list. State that
-has to reach a running office without recreating the database is given a table.
-A `CHECK` never reaches an existing database, and neither does a column that is
-not in the additive list. The tree — `agents.kind` with `director`, `lead` and
-`executor`, `agents.manager_agent_id`, `title` and `instructions`, and
-`works.assigned_by_agent_id`, which is `NOT NULL` — is of that kind: a database
-created before it is recreated.
+The `CHECK` on `prs.status` lists four values of which two are reachable: `merged`
+and `closed` are states in which the row stops existing rather than states it lives
+in.
 
-Consequently a database created earlier keeps columns and indexes the schema no
-longer has. They are neither read nor written. For the same reason the `CHECK` on
-`prs.status` lists four values of which two are reachable: `merged` and `closed`
-are states in which the row stops existing rather than states it lives in.
-
-The system does not answer "who worked on this task a month ago".
+Beyond the usage rows, which name each process's work and task, the system does
+not answer "who worked on this task a month ago".
 
 ---
 
@@ -1645,7 +1741,8 @@ Shared by everyone:
 ```
 say(to, text)                    # to = "all" | a participant's name
 chat(before_id?)                 # the common chat, newest page first, cursor backwards
-remind(to, text, in_seconds)     # the same message, sent later; wakes the addressee
+remind(op, ...)                  # set(to, text, in_seconds) — the same message, sent later; wakes the addressee
+                                 # cancel(reminder_id) — one of your own that has not gone
 expect(about, within_seconds)    # an address a service notifies; its answer or the due time wakes you
 task(op, ...)                    # list | read | create | update | move | link (link with remove=true drops it)
                                  # list(parent?, status?, query?) — one level, or a search under parent or over the board
@@ -1654,7 +1751,7 @@ work(op, ...)                    # show — your brief, branch and assigner
                                  # finish — your report to whoever assigned the work, with a PR if you like
 pr(op, ...)                      # create | comment | list | read
                                  # merge | close  (managers only)
-note(op, kind, ...)              # wiki: list | read | search | comment | write | undo | delete
+note(op, kind, ...)              # wiki: list | read | comment | write | undo | delete; pages are files in the sandbox
                                  # rule: list; create | update | delete  (director only)
 ticket(op, ...)                  # create | comment | list | read | resolve | link
 run(op, ...)                     # start | wait | stop | list; start takes stage=
@@ -1714,7 +1811,9 @@ and `fire` refuses while its target has subordinates. `assign`, `work_reassign` 
 `move` each take their decision in the same transaction as their write.
 
 `task(op=move, status=done)` requires `result` and closes the task entirely: the
-records of its works are deleted.
+records of its works are deleted. `task(op=move, status=cancelled)` is the
+director's and the leads': it requires `result`, the reason, and is refused while
+any work is on the task.
 
 `pr(op=merge)` requires `delete_branch` and will not run without it.
 
@@ -1722,12 +1821,13 @@ records of its works are deleted.
 name, title, kind, runtime and model, indented under its manager — its own standing
 instructions as they stand now, its own workspace and sandbox paths, the stages, as
 section 12 lists, and the deferred
-messages and open expectations it set itself. A
+messages it set itself, each with its number, and the open expectations it set. A
 manager additionally gets, for its subtree, each agent's status and context fill
 and every deferred message and open expectation; every work that is not finished
 (running, paused, reported or failed, with the reason it stopped and, for a pause,
 the earliest it could resume) whose assignee is in its subtree or which it
-assigned; remaining quota per runtime with its reset time; tasks that look ready
+assigned; remaining quota per runtime with its reset time, and each runtime and
+model on which no turn starts before its time of return; tasks that look ready
 but whose dependency is not done; the model catalogue; and workspaces that belong
 to nobody. The director alone additionally gets the directories under `ws/` the
 office did not create. Apart from the caller's own instructions and paths, which its
@@ -1745,8 +1845,9 @@ down fires on the first tick after startup.
 `all` is not accepted as a recipient: a post to the common chat wakes nobody, so a
 deferred one would arrive at the appointed moment and do nothing. The ceiling is
 seven days. It takes an offset, not an absolute instant: an agent's notion of "now"
-comes from a system prompt fixed when the session was created. The tool has no
-cancel — only the owner has one, on the works page.
+comes from a system prompt fixed when the session was created. `cancel` takes back
+a deferred message its caller set that has not gone yet; the owner cancels any on
+the works page. Either deletes only a row that has not come due.
 
 `agent(op=fire)` refuses while the agent still has active work — running, paused,
 or reported and not closed — while it has subordinates (they are moved or fired
@@ -1826,12 +1927,12 @@ All times are shown local and stored UTC.
    possible before the first message. Under the model field is the vendor model
    catalogue, the same one the office would refuse by.
 2. **Direct messages** — a thread list and one thread, paginated.
-3. **Kanban** — six columns. By default the board holds the top-level tasks. A card
+3. **Kanban** — seven columns. By default the board holds the top-level tasks. A card
    with children carries their counts, open and done, and opens the board of its
    children (`?parent=N`); that board has a breadcrumb of the chain back to the top
-   level. A link shows every task on one flat board (`?flat=1`). The done column holds
-   the twenty tasks changed most recently, newest first, with a link that shows all
-   of them (`?all_done=1`). The owner files a task into "idea", with an optional
+   level. A link shows every task on one flat board (`?flat=1`). The done and
+   cancelled columns each hold the twenty tasks changed most recently, newest first,
+   with a link that shows all of them (`?all_done=1`). The owner files a task into "idea", with an optional
    parent by id, filled in with the current parent on a parent's board, and edits
    titles and bodies; there is no move control for him. A card with unclosed
    blocking tasks carries the list of them, in any column.
@@ -1843,8 +1944,8 @@ All times are shown local and stored UTC.
    speech, tool calls with their start and end, errors. A call with a start and no end
    is marked. The transcript is served from its own endpoint, so it is parsed only when
    somebody opens it, and it lives exactly as long as the tail file does. Under the
-   works are the deferred messages the office is holding, and cancelling one is the
-   owner's alone.
+   works are the deferred messages the office is holding, and the owner can cancel
+   any of them.
 5. **Common chat** — paginated.
 6. **Team** — the team as a tree, each agent under its manager with its title; on
    what, how much context, and under each agent what it awaits from a service,
@@ -1853,10 +1954,10 @@ All times are shown local and stored UTC.
    for a broken one. No hiring or firing here, and no control over stages.
 7. **Knowledge** — wiki and rules.
 8. **Pull requests** — the list and comments. There is no merge button.
-9. **System notices** — the journal: turns that died, quota exhausted and returned,
+9. **System notices** — the journal: turns that died, quota exhausted with its hold,
    compaction results, hub restarts, the office's own tick failing over an agent, a
-   marked process that survived being killed, and a director that ended two turns in
-   a row without a word.
+   marked process that survived being killed, and open works that nothing moves and
+   nobody above their agent has moved.
 10. **Settings** — the owner's name, the director's standing instructions, the
     silence threshold, and the director's runtime/model/effort with the cost shown
     before confirmation. Also the delivery address, the outcome of the last delivery,
@@ -1882,8 +1983,8 @@ next started turn.
 ### The plate and the journal
 
 Critical things go on a plate under the director's chat, at once: its turn died (with
-the reason), its quota ran out (with the time of return), or it ended two turns in a
-row without a word. The plate carries the three newest undismissed ones and counts the
+the reason), its quota ran out (with the time of return), or open works that nothing
+moves have come up the chain past the director. The plate carries the three newest undismissed ones and counts the
 rest. There is no "retry" button. Dismissing it stamps every unseen critical notice and
 is the only thing that makes it go away — a turn that failed is an instant, not a
 condition that clears itself. The journal keeps the rows either way.
@@ -1958,8 +2059,7 @@ on a turn's length, and the managers, which decide about stopping through
 office learns of his commits by itself before the next merge; the button is for
 letting the team know sooner.
 
-**Cancelling a deferred message**, on the works page. Breaking a cycle of alarms is for
-whoever is looking from outside.
+**Cancelling a deferred message**, on the works page.
 
 ---
 

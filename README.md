@@ -22,7 +22,15 @@ cd Office.AI
 uv sync
 ```
 
-If you do not use `uv`, `pip install -e .` works too.
+`uv sync` creates `.venv` inside the checkout and installs the office and its
+dependencies into it. Without `uv`:
+
+```
+python3 -m venv .venv                             # macOS, Linux
+python -m venv .venv                              # Windows
+.venv/bin/python -m pip install -e .              # macOS, Linux
+.venv\Scripts\python.exe -m pip install -e .      # Windows
+```
 
 ### 2. Install the vendor CLIs
 
@@ -63,12 +71,22 @@ API key and never stores one.
 ### 4. Let the office find the CLIs
 
 The office looks for `claude`, `codex` and `agy` on your PATH. If one is
-somewhere else, name it:
+somewhere else, name it.
+
+macOS, Linux:
 
 ```
-OFFICE_CLAUDE_BIN=/path/to/claude
-OFFICE_CODEX_BIN=/path/to/codex
-OFFICE_AGY_BIN=/path/to/agy
+export OFFICE_CLAUDE_BIN=/path/to/claude
+export OFFICE_CODEX_BIN=/path/to/codex
+export OFFICE_AGY_BIN=/path/to/agy
+```
+
+Windows (PowerShell):
+
+```
+$env:OFFICE_CLAUDE_BIN = "C:\path\to\claude.exe"
+$env:OFFICE_CODEX_BIN = "C:\path\to\codex.exe"
+$env:OFFICE_AGY_BIN = "C:\path\to\agy.exe"
 ```
 
 On Windows, point `OFFICE_CODEX_BIN` at the real `codex.exe`, not at a `.cmd`
@@ -85,12 +103,27 @@ acceptable.
 
 ## Run
 
-The office lives **inside the project it works on**. Point it at that project:
+The office lives **inside the project it works on**. `OFFICE_ROOT` names its data
+directory, `.office-data` in the project's folder; the hub does not start without
+it. Start the hub from the Office.AI checkout.
+
+macOS, Linux:
 
 ```
-OFFICE_ROOT=/path/to/your-project/.office-data
-python -m office.hub
+export OFFICE_ROOT=/path/to/your-project/.office-data
+uv run python -m office.hub
 ```
+
+Windows (PowerShell):
+
+```
+$env:OFFICE_ROOT = "C:\path\to\your-project\.office-data"
+uv run python -m office.hub
+```
+
+Without `uv`, start it with the checkout's own interpreter:
+`.venv/bin/python -m office.hub`, or `.venv\Scripts\python.exe -m office.hub` on
+Windows.
 
 Then open **http://localhost:7777**.
 
@@ -100,6 +133,18 @@ git history. Your project folder is the parent of it, and that is where finished
 work is delivered.
 
 To use another port, set `OFFICE_PORT`.
+
+macOS, Linux:
+
+```
+export OFFICE_PORT=8080
+```
+
+Windows (PowerShell):
+
+```
+$env:OFFICE_PORT = "8080"
+```
 
 ### First run
 
@@ -167,7 +212,7 @@ button; nothing ends a turn on its own.
 vendor's quota is left and when it resets, and how full the director's context
 window is. You can compact that window with one button.
 
-**A notice log.** Turns that died, quota that ran out and came back, restarts. It
+**A notice log.** Turns that died, quota that ran out, restarts. It
 is the record of what happened while you were not looking.
 
 ---

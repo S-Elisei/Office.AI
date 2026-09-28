@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from pathlib import Path
 
 from office import db, git
@@ -15,7 +16,12 @@ from office.config import Config
 
 log = logging.getLogger(__name__)
 
-TASK_STATUSES = ("idea", "planned", "needs_clarification", "in_progress", "paused", "done")
+TASK_STATUSES = (
+    "idea", "planned", "needs_clarification", "in_progress", "paused", "done", "cancelled"
+)
+
+#: The statuses a task reaches only through close_task(), with a result line.
+CLOSED_TASK_STATUSES = ("done", "cancelled")
 
 DEFAULT_OWNER_NAME = "Owner"
 
@@ -300,14 +306,25 @@ def due_scheduled_messages(conn) -> list[dict]:
 
 
 def drop_scheduled_message(conn, wake_id: int, actor: str | None = None) -> None:
-    """Forget one wake.
-
-    The bus calls this the moment it has sent one; the owner's works page calls
-    it to cancel one that has not fired.
-    """
+    """Forget one wake. The bus calls this the moment it has sent one."""
     with db.transaction(conn):
         db.execute(conn, "DELETE FROM scheduled_messages WHERE id = ?", (wake_id,))
         _emit(conn, "messages", "scheduled_message", wake_id, {"deleted": True}, actor=actor)
+
+
+def cancel_scheduled_message(conn, wake_id: int, *, sender: str | None, actor: str) -> bool:
+    """Take back one wake that has not gone yet: `sender`'s own, or any when
+    `sender` is None. False when there is no such wake."""
+    with db.transaction(conn):
+        cur = db.execute(
+            conn,
+            "DELETE FROM scheduled_messages WHERE id = ? "
+            "AND due_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND (? IS NULL OR sender = ?)",
+            (wake_id, sender, sender),
+        )
+        if cur.rowcount:
+            _emit(conn, "messages", "scheduled_message", wake_id, {"deleted": True}, actor=actor)
+    return bool(cur.rowcount)
 
 
 def scheduled_messages(conn) -> list[dict]:
@@ -1010,17 +1027,41 @@ def record_quota(conn, snapshots) -> int:
     Emits only when a figure actually moved. Returns how many rows changed, a
     deletion counted as a change like any other.
 
+    A bucket whose reset time has passed is stored as fully remaining, with no
+    reset time. quota_polls gets every reading that differs from the one before it
+    for its bucket, exactly as it came.
+
     A successful poll also deletes that runtime's buckets the answer does not
     mention.
     """
     changed = 0
+    now = time.time()
     # Which labels each polled runtime reported this round, keyed by runtime:
     # nothing here may touch a runtime this answer says nothing about.
     live_labels: dict[str, set[str]] = {}
     with db.transaction(conn):
         for snap in snapshots:
+            raw_reset = str(snap.reset_time) if snap.reset_time else None
+            last = db.query_one(
+                conn,
+                "SELECT remaining_fraction, reset_time FROM quota_polls "
+                "WHERE runtime = ? AND label = ? ORDER BY id DESC",
+                (snap.runtime, snap.label),
+            )
+            if last is None or (last["remaining_fraction"], last["reset_time"]) != (
+                snap.remaining_fraction, raw_reset
+            ):
+                db.execute(
+                    conn,
+                    "INSERT INTO quota_polls (runtime, label, remaining_fraction, reset_time) "
+                    "VALUES (?, ?, ?, ?)",
+                    (snap.runtime, snap.label, snap.remaining_fraction, raw_reset),
+                )
+        for snap in snapshots:
             live_labels.setdefault(snap.runtime, set()).add(snap.label)
-            reset = str(snap.reset_time) if snap.reset_time else None
+            passed = snap.reset_time is not None and snap.reset_time <= now
+            reset = str(snap.reset_time) if snap.reset_time and not passed else None
+            fraction = 1.0 if passed else snap.remaining_fraction
             current = db.query_one(
                 conn,
                 "SELECT remaining_fraction, reset_time FROM quota WHERE runtime = ? AND label = ?",
@@ -1028,7 +1069,7 @@ def record_quota(conn, snapshots) -> int:
             )
             if (
                 current is not None
-                and current["remaining_fraction"] == snap.remaining_fraction
+                and current["remaining_fraction"] == fraction
                 and current["reset_time"] == reset
             ):
                 continue
@@ -1037,7 +1078,7 @@ def record_quota(conn, snapshots) -> int:
                     conn,
                     "INSERT INTO quota (runtime, label, remaining_fraction, reset_time) "
                     "VALUES (?, ?, ?, ?)",
-                    (snap.runtime, snap.label, snap.remaining_fraction, reset),
+                    (snap.runtime, snap.label, fraction, reset),
                 )
             else:
                 db.execute(
@@ -1045,7 +1086,7 @@ def record_quota(conn, snapshots) -> int:
                     "UPDATE quota SET remaining_fraction = ?, reset_time = ?, "
                     "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                     "WHERE runtime = ? AND label = ?",
-                    (snap.remaining_fraction, reset, snap.runtime, snap.label),
+                    (fraction, reset, snap.runtime, snap.label),
                 )
             changed += 1
         for runtime, labels in live_labels.items():
@@ -1059,6 +1100,33 @@ def record_quota(conn, snapshots) -> int:
         if changed:
             _emit(conn, "quota", "quota", None, {"runtime": snapshots[0].runtime})
     return changed
+
+
+def hold_for_quota(conn, runtime: str, model: str, until: int) -> None:
+    """Record that `runtime` refused a turn on `model` for quota: no turn starts on
+    them before `until`."""
+    with db.transaction(conn):
+        db.execute(
+            conn, "INSERT OR REPLACE INTO quota_holds (runtime, model, until) VALUES (?, ?, ?)",
+            (runtime, model, until),
+        )
+
+
+def quota_hold(conn, runtime: str, model: str) -> int | None:
+    """Until when no turn starts on `runtime` and `model`, or None."""
+    row = db.query_one(
+        conn, "SELECT until FROM quota_holds WHERE runtime = ? AND model = ? AND until > ?",
+        (runtime, model, int(time.time())),
+    )
+    return row["until"] if row is not None else None
+
+
+def quota_holds(conn) -> list[dict]:
+    """Every hold still in force, by runtime and model."""
+    return [dict(r) for r in db.query(
+        conn, "SELECT * FROM quota_holds WHERE until > ? ORDER BY runtime, model",
+        (int(time.time()),),
+    )]
 
 
 def record_models(conn, runtime: str, models) -> int:
@@ -1285,7 +1353,10 @@ def roster(conn) -> dict:
             "WHERE t.status IN ('planned', 'in_progress') AND blocker.status != 'done'",
         )
     ]
-    return {"agents": agents, "quota": quota, "works": works, "blocked_tasks": blocked_tasks}
+    return {
+        "agents": agents, "quota": quota, "holds": quota_holds(conn), "works": works,
+        "blocked_tasks": blocked_tasks,
+    }
 
 
 # --------------------------------------------------------------------------- tasks
@@ -1297,8 +1368,9 @@ def board(conn) -> dict[int, dict]:
 
     Each row carries id, title, status, position, parent_task_id and updated_at;
     `children`, the ids of its children in the board's order; `open_children` and
-    `done_children`, their counts; and `blockers`, the ids of the tasks it
-    depends on that are not done.
+    `done_children`, how many of them are neither done nor cancelled and how many
+    are done; and `blockers`, the ids of the tasks it depends on that are not
+    done.
     """
     rows = [
         dict(r)
@@ -1310,7 +1382,10 @@ def board(conn) -> dict[int, dict]:
         if t["parent_task_id"] is not None:
             parent = tasks[t["parent_task_id"]]
             parent["children"].append(t["id"])
-            parent["done_children" if t["status"] == "done" else "open_children"] += 1
+            if t["status"] == "done":
+                parent["done_children"] += 1
+            elif t["status"] != "cancelled":
+                parent["open_children"] += 1
     for r in db.query(
         conn,
         "SELECT td.blocked_task_id, td.blocking_task_id FROM task_dependencies td "
@@ -1351,7 +1426,7 @@ def list_tasks(
     board. `parent` alone: that task's children. Both: every task under `parent`
     at any depth. `query` is a regular expression matched case-insensitively
     against titles. `status` is one status or 'all'; None keeps every status
-    but done.
+    but done and cancelled.
     """
     if status is not None and status != "all" and status not in TASK_STATUSES:
         raise ValueError(f"bad task status '{status}' — one of {', '.join(TASK_STATUSES)}, or all")
@@ -1377,7 +1452,8 @@ def list_tasks(
         pool = [t for t in tasks.values() if t["id"] in under]
     return [
         t for t in pool
-        if (status == "all" or t["status"] == status or (status is None and t["status"] != "done"))
+        if (status == "all" or t["status"] == status
+            or (status is None and t["status"] not in CLOSED_TASK_STATUSES))
         and (regex is None or regex.search(t["title"]))
     ]
 
@@ -1497,10 +1573,8 @@ def update_task(
 
 
 def move_task(conn, task_id: int, status: str, position: int | None = None, actor: str | None = None) -> dict:
-    """Move a task to one of the six kanban columns.
-
-    For a terminal move to 'done' with a result line, use close_task(); this one
-    only ever changes status/position.
+    """Move a task to one of the open kanban columns. A move to 'done' or
+    'cancelled' is close_task()'s.
     """
     if status not in TASK_STATUSES:
         raise ValueError(f"bad task status '{status}'")
@@ -1521,15 +1595,24 @@ def move_task(conn, task_id: int, status: str, position: int | None = None, acto
 # sets.
 
 
-def close_task(conn, task_id: int, result: str, actor: str) -> dict:
-    """Close a task with a one-line result: the works behind it collapse into that
-    line and their rows are deleted.
+def close_task(conn, task_id: int, result: str, actor: str, status: str = "done") -> dict:
+    """Close a task with a one-line result, as 'done' or 'cancelled'.
 
-    `actor` is the calling agent. Every work on the task has to be within its
-    reach as work_close measures it (check_work_reach). Refuses on a work that
-    has REPORTED and not been closed, and names it. A still-running work is not
-    otherwise checked.
+    Done: the works behind it collapse into that line and their rows are
+    deleted. `actor` is the calling agent. Every work on the task has to be
+    within its reach as work_close measures it (check_work_reach). Refuses on a
+    work that has REPORTED and not been closed, and names it. A still-running
+    work is not otherwise checked.
+
+    Cancelled: refused while any work is on the task; `result` is the reason.
     """
+    if status == "cancelled":
+        work = db.query_one(conn, "SELECT id FROM works WHERE task_id = ? ORDER BY id", (task_id,))
+        if work is not None:
+            raise ValueError(
+                f"work {work['id']} is on task {task_id} — close, dismiss or hand it on before "
+                "you cancel the task"
+            )
     caller = _row(conn, "agents", "name", actor)
     for work in db.query(conn, "SELECT * FROM works WHERE task_id = ? ORDER BY id", (task_id,)):
         check_work_reach(conn, caller, dict(work), f"moving task {task_id} to done")
@@ -1544,12 +1627,12 @@ def close_task(conn, task_id: int, result: str, actor: str) -> dict:
     with db.transaction(conn):
         db.execute(
             conn,
-            "UPDATE tasks SET status = 'done', result = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-            "WHERE id = ?",
-            (result, task_id),
+            "UPDATE tasks SET status = ?, result = ?, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+            (status, result, task_id),
         )
         db.execute(conn, "DELETE FROM works WHERE task_id = ?", (task_id,))
-        _emit(conn, "tasks", "task", task_id, {"status": "done", "result": result}, actor=actor)
+        _emit(conn, "tasks", "task", task_id, {"status": status, "result": result}, actor=actor)
     return _row(conn, "tasks", "id", task_id)
 
 
@@ -1648,8 +1731,13 @@ def assign_work(
     # Outside the transaction above: send_message opens its own, and a connection
     # holds one at a time. Assigning work to yourself sends nothing.
     if actor != agent["name"]:
-        send_message(conn, actor, agent["name"], f"{brief}\n\nBranch for this work: {branch}")
+        send_message(conn, actor, agent["name"], brief_message(brief, branch))
     return _row(conn, "works", "id", work_id)
+
+
+def brief_message(brief: str, branch: str) -> str:
+    """The body of the message that hands a work's brief to its agent."""
+    return f"{brief}\n\nBranch for this work: {branch}"
 
 
 def _resolve_pending_work(conn, agent_id: int) -> None:
@@ -1795,6 +1883,23 @@ def fail_work(conn, work_id: int, reason: str, output_tail: str | None = None, a
     return _row(conn, "works", "id", work_id)
 
 
+def resume_paused_work(conn, agent_id: int) -> None:
+    """Put the agent's paused work back to running, its pause reasons cleared."""
+    with db.transaction(conn):
+        work = db.query_one(
+            conn, "SELECT id FROM works WHERE agent_id = ? AND status = 'paused'", (agent_id,)
+        )
+        if work is None:
+            return
+        db.execute(
+            conn,
+            "UPDATE works SET status = 'running', pause_reason = NULL, resume_after = NULL "
+            "WHERE id = ?",
+            (work["id"],),
+        )
+        _emit(conn, "works", "work", work["id"], {"status": "running"})
+
+
 def pause_work(
     conn, work_id: int, reason: str, resume_after: int | None = None, actor: str | None = None
 ) -> dict:
@@ -1856,22 +1961,6 @@ def dismiss_work(conn, work_id: int, *, actor: str) -> dict:
     return work
 
 
-def quota_reset_for(conn, runtime: str) -> int | None:
-    """When this runtime's tightest known bucket resets, as epoch seconds.
-
-    The tightest rather than "the one that ran out": which bucket actually
-    emptied is not something the office knows. Named as an estimate wherever it
-    is shown.
-    """
-    row = db.query_one(
-        conn,
-        "SELECT reset_time FROM quota WHERE runtime = ? AND reset_time IS NOT NULL "
-        "ORDER BY remaining_fraction ASC",
-        (runtime,),
-    )
-    return int(row["reset_time"]) if row is not None else None
-
-
 def reassign_work(
     conn, config: Config, work_id: int, to_agent_id: int, *, workspace: str = "inherit", actor: str
 ) -> dict:
@@ -1889,7 +1978,10 @@ def reassign_work(
     workspace belongs to a third agent that has an active work. 'fresh' clones a clean one for the
     recipient, which arrives on the repository's default branch, and the
     recipient's previous workspace becomes ownerless rather than deleted. A
-    sandbox belongs to its workspace and goes where it goes.
+    sandbox belongs to its workspace and goes where it goes. Either is refused
+    while an agent whose workspace it would change is in a turn, when it would
+    change the caller's own, and while the work's assignee, neither the
+    recipient nor the caller, is in a turn.
 
     Every agent whose workspace changes is told its new workspace and sandbox
     paths as a quiet line.
@@ -1906,6 +1998,7 @@ def reassign_work(
     new_ws = None
     if workspace == "fresh":
         _check_reassign(conn, caller, work_id, to_agent)
+        _refuse_in_turn(conn, caller, to_agent_id)
         # The intake is held as it is taken rather than read off the result: a clone
         # that fails must still leave everyone told that the branch moved.
         intake: git.Intake | None = None
@@ -1932,6 +2025,8 @@ def reassign_work(
                 raise ValueError(f"work {work_id} has no workspace yet to inherit")
             new_ws = _row(conn, "workspaces", "id", work["workspace_id"])
             previous_owner = new_ws["owner_agent_id"]
+            if previous_owner != to_agent_id:
+                _refuse_in_turn(conn, caller, to_agent_id, previous_owner)
             if previous_owner not in (None, work["agent_id"], to_agent_id):
                 busy = db.query_one(
                     conn,
@@ -1958,6 +2053,7 @@ def reassign_work(
                            (to_agent_id, new_ws["id"]))
                 handed.append((to_agent_id, new_ws))
         else:
+            _refuse_in_turn(conn, caller, to_agent_id)
             db.execute(conn, "UPDATE workspaces SET owner_agent_id = NULL WHERE id = ?",
                        (held["id"],))
             db.execute(conn, "INSERT INTO workspaces (id, path, owner_agent_id) VALUES (?, ?, ?)",
@@ -1985,6 +2081,37 @@ def reassign_work(
     return _row(conn, "works", "id", work_id)
 
 
+def _refuse_in_turn(conn, caller: dict, to_agent_id: int, holder: int | None = None) -> None:
+    """Refuse a reassignment that would change the workspace of the caller or of an
+    agent in a turn: the recipient's, or that of `holder`, the agent that holds the
+    work's workspace and would get the recipient's."""
+    if to_agent_id == caller["id"]:
+        raise ValueError(
+            "this would change your own workspace, which never changes during your turn — "
+            "to work on this work's code, have its branch published and fetch it into your "
+            "own workspace"
+        )
+    if holder == caller["id"]:
+        raise ValueError(
+            "this would hand your own workspace on, and it never changes during your turn — "
+            "publish your branch and reassign with workspace='fresh'; the recipient fetches it"
+        )
+    for agent_id in (to_agent_id, holder):
+        if agent_id is not None:
+            _refuse_if_in_turn(conn, agent_id, "this would change {name}'s workspace")
+
+
+def _refuse_if_in_turn(conn, agent_id: int, what: str) -> None:
+    """Refuse a reassignment while the agent is in a turn. `what` says what it
+    would do to that agent, with `{name}` for the agent's name."""
+    agent = _row(conn, "agents", "id", agent_id)
+    if agent["turn_start_message_id"] is not None:
+        raise ValueError(
+            f"{what.format(name=agent['name'])} while {agent['name']} is in a turn — wait for "
+            "the turn to end, or stop it with agent(op=stop), then reassign"
+        )
+
+
 def _check_reassign(conn, caller: dict, work_id: int, to_agent: dict) -> dict:
     """The work reassign_work() may hand to `to_agent`, read afresh. Refuses a
     work that is gone or out of `caller`'s reach, a recipient outside its
@@ -2008,6 +2135,8 @@ def _check_reassign(conn, caller: dict, work_id: int, to_agent: dict) -> dict:
     )
     if active is not None:
         raise ValueError(f"agent '{to_agent['name']}' already has an active work ({active['id']})")
+    if work["agent_id"] not in (to_agent["id"], caller["id"]):
+        _refuse_if_in_turn(conn, work["agent_id"], f"this would take work {work_id} from {{name}}")
     return work
 
 
@@ -2151,19 +2280,24 @@ def create_pr(
     The caller passes the branch that publish_workspace() just pushed
     (git.PublishResult.branch, read off that working tree).
 
-    A PR already open from `source_branch` into `target_branch` is returned as
-    it stands, with `republished` true, and no second one is opened; `title`
-    and `body` then go unused. Otherwise `republished` is false.
+    A PR already open from `source_branch` into `target_branch` is updated
+    rather than duplicated: its title becomes `title`, and its body `body` when
+    one is given. It is returned with `republished` true. Otherwise
+    `republished` is false.
     """
     existing = db.query_one(
-        conn, "SELECT * FROM prs WHERE source_branch = ? AND target_branch = ?",
+        conn, "SELECT id FROM prs WHERE source_branch = ? AND target_branch = ?",
         (source_branch, target_branch),
     )
     if existing is not None:
         with db.transaction(conn):
-            _emit(conn, "prs", "pr", existing["id"], {"published": True},
+            db.execute(
+                conn, "UPDATE prs SET title = ?, body = COALESCE(?, body) WHERE id = ?",
+                (title, body, existing["id"]),
+            )
+            _emit(conn, "prs", "pr", existing["id"], {"published": True, "title": title},
                   actor=_agent_name(conn, author_agent_id))
-        return {**dict(existing), "republished": True}
+        return {**_row(conn, "prs", "id", existing["id"]), "republished": True}
     with db.transaction(conn):
         cur = db.execute(
             conn,
@@ -2472,25 +2606,6 @@ def list_wiki_pages(conn) -> list[dict]:
     ]
 
 
-def search_wiki_pages(conn, pattern: str) -> list[dict]:
-    """note(op=search, kind=wiki): every page whose title or some body line
-    matches `pattern`, a regular expression taken case-insensitively, ordered
-    by path. Each page carries `lines`, the (1-based number, text) of every
-    matching body line; a page matched on its title alone has none. Comments
-    are not searched.
-    """
-    try:
-        regex = re.compile(pattern, re.IGNORECASE)
-    except re.error as e:
-        raise ValueError(f"note: query is not a valid regular expression — {e}") from None
-    found = []
-    for page in db.query(conn, "SELECT path, title, version, body FROM wiki ORDER BY path"):
-        lines = [(n, line) for n, line in enumerate(page["body"].splitlines(), 1) if regex.search(line)]
-        if lines or regex.search(page["title"]):
-            found.append({"path": page["path"], "title": page["title"], "version": page["version"], "lines": lines})
-    return found
-
-
 def comment_wiki_page(conn, path: str, author: str, body: str) -> dict:
     """A remark about a whole page, kept beside it instead of in it.
 
@@ -2515,16 +2630,31 @@ def comment_wiki_page(conn, path: str, author: str, body: str) -> dict:
     return _row(conn, "wiki_comments", "id", comment_id)
 
 
+#: A wiki page path, which is also its file's path under a sandbox's wiki/:
+#: segments of lowercase letters, digits, '_' and '-', none a Windows device
+#: name. Written so that the owner's form can use it as its `pattern` too.
+_PAGE_SEGMENT = r"(?!(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:/|$))[a-z0-9][a-z0-9_\-]*"
+PAGE_PATH = re.compile(rf"{_PAGE_SEGMENT}(?:/{_PAGE_SEGMENT})*")
+
+
 def note_wiki(conn, *, path: str, category: str, title: str, body: str, updated_by: str, expected_version: int | None) -> dict:
     """note(op=write, kind=wiki) - the one write path into the wiki.
 
     expected_version must match the page's current version; for a brand-new page
-    pass None or 0. A mismatch raises rather than overwriting.
+    pass None or 0. A mismatch raises rather than overwriting. A new page's path
+    is a PAGE_PATH. Line ends are stored as `\\n`.
     """
+    body = body.replace("\r\n", "\n")
     existing = db.query_one(conn, "SELECT * FROM wiki WHERE path = ?", (path,))
     if existing is None:
         if expected_version not in (None, 0):
-            raise ValueError(f"wiki page '{path}' does not exist yet (got expected_version={expected_version})")
+            raise ValueError(f"wiki page '{path}' no longer exists — write it again as a new page")
+        if not PAGE_PATH.fullmatch(path):
+            raise ValueError(
+                f"'{path}' is not a page path: segments of lowercase letters, digits, '_' and "
+                "'-', each starting with a letter or a digit, none a Windows device name (con, "
+                "nul, com1…), joined by '/'"
+            )
         with db.transaction(conn):
             cur = db.execute(
                 conn,
@@ -2536,7 +2666,8 @@ def note_wiki(conn, *, path: str, category: str, title: str, body: str, updated_
     else:
         if expected_version != existing["version"]:
             raise ValueError(
-                f"wiki page '{path}' is at version {existing['version']}, not {expected_version} — reread before writing"
+                f"wiki page '{path}' moved to version {existing['version']} while this was being "
+                "written — write it again"
             )
         new_version = existing["version"] + 1
         with db.transaction(conn):
@@ -2579,7 +2710,9 @@ def delete_wiki_page(conn, path: str, expected_version: int, actor: str | None =
     if existing is None:
         raise ValueError(f"no such wiki page '{path}'")
     if expected_version != existing["version"]:
-        raise ValueError(f"wiki page '{path}' is at version {existing['version']}, not {expected_version}")
+        raise ValueError(
+            f"wiki page '{path}' is at version {existing['version']}, not version {expected_version}"
+        )
     with db.transaction(conn):
         db.execute(conn, "DELETE FROM wiki WHERE path = ?", (path,))
         _emit(conn, "wiki", "wiki", existing["id"], {"path": path, "deleted": True}, actor=actor)

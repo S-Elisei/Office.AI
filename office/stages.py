@@ -24,7 +24,7 @@ NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 #: How many lines of a failed preparation's output its reason keeps.
 REASON_LINES = 200
 
-#: How many changed paths outside LFS a run's result names.
+#: How many changed paths outside LFS, and how many under it, a run's result names.
 RESULT_PATHS = 20
 
 _REF_PREFIX = "refs/office/stage/"
@@ -292,6 +292,13 @@ def _fmt(seconds: float) -> str:
     if seconds < 3600:
         return f"{seconds // 60}m {seconds % 60}s"
     return f"{seconds // 3600}h {seconds % 3600 // 60}m"
+
+
+def _named(label: str, paths: list[str]) -> str:
+    """`label` and the first RESULT_PATHS of `paths`, saying how many there are when that
+    is not all of them."""
+    more = f" (first {RESULT_PATHS} of {len(paths)})" if len(paths) > RESULT_PATHS else ""
+    return f"{label}{more}: {', '.join(paths[:RESULT_PATHS])}."
 
 
 # --------------------------------------------------------------------------- reading
@@ -835,34 +842,43 @@ class StageRun(commands.Command):
         lines = [f"The command changed {len(self.changed)} file(s) in the stage's tree, now "
                  f"commit {self.change}."]
         if other:
-            shown = ", ".join(other[:RESULT_PATHS])
-            more = f" (first {RESULT_PATHS} of {len(other)})" if len(other) > RESULT_PATHS else ""
-            lines.append(f"Changed{more}: {shown}.")
+            lines.append(_named("Changed", other))
         if self.lfs:
-            lines.append(f"Changed, tracked by LFS: {', '.join(self.lfs)}.")
-        patch = (config.scratch_dir / self.workspace_id / "stage" / f"{self.stage}.patch").as_posix()
+            lines.append(_named("Changed, tracked by LFS", self.lfs))
+        base = config.scratch_dir / self.workspace_id / "stage"
+        patch = (base / f"{self.stage}.patch").as_posix()
+        listed = (base / f"{self.stage}.lfs-paths").as_posix()
         steps = [
             f"git fetch --no-recurse-submodules {git._posix(git.project_git(config))} "
             f"{_ref(self.stage, self.workspace_id)}",
         ]
+        # Both diffs come before the apply: they must read the same .gitattributes.
         if other:
-            steps += [
-                f'git diff --binary {self.snapshot} {self.change} --output={patch} -- . '
-                f'":(exclude,attr:filter=lfs)"',
-                f"git apply {patch}",
-            ]
+            steps.append(f'git diff --binary {self.snapshot} {self.change} --output={patch} -- . '
+                         f'":(exclude,attr:filter=lfs)"')
         if self.lfs:
-            quoted = " ".join(f"'{p}'" for p in self.lfs)
+            steps.append(f'git diff --name-only -z {self.snapshot} {self.change} '
+                         f'--output={listed} -- ":(attr:filter=lfs)"')
+        if other:
+            steps.append(f"git apply --whitespace=nowarn {patch}")
+        if self.lfs:
             steps.append(
-                f'git -c "filter.lfs.process=git-lfs filter-process" restore '
-                f"--source={self.change} --worktree -- {quoted}"
+                f'git --literal-pathspecs -c "filter.lfs.process=git-lfs filter-process" restore '
+                f"--source={self.change} --worktree --pathspec-from-file={listed} "
+                "--pathspec-file-nul"
             )
         lines.append("To bring them into your working copy, run in your workspace:")
         lines.extend(f"  {step}" for step in steps)
         if other:
             lines.append(
                 "If git apply refuses a file you have changed since the snapshot, git add the "
-                f"files the patch changes and run git apply --3way {patch} instead."
+                f"files the patch changes and run git apply --3way --whitespace=nowarn {patch} "
+                "instead."
+            )
+        if self.lfs:
+            lines.append(
+                "The restore puts the stage's version of every large file the command changed "
+                "into your working copy, over whatever you changed in it since the snapshot."
             )
         return lines
 

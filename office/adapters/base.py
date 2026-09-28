@@ -124,6 +124,15 @@ class Event:
     # "started" | "finished" on a `tool` event, None everywhere else.
     # Every way a call can end is "finished", a failure included.
     phase: str | None = None
+    # One model request as far as this event reports it: `key` (events with the
+    # same key are one request, the later one's numbers standing), `at`,
+    # `model`, `input` (not read from the cache), `cache_read`, `cache_write`,
+    # `cache_write_1h`, `output`, `thinking`, and `tools`, a list of names. A
+    # value the vendor does not print is None.
+    request: dict | None = None
+    # On `turn_end`: the process's own totals, under the same number keys as
+    # `request`.
+    totals: dict | None = None
 
 
 def clamp_fraction(value: float) -> float:

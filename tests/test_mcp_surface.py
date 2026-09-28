@@ -12,6 +12,7 @@ from starlette.requests import Request
 
 from office import core, db
 from office import mcp as office_mcp
+from office import wiki_files
 
 #: An argument no schema declares, and a name no registry holds.
 _UNDECLARED = "not_a_declared_argument"
@@ -173,6 +174,29 @@ def test_a_lead_reaches_nothing_outside_its_own_subtree(conn, config):
     assert agent_row(conn, "n-hand")["instructions"] == "dig north"
 
 
+def test_an_agent_cancels_its_own_pending_reminder_and_no_one_elses(conn, config):
+    add_agent(conn, "boss", "director")
+    add_agent(conn, "hand", "executor", manager="boss")
+    git_workspace(conn, config, "boss", "ws-boss")
+    set_reminder = {"op": "set", "to": "hand", "text": "look again", "in_seconds": 3600}
+    failed, text = answer_to(conn, config, "boss", "remind", set_reminder)
+    assert not failed, text
+    bosses = db.query_one(conn, "SELECT id FROM scheduled_messages")["id"]
+    assert f"[{bosses}]" in answer_to(conn, config, "boss", "roster", {})[1]
+
+    failed, refusal = answer_to(
+        conn, config, "hand", "remind", {"op": "cancel", "reminder_id": bosses}
+    )
+    assert failed
+    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM scheduled_messages")["n"] == 1
+
+    failed, text = answer_to(
+        conn, config, "boss", "remind", {"op": "cancel", "reminder_id": bosses}
+    )
+    assert not failed, text
+    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM scheduled_messages")["n"] == 0
+
+
 def test_a_move_is_refused_while_a_failed_work_would_leave_its_assigner_behind(conn, config):
     add_agent(conn, "boss", "director")
     add_agent(conn, "north", "lead", manager="boss")
@@ -215,36 +239,72 @@ def test_a_name_on_no_list_reaches_no_tool(conn, config):
     assert row_counts(conn) == before
 
 
-def test_a_wiki_search_numbers_its_lines_and_caps_them_per_page(conn, config):
-    add_agent(conn, "hand", "executor")
-    pages = {
-        "runbooks/deploy": ("Deploy", "Build first.\nThen Deploy to staging.\nDone."),
-        "runbooks/log": ("Log", "\n".join(f"deploy {i}" for i in range(25))),
-        "runbooks/misc": ("Misc", "Nothing here."),
-        "runbooks/release": ("Deployment checklist", "Tag.\nPush."),
-    }
-    for path, (title, body) in pages.items():
-        failed, text = answer_to(
-            conn, config, "hand", "note",
-            {"op": "write", "kind": "wiki", "path": path, "category": "ops", "title": title, "text": body},
-        )
-        assert not failed, text
+_PAGE = "one\ntwo\nthree\nfour\nfive\n"
 
-    failed, text = answer_to(conn, config, "hand", "note", {"op": "search", "kind": "wiki", "query": "DEPLOY"})
+
+def _two_copies_of_a_page(conn, config):
+    """Two agents with a sandbox each, both holding a copy of ops/deploy."""
+    for agent, ws_id in (("first", "ws-first"), ("second", "ws-second")):
+        add_agent(conn, agent, "executor")
+        git_workspace(conn, config, agent, ws_id)
+    core.note_wiki(
+        conn, path="ops/deploy", category="ops", title="Deploy", body=_PAGE,
+        updated_by="owner", expected_version=None,
+    )
+    for ws_id in ("ws-first", "ws-second"):
+        wiki_files.sync(conn, config, ws_id)
+    return (wiki_files.page_file(config, "ws-first", "ops/deploy"),
+            wiki_files.page_file(config, "ws-second", "ops/deploy"))
+
+
+def _publish(conn, config, agent):
+    return answer_to(conn, config, agent, "note", {"op": "write", "kind": "wiki", "path": "ops/deploy"})
+
+
+def test_a_published_file_is_merged_with_the_changes_made_since_its_copy(conn, config):
+    first, second = _two_copies_of_a_page(conn, config)
+    second.write_text(_PAGE.replace("five", "FIVE"), encoding="utf-8", newline="")
+    failed, text = _publish(conn, config, "second")
+    assert not failed, text
+
+    first.write_text(_PAGE.replace("one", "ONE"), encoding="utf-8", newline="")
+    wiki_files.sync(conn, config, "ws-first")
+    assert first.read_text(encoding="utf-8") == _PAGE.replace("one", "ONE")
+    failed, text = _publish(conn, config, "first")
 
     assert not failed, text
-    assert text == "\n".join(
-        [
-            "runbooks/deploy Deploy (v1)",
-            "2:Then Deploy to staging.",
-            "",
-            "runbooks/log Log (v1)",
-            *(f"{i + 1}:deploy {i}" for i in range(20)),
-            "(5 more matching line(s) on this page)",
-            "",
-            "runbooks/release Deployment checklist (v1)",
-        ]
-    )
+    merged = _PAGE.replace("one", "ONE").replace("five", "FIVE")
+    page = core.get_wiki_page(conn, "ops/deploy")
+    assert (page["version"], page["body"]) == (3, merged)
+    assert first.read_text(encoding="utf-8") == merged
+    wiki_files.sync(conn, config, "ws-second")
+    assert second.read_text(encoding="utf-8") == merged
+
+
+def test_overlapping_edits_publish_nothing_and_mark_only_the_overlap(conn, config):
+    first, second = _two_copies_of_a_page(conn, config)
+    second.write_text(_PAGE.replace("one", "uno"), encoding="utf-8", newline="")
+    failed, text = _publish(conn, config, "second")
+    assert not failed, text
+
+    first.write_text(_PAGE.replace("one", "ein").replace("five", "FIVE"), encoding="utf-8",
+                     newline="")
+    failed, text = _publish(conn, config, "first")
+    assert not failed and text.startswith("Nothing published"), text
+    assert core.get_wiki_page(conn, "ops/deploy")["version"] == 2
+    marked = first.read_text(encoding="utf-8")
+    assert marked.count("<<<<<<< your copy") == 1
+    assert "uno" in marked and "ein" in marked and "FIVE" in marked
+
+    failed, _ = _publish(conn, config, "first")
+    assert failed
+
+    settled = _PAGE.replace("one", "ein").replace("five", "FIVE")
+    first.write_text(settled, encoding="utf-8", newline="")
+    failed, text = _publish(conn, config, "first")
+    assert not failed, text
+    page = core.get_wiki_page(conn, "ops/deploy")
+    assert (page["version"], page["body"]) == (3, settled)
 
 
 def test_the_board_lists_one_level_searches_all_levels_and_refuses_a_parent_inside_the_task(conn, config):
@@ -273,8 +333,13 @@ def test_the_board_lists_one_level_searches_all_levels_and_refuses_a_parent_insi
     )
     assert task(op="list", parent=1, query="mine") == "#3 [idea] Gold mine"
     assert task(op="list", parent=4, query="mine") == (
-        "no task matches among those not done — status=all includes the done ones"
+        "no task matches among those neither done nor cancelled — status=all includes them"
     )
+    failed, refusal = answer_to(
+        conn, config, "hand", "task",
+        {"op": "move", "task_id": 4, "status": "cancelled", "result": "not needed"},
+    )
+    assert failed and "the director's and the leads'" in refusal, refusal
 
     for arguments, chain in (
         ({"task_id": 1, "parent": 3}, "#3 under #2 under #1"),

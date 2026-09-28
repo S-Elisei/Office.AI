@@ -36,6 +36,7 @@ def _wiki_context(request: Request, path: str | None) -> dict:
     return {
         "request": request,
         "active": "knowledge",
+        "page_path_pattern": core.PAGE_PATH.pattern,
         "categories": categories,
         "selected": selected,
         "selected_path": selected_path,

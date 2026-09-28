@@ -32,9 +32,10 @@ AUTOCOMPACT = "auto"
 # Matches a line shaped "<label>: N% used".
 _USAGE_LINE = re.compile(r"^([^:\n]{1,80}?):\s*(\d{1,3})%\s+used\b(.*)$", re.MULTILINE)
 
-# Minutes are optional; the matched text carries no year.
+# The date and the minutes are optional; the matched text carries no year.
 _RESET = re.compile(
-    r"resets\s+([A-Z][a-z]{2})\s+(\d{1,2}),\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)",
+    r"resets\s+(?:([A-Z][a-z]{2})\s+(\d{1,2}),\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*"
+    r"\(([^)]+)\)",
     re.IGNORECASE,
 )
 
@@ -48,6 +49,9 @@ _AVAILABLE = re.compile(r"Available:\s*(.+)")
 _EFFORT_HELP = re.compile(r"--effort\b[^()]{0,200}\(([^)]*)\)")
 
 HELP_TIMEOUT = 30.0
+
+# The prefix of the office's own tools' names.
+_OFFICE_TOOL_PREFIX = "mcp__office__"
 
 _CHILD_ENV = {
     "BASH_DEFAULT_TIMEOUT_MS": _DAY_MS,
@@ -118,10 +122,6 @@ class ClaudeAdapter:
             "--verbose",
             "--input-format",
             "stream-json",
-            "--permission-mode",
-            "bypassPermissions",
-            "--model",
-            model,
             # The whole of the office's context management.
             "--autocompact",
             AUTOCOMPACT,
@@ -130,6 +130,34 @@ class ClaudeAdapter:
             # --session-id assigns an id to a session being created; --resume
             # continues one that exists.
             cmd += ["--resume" if resume else "--session-id", session_id]
+        return cmd + self._session_flags(ws, model, effort, office_url)
+
+    def compact_command(
+        self, ws: str, model: str, effort: str | None, office_url: str, session_id: str
+    ) -> list[str]:
+        """Ask claude to summarize its own session in place.
+
+        A separate invocation from a normal turn: `/compact` is passed as the
+        argv prompt, not as a stream-json message on stdin. It carries every
+        flag a resumed turn of the session carries (_session_flags), and must
+        be run with the same environment (process.turn_env).
+        """
+        return [
+            self.bin_path,
+            "-p",
+            "/compact",
+            "--resume",
+            session_id,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ] + self._session_flags(ws, model, effort, office_url)
+
+    def _session_flags(
+        self, ws: str, model: str, effort: str | None, office_url: str
+    ) -> list[str]:
+        """The flags a turn and a compaction of one session share."""
+        cmd = ["--permission-mode", "bypassPermissions", "--model", model]
         if effort:
             cmd += ["--effort", effort]
         cmd += [
@@ -156,25 +184,6 @@ class ClaudeAdapter:
             cmd += ["--append-system-prompt-file", str(system)]
         cmd += ["--add-dir", ws]
         return cmd
-
-    def compact_command(self, ws: str, session_id: str) -> list[str]:
-        """Ask claude to summarize its own session in place.
-
-        A separate invocation from a normal turn: `/compact` is passed as the
-        argv prompt, not as a stream-json message on stdin.
-        """
-        return [
-            self.bin_path,
-            "-p",
-            "/compact",
-            "--resume",
-            session_id,
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--add-dir",
-            ws,
-        ]
 
     def encode_message(self, text: str) -> str:
         envelope = {
@@ -221,6 +230,10 @@ class ClaudeAdapter:
             return _result_event(msg)
 
         return None
+
+    def quota_reset(self, error: str | None) -> int | None:
+        """When a quota refusal says the limit resets, as epoch seconds, or None."""
+        return _reset_epoch(error)
 
     def poll_quota(self, session_ids: Sequence[str] = ()) -> list[QuotaSnapshot] | None:
         """`claude -p /usage --output-format json`. Reaches the CLI only as the
@@ -358,8 +371,9 @@ def parse_usage_payload(payload: dict) -> list[QuotaSnapshot] | None:
 def _reset_epoch(text: str) -> int | None:
     """The matched reset text -> epoch seconds UTC, or None.
 
-    The year is inferred: try this year, then the next, keeping whichever is
-    not already in the past.
+    With a date, the year is inferred: of last year, this year and the next, the
+    one that puts the moment nearest to now. A reset that has passed stays in the
+    past. Without one, it is the next time the clock in that zone shows the time.
 
     Returns None if the zone name does not resolve.
 
@@ -369,9 +383,6 @@ def _reset_epoch(text: str) -> int | None:
     if match is None:
         return None
     month_name, day, hour, minute, meridiem, zone_name = match.groups()
-    month = _MONTHS.get(month_name.lower())
-    if month is None:
-        return None
     hour = int(hour) % 12  # 12am is hour 0, 12pm is hour 12 once pm is added
     if meridiem.lower() == "pm":
         hour += 12
@@ -381,15 +392,22 @@ def _reset_epoch(text: str) -> int | None:
         return None  # unresolvable zone: no guess
 
     now = datetime.now(zone)
-    for year in (now.year, now.year + 1):
+    if month_name is None:
+        when = now.replace(hour=hour, minute=int(minute or 0), second=0, microsecond=0)
+        if when <= now:
+            when += timedelta(days=1)
+        return int(when.timestamp())
+    month = _MONTHS.get(month_name.lower())
+    if month is None:
+        return None
+    candidates = []
+    for year in (now.year - 1, now.year, now.year + 1):
         try:
-            when = datetime(year, month, int(day), hour, int(minute or 0), tzinfo=zone)
+            candidates.append(datetime(year, month, int(day), hour, int(minute or 0), tzinfo=zone))
         except ValueError:
             continue  # Feb 29 of a non-leap year, say
-        # A little slack, rather than comparing directly to now.
-        if when > now - timedelta(hours=1):
-            return int(when.astimezone(timezone.utc).timestamp())
-    return None
+    when = min(candidates, key=lambda moment: abs(moment - now))
+    return int(when.astimezone(timezone.utc).timestamp())
 
 
 def _assistant_event(msg: dict, tool_names: dict[str, str]) -> Event:
@@ -425,7 +443,39 @@ def _assistant_event(msg: dict, tool_names: dict[str, str]) -> Event:
         session_id=msg.get("session_id"),
         # Mid-turn context reading.
         context_used=_context_used(message.get("usage")),
+        request=_request(msg, message, calls),
     )
+
+
+def _request(msg: dict, message: dict, calls: list[dict]) -> dict | None:
+    """The request one `assistant` event belongs to, keyed by its message id.
+
+    An office tool is named `<tool>:<op>` when the call names an op.
+    """
+    usage = message.get("usage")
+    if not usage:
+        return None
+    tools = []
+    for block in calls:
+        name = str(block.get("name") or "?")
+        if name.startswith(_OFFICE_TOOL_PREFIX):
+            name = name[len(_OFFICE_TOOL_PREFIX):]
+            op = (block.get("input") or {}).get("op")
+            if isinstance(op, str) and op:
+                name = f"{name}:{op}"
+        tools.append(name)
+    return {
+        "key": message.get("id"),
+        "at": msg.get("timestamp"),
+        "model": message.get("model"),
+        "input": usage.get("input_tokens"),
+        "cache_read": usage.get("cache_read_input_tokens"),
+        "cache_write": usage.get("cache_creation_input_tokens"),
+        "cache_write_1h": (usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens"),
+        "output": usage.get("output_tokens"),
+        "thinking": None,
+        "tools": tools,
+    }
 
 
 def _tool_result_event(msg: dict, tool_names: dict[str, str]) -> Event | None:
@@ -492,9 +542,18 @@ def _result_event(msg: dict) -> Event:
             )
             if part
         )
+    usage = msg.get("usage") or {}
     return Event(
         kind="turn_end",
         session_id=msg.get("session_id"),
         context_limit=max(limits) if limits else None,
         error=error,
+        totals={
+            "input": usage.get("input_tokens"),
+            "cache_read": usage.get("cache_read_input_tokens"),
+            "cache_write": usage.get("cache_creation_input_tokens"),
+            "cache_write_1h": (usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens"),
+            "output": usage.get("output_tokens"),
+            "thinking": (usage.get("output_tokens_details") or {}).get("thinking_tokens"),
+        } if usage else None,
     )

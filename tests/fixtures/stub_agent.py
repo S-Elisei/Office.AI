@@ -38,6 +38,7 @@ def main() -> None:
                 "type": "assistant",
                 "session_id": session_id,
                 "message": {
+                    "id": "msg-stub",
                     "role": "assistant",
                     "content": [{"type": "text", "text": f"ECHO:{prompt_text}"}],
                     "usage": {"input_tokens": int(args.limit * args.context_pct / 100.0)},

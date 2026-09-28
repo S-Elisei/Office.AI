@@ -1,4 +1,7 @@
-"""Mid-turn delivery plumbing shared by the adapters."""
+"""Mid-turn delivery plumbing shared by the adapters.
+
+Imports the standard library only: inbox_hook.py loads this file from its own directory.
+"""
 
 from __future__ import annotations
 
@@ -41,37 +44,66 @@ def claim_owner(ws: str | Path, agent: str) -> None:
     owner_path(ws).write_text(agent, encoding="utf-8")
 
 
-def deliver(ws: str | Path, text: str, agent: str) -> None:
-    """Queue a message for `agent`'s next tool call."""
+def deliver(ws: str | Path, text: str, agent: str, after: int) -> None:
+    """Queue a message for `agent`'s next tool call.
+
+    `after` is `agent`'s watermark as it stood before this line was written.
+    """
     path = inbox_path(ws)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"to": agent, "text": text}, ensure_ascii=False) + "\n")
+        handle.write(
+            json.dumps({"to": agent, "text": text, "after": after}, ensure_ascii=False) + "\n"
+        )
 
 
-def claim_inbox(ws: str | Path, agent: str) -> str | None:
-    """Take everything queued, atomically, or return None if someone beat us."""
-    inbox = inbox_path(ws)
+def _claim_raw(inbox: Path) -> str | None:
+    """Take the whole queue file, atomically: its text, or None when there is
+    none or someone beat us."""
     claim = inbox.with_name(f"inbox.claim.{uuid.uuid4().hex}")
     try:
         os.replace(inbox, claim)
     except OSError:
         return None
     raw = claim.read_text(encoding="utf-8", errors="replace")
+    claim.unlink()
+    return raw
+
+
+def claim_inbox(ws: str | Path, agent: str) -> str | None:
+    """Take everything queued for `agent`, atomically, or return None if someone
+    beat us."""
+    inbox = inbox_path(ws)
+    raw = _claim_raw(inbox)
+    if raw is None:
+        return None
     mine, others = split_for(raw, agent)
     if others:
         _requeue(inbox, others)
-    claim.unlink()
     return mine
 
 
-def peek_inbox(ws: str | Path, agent: str) -> str | None:
-    """What is queued for `agent` right now, WITHOUT taking it."""
-    try:
-        raw = inbox_path(ws).read_text(encoding="utf-8", errors="replace")
-    except OSError:
+def take_back(ws: str | Path, agent: str) -> int | None:
+    """Take `agent`'s lines off the queue, atomically, and return the lowest
+    watermark they were written after, or None when there were none."""
+    inbox = inbox_path(ws)
+    raw = _claim_raw(inbox)
+    if raw is None:
         return None
-    return split_for(raw, agent)[0]
+    floor: int | None = None
+    others: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        item = json.loads(line)
+        if item["to"] == agent:
+            floor = item["after"] if floor is None else min(floor, item["after"])
+        else:
+            others.append(line)
+    if others:
+        _requeue(inbox, others)
+    return floor
 
 
 def _requeue(inbox: Path, lines: list[str]) -> None:
@@ -89,13 +121,9 @@ def split_for(raw: str, agent: str) -> tuple[str | None, list[str]]:
         line = line.strip()
         if not line:
             continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            out.append(line)
-            continue
-        if item.get("to") in (None, agent):
-            out.append(item.get("text", ""))
+        item = json.loads(line)
+        if item["to"] == agent:
+            out.append(item["text"])
         else:
             others.append(line)
     joined = "\n".join(t for t in out if t).strip()

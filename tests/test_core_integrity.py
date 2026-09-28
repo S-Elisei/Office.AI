@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import time
+
 from office import core, db
+from office.adapters.base import QuotaSnapshot
 
 
 def hire_row(conn, name, kind="executor", manager_id=None):
@@ -47,3 +50,21 @@ def test_a_reported_work_survives_until_its_creator_closes_it(conn):
     survivor = db.query_one(conn, "SELECT * FROM works WHERE id = ?", (failed,))
     assert survivor["status"] == "failed"
     assert survivor["output_tail"] == "boom"
+
+
+def test_a_bucket_whose_reset_has_passed_reads_as_unused(conn):
+    now = int(time.time())
+    polled = [
+        QuotaSnapshot(runtime="claude", label="5h", remaining_fraction=0.2, reset_time=now - 3600),
+        QuotaSnapshot(runtime="claude", label="week", remaining_fraction=0.5, reset_time=now + 3600),
+    ]
+
+    assert core.record_quota(conn, polled) == 2
+    stored = {r["label"]: (r["remaining_fraction"], r["reset_time"]) for r in core.quota_buckets(conn)}
+    assert stored == {"5h": (1.0, None), "week": (0.5, str(now + 3600))}
+    history = db.query(conn, "SELECT label, remaining_fraction FROM quota_polls ORDER BY id")
+    assert [(r["label"], r["remaining_fraction"]) for r in history] == [("5h", 0.2), ("week", 0.5)]
+
+    # The same reading again changes nothing, in the snapshot or in the history.
+    assert core.record_quota(conn, polled) == 0
+    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM quota_polls")["n"] == 2

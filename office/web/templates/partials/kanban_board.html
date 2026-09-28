@@ -56,7 +56,7 @@
   <div class="kanban-col">
     <header>
       <span>{{ label }}</span>
-      <span class="count">{{ done_total if status == 'done' else (by_status.get(status, []) | length) }}</span>
+      <span class="count">{{ closed_totals[status] if status in closed_totals else (by_status.get(status, []) | length) }}</span>
     </header>
     <div class="kanban-cards" id="kanban-cards-{{ status }}">
       {% for t in by_status.get(status, []) %}
@@ -98,8 +98,8 @@
       {% else %}
       <div class="empty">Empty</div>
       {% endfor %}
-      {% if status == 'done' and done_total > done_shown %}
-      <a class="kanban-more" href="/kanban?{{ all_done_query }}">{% if all_done %}Show the latest {{ done_shown }}{% else %}Show all {{ done_total }}{% endif %}</a>
+      {% if status in closed_totals and closed_totals[status] > done_shown %}
+      <a class="kanban-more" href="/kanban?{{ all_done_query }}">{% if all_done %}Show the latest {{ done_shown }}{% else %}Show all {{ closed_totals[status] }}{% endif %}</a>
       {% endif %}
     </div>
   </div>

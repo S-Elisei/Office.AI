@@ -20,21 +20,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
-    ("agents", "turn_start_message_id", "INTEGER"),
-    # A rule's short name.
-    ("rules", "title", "TEXT"),
-    ("wiki", "prev_body", "TEXT"),
-    ("tasks", "parent_task_id", "INTEGER REFERENCES tasks(id)"),
-)
-
-
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
-    for table, column, decl in _ADDED_COLUMNS:
-        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        if column not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def query(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[sqlite3.Row]:

@@ -1,4 +1,4 @@
-"""Runtime configuration: env vars with sane defaults, plus the on-disk layout."""
+"""Runtime configuration from env vars, plus the on-disk layout."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True)
@@ -85,7 +83,13 @@ def _detect_cli(env_var: str, which_name: str, fallback: Path | None) -> str | N
 
 def data_root() -> Path:
     """The office's data directory, <root>. Its parent is the owner's repository."""
-    return Path(os.environ.get("OFFICE_ROOT", str(PROJECT_ROOT / ".office-data"))).resolve()
+    root = os.environ.get("OFFICE_ROOT")
+    if not root:
+        raise SystemExit(
+            "OFFICE_ROOT is not set. Set it to the .office-data folder inside the repository "
+            "the office works on (for example /path/to/project/.office-data) and start the hub again."
+        )
+    return Path(root).resolve()
 
 
 def load_config() -> Config:

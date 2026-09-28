@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- The task this one sits under. NULL for a top-level task.
     parent_task_id INTEGER REFERENCES tasks(id),
     status TEXT NOT NULL DEFAULT 'idea'
-        CHECK (status IN ('idea', 'planned', 'needs_clarification', 'in_progress', 'paused', 'done')),
+        CHECK (status IN ('idea', 'planned', 'needs_clarification', 'in_progress', 'paused', 'done', 'cancelled')),
     position INTEGER NOT NULL DEFAULT 0,
     result TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -212,8 +212,19 @@ CREATE TABLE IF NOT EXISTS wiki_comments (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
--- `title` is one short line naming what the rule is about. Nullable: the column
--- reaches an existing database through office/db.py::_ADDED_COLUMNS.
+-- The office's copy of each wiki page in each workspace's sandbox,
+-- <sandbox>/wiki/<path>.md: the version and the body the office last wrote
+-- there. A file whose text differs from `body` holds edits its agent has not
+-- published; `body` is what a publish of that file is merged from.
+CREATE TABLE IF NOT EXISTS wiki_copies (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    path TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, path)
+);
+
+-- `title` is one short line naming what the rule is about.
 CREATE TABLE IF NOT EXISTS rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT,
@@ -230,9 +241,10 @@ CREATE TABLE IF NOT EXISTS profiles (
     effort TEXT
 );
 
--- Current snapshot only, no history. The key is (runtime, label).
--- remaining_fraction is always what is LEFT; reset_time is epoch seconds UTC,
--- or NULL when the vendor's answer could not be turned into an instant.
+-- The current snapshot; quota_polls holds the history. The key is (runtime,
+-- label). remaining_fraction is always what is LEFT, and 1.0 for a bucket whose
+-- reset time has passed; reset_time is epoch seconds UTC, or NULL when the
+-- vendor's answer could not be turned into an instant or it has passed.
 CREATE TABLE IF NOT EXISTS quota (
     runtime TEXT NOT NULL CHECK (runtime IN ('claude', 'codex', 'agy')),
     label TEXT NOT NULL,
@@ -325,4 +337,101 @@ CREATE TABLE IF NOT EXISTS notices (
     text TEXT NOT NULL,
     seen_at TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- One vendor process an agent ran: a turn, or a compaction the office asked
+-- for. Numbers and names only; no text of any message, prompt or tool. Nothing
+-- in the office reads it; the owner does, with SQL.
+CREATE TABLE IF NOT EXISTS usage_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent TEXT NOT NULL,
+    agent_kind TEXT NOT NULL,
+    runtime TEXT NOT NULL,
+    model TEXT NOT NULL,
+    effort TEXT,
+    session_id TEXT,
+    process TEXT NOT NULL CHECK (process IN ('turn', 'compact')),
+    -- 1 when the turn opened its session.
+    new_session INTEGER NOT NULL DEFAULT 0,
+    -- The agent's running work and its task as the process started; no foreign
+    -- key, since a closed work's row is deleted.
+    work_id INTEGER,
+    task_id INTEGER,
+    -- The distinct senders of the direct messages the turn started with, in
+    -- order, comma-separated: a participant, 'office', 'hook:<service>', or the
+    -- agent's own name for a wake it set.
+    woken_by TEXT,
+    chat_lines INTEGER NOT NULL DEFAULT 0,
+    quiet_lines INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    -- 'clean', or the death's reason.
+    outcome TEXT NOT NULL,
+    context_used INTEGER,
+    -- The process's own totals as the vendor printed them; NULL where it
+    -- prints none.
+    input_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    cache_write_1h_tokens INTEGER,
+    output_tokens INTEGER,
+    thinking_tokens INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_turns_agent ON usage_turns(agent, id);
+
+-- One model request inside a process, in order.
+CREATE TABLE IF NOT EXISTS usage_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    turn_id INTEGER NOT NULL REFERENCES usage_turns(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    at TEXT NOT NULL,
+    model TEXT,
+    -- Input not read from the cache.
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    -- NULL where the vendor prints no cache write (agy).
+    cache_write_tokens INTEGER,
+    -- claude: the part of cache_write_tokens written with the one-hour TTL.
+    cache_write_1h_tokens INTEGER,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    -- codex: reasoning_output_tokens; agy: thinking_tokens; claude: NULL.
+    thinking_tokens INTEGER,
+    -- Tool names called in this request, comma-separated; an office tool with
+    -- an op as '<tool>:<op>'. NULL where the vendor does not say (codex, agy).
+    tools TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_requests_turn ON usage_requests(turn_id, seq);
+
+-- A compaction, manual or the vendor's own, as the vendor reported it.
+CREATE TABLE IF NOT EXISTS usage_compactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    turn_id INTEGER NOT NULL REFERENCES usage_turns(id) ON DELETE CASCADE,
+    at TEXT NOT NULL,
+    trigger TEXT,
+    pre_tokens INTEGER,
+    post_tokens INTEGER
+);
+
+-- Every quota poll's reading that differs from the one before it for its
+-- bucket, exactly as the vendor gave it.
+CREATE TABLE IF NOT EXISTS quota_polls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    runtime TEXT NOT NULL,
+    label TEXT NOT NULL,
+    remaining_fraction REAL NOT NULL,
+    reset_time TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_quota_polls_bucket ON quota_polls(runtime, label, id);
+
+-- A runtime and model that refused a turn for quota: no turn starts on them
+-- before `until` (epoch seconds).
+CREATE TABLE IF NOT EXISTS quota_holds (
+    runtime TEXT NOT NULL,
+    model TEXT NOT NULL,
+    until INTEGER NOT NULL,
+    PRIMARY KEY (runtime, model)
 );

@@ -13,6 +13,12 @@ from office.config import Config
 FIXTURES_DIR = os.path.dirname(__file__)
 
 
+@pytest.fixture(autouse=True)
+def office_root(tmp_path, monkeypatch):
+    """OFFICE_ROOT names the data directory of the `config` fixture."""
+    monkeypatch.setenv("OFFICE_ROOT", str(tmp_path / "office-data"))
+
+
 @pytest.fixture
 def config(tmp_path):
     """A Config rooted in a fresh tmp dir."""

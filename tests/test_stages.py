@@ -26,6 +26,13 @@ LFS_FILTERS = ["-c", "filter.lfs.process=git-lfs filter-process",
 POINTER = b"version https://git-lfs"
 #: What a file under the LFS pattern holds.
 CONTENT = bytes(range(256)) * 40
+#: What a run writes over a file under the LFS pattern; `CHANGED_EXPR` makes it in Python.
+CHANGED = bytes(range(255, -1, -1)) * 40
+CHANGED_EXPR = "bytes(range(255,-1,-1))*40"
+#: A path under the LFS pattern with a space in it, in the base commit.
+SPACED = "sub dir/odd 1.bin"
+#: A path under the LFS pattern that a glob would read as matching SPACED.
+BRACKETED = "sub dir/odd [1].bin"
 #: Must not be the name of an agent or a stage in the office whose id marks.office_id()
 #: returns during these tests.
 AGENT = "stage-test-agent"
@@ -40,7 +47,8 @@ def _git(args, cwd, env=None):
 
 def _project(config, *, large_file: bool = False):
     """project.git from an owner's repository holding a.txt, a .gitignore of Library/ and a
-    .gitattributes putting *.bin under LFS; with `large_file`, also big.bin holding CONTENT."""
+    .gitattributes putting *.bin under LFS; with `large_file`, also big.bin and SPACED
+    holding CONTENT."""
     owner = git.owner_repo(config)
     _git(["init", f"--initial-branch={MAIN}", "."], owner)
     (owner / ".gitignore").write_text("Library/\n", encoding="utf-8", newline="\n")
@@ -50,18 +58,21 @@ def _project(config, *, large_file: bool = False):
     paths = [".gitignore", ".gitattributes", "a.txt"]
     if large_file:
         (owner / "big.bin").write_bytes(CONTENT)
-        paths.append("big.bin")
+        (owner / SPACED).parent.mkdir()
+        (owner / SPACED).write_bytes(CONTENT)
+        paths += ["big.bin", SPACED]
     _git([*LFS_FILTERS, "add", *paths], owner)
     _git(["-c", "user.name=o", "-c", "user.email=o@example.com", "commit", "-m", "base"], owner)
     git.init_project(config, branch=MAIN)
 
 
-def _tree_of(workspace: Path, scratch: Path) -> str:
-    """The tree git would record for the workspace's files, read through a copy of its index."""
+def _tree_of(workspace: Path, scratch: Path, *kept: str) -> str:
+    """The tree git would record for the workspace's files, read through a copy of its index;
+    the paths in `kept` as the index has them."""
     index = scratch / "tree.index"
     shutil.copyfile(workspace / ".git" / "index", index)
     env = {**os.environ, "GIT_INDEX_FILE": str(index)}
-    _git(["add", "-A"], workspace, env)
+    _git(["add", "-A", "--", ".", *[f":(exclude,literal){p}" for p in kept]], workspace, env)
     return _git(["write-tree"], workspace, env).stdout.strip()
 
 
@@ -145,10 +156,10 @@ def test_a_preparation_fills_a_tree_its_clone_left_with_pointers(config, conn):
     assert (tree / "big.bin").read_bytes() == CONTENT
 
 
-def test_a_run_brings_back_what_its_command_wrote_and_the_commands_reproduce_it(
+def test_a_run_brings_back_what_it_wrote_large_files_included_and_the_commands_reproduce_it(
     config, conn, tmp_path
 ):
-    _project(config)
+    _project(config, large_file=True)
     ws = git.create_workspace(config, AGENT)
     workspace = Path(ws.path)
     stages.create(conn, config, STAGE, "", actor="director")
@@ -159,13 +170,15 @@ def test_a_run_brings_back_what_its_command_wrote_and_the_commands_reproduce_it(
     run = stages.start_run(
         conn, config, AGENT, {"id": ws.id, "path": ws.path}, STAGE,
         f"{python} -c \"open('gen.bin','wb').write(bytes(range(256))*40);"
+        f"open('big.bin','wb').write({CHANGED_EXPR});"
+        f"open('{BRACKETED}','wb').write({CHANGED_EXPR});"
         f"open('x.meta','w').write('guid:1\\n');open('a.txt','a').write('two\\n')\"",
     )
     assert run._finished.wait(300)
 
     assert run.exit_code == 0
-    assert sorted(run.changed) == ["a.txt", "gen.bin", "x.meta"]
-    assert run.lfs == ["gen.bin"]
+    assert sorted(run.changed) == ["a.txt", "big.bin", "gen.bin", BRACKETED, "x.meta"]
+    assert sorted(run.lfs) == ["big.bin", "gen.bin", BRACKETED]
     project = git.project_git(config)
     assert _git(["rev-parse", f"refs/office/stage/{STAGE}/{ws.id}"], project).stdout.strip() \
         == run.change
@@ -174,6 +187,9 @@ def test_a_run_brings_back_what_its_command_wrote_and_the_commands_reproduce_it(
     change_tree = _git(["rev-parse", f"{run.change}^{{tree}}"], project).stdout.strip()
     # Control: before the commands, the workspace does not hold the change.
     assert _tree_of(workspace, tmp_path) != change_tree
+    # The agent's own edit after the snapshot, under a path the bracketed one would match
+    # as a glob.
+    (workspace / SPACED).write_bytes(b"the agent's edit")
 
     given = [line.strip() for line in run.report() if line.startswith("  git ")]
     for line in given:
@@ -181,8 +197,11 @@ def test_a_run_brings_back_what_its_command_wrote_and_the_commands_reproduce_it(
                               capture_output=True, text=True, timeout=120)
         assert done.returncode == 0, (line, done.stdout + done.stderr)
 
-    assert _tree_of(workspace, tmp_path) == change_tree
+    assert _tree_of(workspace, tmp_path, SPACED) == change_tree
     assert (workspace / "gen.bin").read_bytes() == CONTENT
+    assert (workspace / "big.bin").read_bytes() == CHANGED
+    assert (workspace / BRACKETED).read_bytes() == CHANGED
+    assert (workspace / SPACED).read_bytes() == b"the agent's edit"
 
 
 def test_publish_runs_no_hook_of_the_workspace(config, tmp_path):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from collections.abc import Sequence
 from datetime import datetime, timedelta
@@ -33,6 +34,11 @@ MCP_STARTUP_TIMEOUT_SEC = 300
 # the whole file if the tail holds no token_count yet. Every later look reads
 # only the bytes appended since — see _RolloutTail.
 _TAIL_BYTES = 512 * 1024
+
+# "try again at 3:20 PM", or with a date: "try again at Sep 10th, 2026 1:43 AM".
+_TRY_AGAIN = re.compile(
+    r"try again at (?:([A-Z][a-z]{2}) (\d{1,2})(?:st|nd|rd|th)?, (\d{4}) )?(\d{1,2}:\d{2} [AP]M)"
+)
 
 
 def codex_home() -> Path:
@@ -142,6 +148,49 @@ def _newest_token_count(lines: list[str]) -> dict | None:
         if payload.get("type") == "token_count":
             return payload
     return None
+
+
+def rollout_requests(lines: list[str], since: str) -> list[dict]:
+    """One request per `token_count` line stamped at or after `since` (the
+    rollout's own ISO-8601 UTC form), in the keys of Event.request.
+
+    A `token_count` whose running total equals the one before it repeats that
+    request and is skipped.
+    """
+    requests = []
+    previous = None
+    for line in lines:
+        if '"token_count"' not in line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
+        info = payload.get("info") if payload.get("type") == "token_count" else None
+        if not isinstance(info, dict):
+            continue
+        total = info.get("total_token_usage")
+        repeated = total == previous
+        previous = total
+        stamp = msg.get("timestamp")
+        if repeated or not isinstance(stamp, str) or stamp < since:
+            continue
+        last = info.get("last_token_usage") or {}
+        cached = int(last.get("cached_input_tokens") or 0)
+        requests.append({
+            "key": None,
+            "at": stamp,
+            "model": None,
+            "input": int(last.get("input_tokens") or 0) - cached,
+            "cache_read": cached,
+            "cache_write": last.get("cache_write_input_tokens"),
+            "cache_write_1h": None,
+            "output": last.get("output_tokens"),
+            "thinking": last.get("reasoning_output_tokens"),
+            "tools": None,
+        })
+    return requests
 
 
 class _RolloutTail:
@@ -398,6 +447,35 @@ class CodexAdapter:
             context_used=int(used) if used is not None else None,
             context_limit=int(limit) if limit else None,
         )
+
+    def quota_reset(self, error: str | None) -> int | None:
+        """When a quota refusal says to try again, as epoch seconds, or None.
+
+        The moment is read in the machine's own zone; without a date, it is the
+        next time the clock shows it.
+        """
+        match = _TRY_AGAIN.search(error or "")
+        if match is None:
+            return None
+        month, day, year, clock = match.groups()
+        if month is None:
+            now = datetime.now()
+            at = datetime.strptime(clock, "%I:%M %p")
+            when = now.replace(hour=at.hour, minute=at.minute, second=0, microsecond=0)
+            if when <= now:
+                when += timedelta(days=1)
+        else:
+            when = datetime.strptime(f"{month} {day} {year} {clock}", "%b %d %Y %I:%M %p")
+        return int(when.timestamp())
+
+    def turn_requests(self, session_id: str | None, since: str) -> list[dict]:
+        """The model requests of this thread from `since` on, read off its
+        rollout file (rollout_requests). Empty when there is no such file."""
+        path = self._rollout_file(session_id or "")
+        if path is None:
+            return []
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return rollout_requests(lines, since)
 
     def poll_quota(self, session_ids: Sequence[str] = ()) -> list[QuotaSnapshot] | None:
         """Quota from the office's newest session file. Free: no turn, no tokens.

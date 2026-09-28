@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +38,9 @@ HOOK_EVENTS = ("PreInvocation", "PostInvocation")
 MODELS_TIMEOUT = 60.0
 
 PRINT_TIMEOUT = "720h"
+
+# Hours, minutes and seconds, each optional, at least one present.
+_RESETS_IN = re.compile(r"Resets in (?=\d)(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
 
 
 MCP_SERVER_NAME = "office"
@@ -159,11 +164,13 @@ class AgyAdapter:
 
         if event == "result":
             status = str(body.get("status", "")).upper()
+            usage = body.get("usage")
             return Event(
                 kind="turn_end",
                 text=body.get("response"),
                 session_id=session_id,
-                error=None if status in ("", "SUCCESS") else status,
+                error=None if status in ("", "SUCCESS") else (body.get("error") or status),
+                totals=_counts(usage) if usage else None,
             )
 
         if event == "step_update":
@@ -173,6 +180,11 @@ class AgyAdapter:
             return Event(kind="error", error=json.dumps(body or msg), session_id=session_id)
 
         return None
+
+    def quota_reset(self, error: str | None) -> int | None:
+        """When a quota refusal says the quota comes back, as epoch seconds, or None."""
+        seconds = reset_seconds(error)
+        return int(time.time()) + seconds if seconds is not None else None
 
     def poll_quota(self, session_ids: Sequence[str] = ()) -> list[QuotaSnapshot] | None:
         try:
@@ -209,6 +221,15 @@ class AgyAdapter:
         if proc.returncode != 0:
             return None
         return parse_models_output(proc.stdout)
+
+
+def reset_seconds(text: str | None) -> int | None:
+    """`Resets in 3h58m49s` in a refusal -> the seconds it names, or None."""
+    match = _RESETS_IN.search(text or "")
+    if match is None:
+        return None
+    hours, minutes, seconds = (int(part or 0) for part in match.groups())
+    return hours * 3600 + minutes * 60 + seconds
 
 
 def parse_models_output(text: str) -> list[ModelInfo] | None:
@@ -263,11 +284,17 @@ def _step_event(body: dict, session_id: str | None) -> Event | None:
     step_type = body.get("step_type")
     if step_type == "user_input":
         return None
-    used = _used(body.get("usage"))
+    usage = body.get("usage")
+    used = _used(usage)
     delta = body.get("text_delta")
     if step_type == "agent_response":
         if used is not None:
-            return Event(kind="usage", text=delta, session_id=session_id, context_used=used)
+            request = None
+            if str(body.get("state") or "").upper() == "DONE":
+                request = {"key": body.get("step_index"), "at": None, "model": None,
+                           "cache_write_1h": None, "tools": None, **_counts(usage)}
+            return Event(kind="usage", text=delta, session_id=session_id, context_used=used,
+                         request=request)
         return Event(kind="text", text=delta, session_id=session_id) if delta else None
     # Everything else is a tool step; agy names the kind in step_type.
     phase = _phase(body.get("state"))
@@ -281,6 +308,18 @@ def _step_event(body: dict, session_id: str | None) -> Event | None:
         session_id=session_id,
         context_used=used,
     )
+
+
+def _counts(usage: dict) -> dict:
+    """agy's `usage` under the number keys of Event.request; `cache_write` is
+    None."""
+    return {
+        "input": usage.get("input_tokens"),
+        "cache_read": usage.get("cache_read_tokens"),
+        "cache_write": None,
+        "output": usage.get("output_tokens"),
+        "thinking": usage.get("thinking_tokens"),
+    }
 
 
 def _phase(state) -> str | None:

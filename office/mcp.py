@@ -11,7 +11,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.concurrency import run_in_threadpool
 
-from office import commands, core, db, stages
+from office import commands, core, db, stages, wiki_files
 
 # --------------------------------------------------------------------------- the free drain seam
 
@@ -165,10 +165,26 @@ def _h_chat(conn, config, agent_name, role, args) -> str:
 
 
 def _h_remind(conn, config, agent_name, role, args) -> str:
-    """One message, sent later, waking whoever it is addressed to."""
-    _require(args, "to", "text", "in_seconds")
-    wake = core.schedule_message(conn, agent_name, args["to"], args["text"], args["in_seconds"])
-    return f"queued for {wake['recipient']}, sends {_fmt_stamp(wake['due_at'])}"
+    """One message, sent later, waking whoever it is addressed to; or one of the
+    caller's own taken back before it goes."""
+    op = args.get("op")
+    if op == "set":
+        _require(args, "to", "text", "in_seconds")
+        wake = core.schedule_message(
+            conn, agent_name, args["to"], args["text"], args["in_seconds"]
+        )
+        return f"reminder {wake['id']}: sends to {wake['recipient']} {_fmt_stamp(wake['due_at'])}"
+    if op == "cancel":
+        _require(args, "reminder_id")
+        if core.cancel_scheduled_message(
+            conn, args["reminder_id"], sender=agent_name, actor=agent_name
+        ):
+            return f"reminder {args['reminder_id']} cancelled"
+        raise ValueError(
+            f"no reminder {args['reminder_id']} of yours is waiting to go — roster() lists "
+            "the ones you set"
+        )
+    raise ValueError(f"remind: unknown op '{op}' — expected set or cancel")
 
 
 def _h_expect(conn, config, agent_name, role, args) -> str:
@@ -252,7 +268,9 @@ def _h_task(conn, config, agent_name, role, args) -> str:
         if not tasks:
             if args.get("status"):
                 return "no task matches"
-            return "no task matches among those not done — status=all includes the done ones"
+            return (
+                "no task matches among those neither done nor cancelled — status=all includes them"
+            )
         return "\n".join(
             _capped([core.task_line(t) for t in tasks], "task(s) left out — narrow with parent, status or query")
         )
@@ -275,10 +293,16 @@ def _h_task(conn, config, agent_name, role, args) -> str:
         return f"task {task['id']} updated"
     if op == "move":
         _require(args, "task_id", "status")
-        if args["status"] == "done":
+        if args["status"] == "cancelled" and role not in _MANAGER_ROLES:
+            raise PermissionError(
+                "cancelling a task is the director's and the leads' — ask your manager"
+            )
+        if args["status"] in core.CLOSED_TASK_STATUSES:
             _require(args, "result")
-            task = core.close_task(conn, args["task_id"], args["result"], actor=agent_name)
-            return f"task {task['id']} closed: {task['result']}"
+            task = core.close_task(
+                conn, args["task_id"], args["result"], actor=agent_name, status=args["status"]
+            )
+            return f"task {task['id']} {task['status']}: {task['result']}"
         task = core.move_task(conn, args["task_id"], args["status"], args.get("position"), actor=agent_name)
         return f"task {task['id']} moved to {task['status']}"
     if op == "link":
@@ -311,12 +335,7 @@ def _h_work(conn, config, agent_name, role, args) -> str:
             f"on branch '{work['branch']}', assigned by "
             f"{'you' if own else assigner}:\n{work['brief']}"
         )
-        if work["status"] == "paused":
-            line += (
-                f"\nPaused: {work['pause_reason']}. The work still stands; carry on with it "
-                "when you are next asked to."
-            )
-        elif work["status"] == "done" and own:
+        if work["status"] == "done" and own:
             line += (
                 "\nYou have reported this work, which you assigned yourself; it stays on the "
                 "books until you close it with work_close."
@@ -361,7 +380,7 @@ def _h_work(conn, config, agent_name, role, args) -> str:
         if pr["republished"]:
             note = (
                 f" PR {pr['id']} updated: {pr['title']} ({pr['source_branch']} -> "
-                f"{pr['target_branch']}) published again."
+                f"{pr['target_branch']}){_republished(pr_info.get('body'))}."
             )
         else:
             note = f" PR {pr['id']} opened ({pr['source_branch']} -> {pr['target_branch']})."
@@ -434,6 +453,11 @@ def _left_behind(published) -> str:
     )
 
 
+def _republished(body) -> str:
+    """The tail of the answer for a create that updated a PR already open."""
+    return ", published again" + (", its description replaced" if body is not None else "")
+
+
 def _h_pr(conn, config, agent_name, role, args) -> str:
     op = args.get("op")
     if op in ("merge", "close") and role not in _MANAGER_ROLES:
@@ -453,8 +477,10 @@ def _h_pr(conn, config, agent_name, role, args) -> str:
             target_branch=args["target_branch"], author_agent_id=me["id"],
         )
         left = _left_behind(published)
-        done = "updated" if pr["republished"] else "opened"
-        again = " published again" if pr["republished"] else ""
+        if pr["republished"]:
+            done, again = "updated", _republished(args.get("body"))
+        else:
+            done, again = "opened", ""
         return (
             f"PR {pr['id']} {done}: {pr['title']} ({pr['source_branch']} -> "
             f"{pr['target_branch']}){again}"
@@ -552,11 +578,6 @@ def _h_pr(conn, config, agent_name, role, args) -> str:
     )
 
 
-#: note(op=search): matching lines shown per page, and characters in the whole answer.
-_SEARCH_LINES_PER_PAGE = 20
-_SEARCH_ANSWER_CHARS = 16000
-
-
 def _h_note(conn, config, agent_name, role, args) -> str:
     op = args.get("op")
     kind = args.get("kind")
@@ -564,29 +585,27 @@ def _h_note(conn, config, agent_name, role, args) -> str:
         raise ValueError("note: kind must be 'wiki' or 'rule'")
 
     if kind == "wiki":
+        ws = core.workspace_of(conn, _agent_row(conn, agent_name)["id"])["id"]
         if op == "list":
             # The index, never the bodies.
             pages = core.list_wiki_pages(conn)
-            if not pages:
-                return "wiki is empty"
-            return "\n".join(
+            lines = [f"Pages are files under {wiki_files.wiki_dir(config, ws)}."]
+            lines += [
                 f"{p['path']} [{p['category']}] {p['title']} (v{p['version']}, "
                 f"{p['comment_count']} comment(s))"
                 for p in pages
-            )
+            ]
+            return "\n".join(lines if pages else [*lines, "The wiki is empty."])
         if op == "read":
             _require(args, "path")
+            wiki_files.sync_page(conn, config, ws, args["path"])
             page = core.get_wiki_page(conn, args["path"])
             if page is None:
                 raise ValueError(f"no wiki page '{args['path']}' — note(op=list, kind=wiki) shows what exists")
-            # The version is part of the answer, not decoration: op=write
-            # refuses a version it did not agree with.
             lines = [
                 f"{page['path']} [{page['category']}] {page['title']} (v{page['version']}, "
                 f"last edited by {page['updated_by']})",
-                "",
-                page["body"],
-                "",
+                wiki_files.state(conn, config, ws, page["path"], page["version"]),
             ]
             if page["comments"]:
                 lines.append(f"Comments ({len(page['comments'])}), oldest first:")
@@ -600,28 +619,6 @@ def _h_note(conn, config, agent_name, role, args) -> str:
             else:
                 lines.append("No comments.")
             return "\n".join(lines)
-        if op == "search":
-            _require(args, "query")
-            pages = core.search_wiki_pages(conn, args["query"])
-            if not pages:
-                return f"no wiki page matches '{args['query']}'"
-            blocks = []
-            size = 0
-            # The first page is shown whatever its size.
-            for p in pages:
-                shown = p["lines"][:_SEARCH_LINES_PER_PAGE]
-                block = [f"{p['path']} {p['title']} (v{p['version']})"]
-                block += [f"{n}:{line}" for n, line in shown]
-                if len(p["lines"]) > len(shown):
-                    block.append(f"({len(p['lines']) - len(shown)} more matching line(s) on this page)")
-                joined = "\n".join(block)
-                if blocks and size + len(joined) > _SEARCH_ANSWER_CHARS:
-                    break
-                blocks.append(joined)
-                size += len(joined)
-            if len(blocks) < len(pages):
-                blocks.append(f"{len(pages) - len(blocks)} more matching page(s) left out — narrow the query")
-            return "\n\n".join(blocks)
         if op == "comment":
             # The version is not an argument: core stamps the page's current one
             # onto the comment.
@@ -629,29 +626,34 @@ def _h_note(conn, config, agent_name, role, args) -> str:
             comment = core.comment_wiki_page(conn, args["path"], agent_name, args["comment"])
             return f"comment added to wiki '{args['path']}', against version {comment['page_version']}"
         if op == "write":
-            # One write op, not "create" and "update": core.note_wiki takes an
-            # expected version, and that number is the whole of the distinction —
-            # omit it (or 0) and the page must not exist yet, give it and the
-            # page must be at exactly that version.
-            _require(args, "path", "category", "title", "text")
-            page = core.note_wiki(
-                conn, path=args["path"], category=args["category"], title=args["title"], body=args["text"],
-                updated_by=agent_name, expected_version=args.get("expected_version"),
+            _require(args, "path")
+            return wiki_files.publish(
+                conn, config, ws, args["path"], category=args.get("category"),
+                title=args.get("title"), actor=agent_name,
             )
-            return f"wiki '{page['path']}' saved at version {page['version']}"
         if op == "undo":
             _require(args, "path")
             page = core.undo_wiki_page(conn, args["path"], actor=agent_name)
+            wiki_files.sync_page(conn, config, ws, args["path"])
             return (
                 f"wiki '{page['path']}' put back to the body it had before its last write, "
-                f"saved at version {page['version']}"
+                f"saved at version {page['version']}. "
+                + wiki_files.state(conn, config, ws, page["path"], page["version"])
             )
         if op == "delete":
-            _require(args, "path", "expected_version")
-            core.delete_wiki_page(conn, args["path"], args["expected_version"], actor=agent_name)
+            _require(args, "path")
+            copy = db.query_one(
+                conn, "SELECT version FROM wiki_copies WHERE workspace_id = ? AND path = ?",
+                (ws, args["path"]),
+            )
+            core.delete_wiki_page(
+                conn, args["path"], copy["version"] if copy else 0, actor=agent_name
+            )
+            wiki_files.sync_page(conn, config, ws, args["path"])
             return f"wiki '{args['path']}' deleted"
         raise ValueError(
-            f"note: unknown op '{op}' for kind=wiki — expected list, read, search, comment, write, undo, or delete"
+            f"note: unknown op '{op}' for kind=wiki — expected list, read, comment, write, undo "
+            f"or delete; the pages are files under {wiki_files.wiki_dir(config, ws)}"
         )
 
     # Everyone reads the rules; writing them is the director's alone.
@@ -936,8 +938,8 @@ def _fmt_epoch(value) -> str:
     """A stored reset time in the machine's own zone, or "unknown".
 
     Adapters normalise every vendor's answer to epoch seconds UTC, and store
-    NULL when it could not be turned into an instant -- "unknown" is that
-    NULL, not a formatting failure.
+    NULL when it could not be turned into an instant or has already passed --
+    "unknown" is that NULL, not a formatting failure.
 
     Shown local, not UTC, and the zone is named in the string. The same rule
     the web pages follow (office/web/templating.py, fmt_time).
@@ -1023,10 +1025,11 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
         if w["sender"] == agent_name or w["sender"] in reach_names
     ]
     if wakes:
-        lines.append("Pending wakes:")
+        lines.append("Reminders not yet sent:")
         for w in wakes:
             lines.append(
-                f"  {_fmt_stamp(w['due_at'])}: from {w['sender']} to {w['recipient']} — {_first_line(w['body'])}"
+                f"  [{w['id']}] {_fmt_stamp(w['due_at'])}: from {w['sender']} to {w['recipient']} "
+                f"— {_first_line(w['body'])}"
             )
     expectations = [
         e for e in core.open_expectations(conn)
@@ -1076,16 +1079,21 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
                 if w["resume_after"]:
                     line += f", earliest resume {_fmt_epoch(w['resume_after'])}"
             lines.append(line)
-    if snap["quota"]:
+    if snap["quota"] or snap["holds"]:
         # Bucket names are the vendor's own and are printed untranslated: the
         # office does not decide which limit means what.
         lines.append("Quota:")
         for q in snap["quota"]:
-            resets = _fmt_epoch(q["reset_time"])
             # The vendor's own two numbers and nothing derived: how much
             # remains, and when it comes back.
             lines.append(
-                f"  {q['runtime']} · {q['label']}: {q['remaining_fraction']:.0%} remaining, resets {resets}"
+                f"  {q['runtime']} · {q['label']}: {q['remaining_fraction']:.0%} remaining, "
+                f"resets {_fmt_epoch(q['reset_time'])}"
+            )
+        for h in snap["holds"]:
+            lines.append(
+                f"  held: {h['runtime']} · {h['model']} — no turn starts on it before "
+                f"{_fmt_epoch(h['until'])}; it refused one for quota"
             )
     if snap["blocked_tasks"]:
         lines.append("Blocked (looks ready but its dependency isn't done):")
@@ -1350,22 +1358,13 @@ def _h_assign(conn, config, agent_name, role, args) -> str:
 def _h_work_reassign(conn, config, agent_name, role, args) -> str:
     _require(args, "work", "workspace")
     target = _named_agent(conn, args, "to_agent")
-    before = core.workspace_of(conn, target["id"]) if target["name"] == agent_name else None
     work = core.reassign_work(
         conn, config, args["work"], target["id"], workspace=args["workspace"], actor=agent_name
     )
-    answer = (
+    return (
         f"work {work['id']} reassigned to {target['name']} ({args['workspace']} workspace); you "
         "are its assigner. Nobody was woken — write to whoever should act."
     )
-    ws = core.workspace_of(conn, target["id"]) if before is not None else None
-    if ws is not None and ws["id"] != before["id"]:
-        answer += (
-            f" Your own workspace is now {ws['path']} and your sandbox "
-            f"{config.scratch_dir / ws['id']}; the directory this turn started in is no longer "
-            "yours — work in the new one."
-        )
-    return answer
 
 
 def _h_work_close(conn, config, agent_name, role, args) -> str:
@@ -1387,7 +1386,7 @@ def _h_work_close(conn, config, agent_name, role, args) -> str:
         return f"work {work['id']} closed.{where}"
     return (
         f"work {work['id']} closed.{where} {assignee} is told with its next turn, not woken — "
-        "write to them if they should know now."
+        "write to them if it changes what they have going now."
     )
 
 
@@ -1449,14 +1448,14 @@ _HANDLERS = {
 _TOOLS: dict[str, types.Tool] = {
     "say": types.Tool(
         name="say",
-        description="Send a message. to='all' posts to the common chat: everyone gets it with "
-        "their next turn and nobody is woken for it — do not use it to ask for something. Any "
-        "other name is a direct message and buys that participant a turn; it reaches them, or "
-        "the office tells you it did not, and nothing is re-sent.",
+        description="Send a message. to='all' posts to the common chat. Everyone gets it with "
+        "their next turn. It wakes nobody. Never use it to ask for something. Any other name "
+        "is a direct message. It gives that participant a turn. It reaches them, or the office "
+        "tells you it did not. Nothing is sent again.",
         input_schema={
             "type": "object",
             "properties": {
-                "to": {"type": "string", "description": "Participant name, or 'all' for the common chat."},
+                "to": {"type": "string", "description": "A participant's name, or 'all' for the common chat."},
                 "text": {"type": "string"},
             },
             "required": ["to", "text"],
@@ -1464,54 +1463,66 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "chat": types.Tool(
         name="chat",
-        description="The common chat, newest page first. It answers what was said, not whether "
-        "something happened: messages arrive on their own. before_id (the bracketed number on "
-        "a line) steps further back.",
+        description="The common chat, newest page first. It tells you what was said. It does "
+        "not tell you whether something happened: messages come to you on their own. "
+        "before_id, the number in brackets on a line, goes further back.",
         input_schema={
             "type": "object",
             "properties": {
                 "before_id": {
                     "type": "integer",
-                    "description": "Optional: show the page immediately older than this line's number.",
+                    "description": "Optional. Shows the page just older than the line with this number.",
                 },
             },
         },
     ),
     "remind": types.Tool(
         name="remind",
-        description="Send a message later, as a message from you; it wakes whoever it is "
-        "addressed to. to may be your own name: that is how you carry on later. 'all' is not a "
-        "recipient here.",
+        description="Reminders: set | cancel. set sets a reminder. It sends text to `to` in "
+        "in_seconds, as a message from you. It wakes the addressee when it arrives. 'all' is "
+        "not a recipient here. set answers with the reminder's number. cancel cancels a "
+        "reminder of yours that has not gone yet, by reminder_id. roster() lists yours with "
+        "their numbers. Cancelling tells nobody.",
         input_schema={
             "type": "object",
             "properties": {
-                "to": {"type": "string", "description": "Participant name — your own included."},
-                "text": {"type": "string"},
+                "op": {"type": "string", "enum": ["set", "cancel"]},
+                "to": {
+                    "type": "string",
+                    "description": "Required for set. A participant's name. Your own is allowed.",
+                },
+                "text": {"type": "string", "description": "Required for set."},
                 "in_seconds": {
                     "type": "integer",
-                    "description": "How long from now, in seconds. 0 to 604800 (seven days).",
+                    "description": "Required for set. Seconds from now: 0 to "
+                    f"{core.MAX_WAKE_SECONDS} (seven days).",
+                },
+                "reminder_id": {
+                    "type": "integer",
+                    "description": "Required for cancel. The number roster() shows against a "
+                    "reminder you set.",
                 },
             },
-            "required": ["to", "text", "in_seconds"],
+            "required": ["op"],
         },
     ),
     "expect": types.Tool(
         name="expect",
-        description="An address a local service notifies when a job that takes longer than a "
-        "few minutes ends; a job that ends within a few minutes is waited for inside the turn "
-        "instead. Give the service the address and end your turn. What the service sends there "
-        "reaches you as a direct message from hook:<service>, headed with `about`. If nothing "
-        "arrives within within_seconds, the address closes and you are told.",
+        description="An address a local service notifies when a long job ends. Use it for a "
+        "job that takes longer than a few minutes. Wait for a shorter job inside your turn. "
+        "Give the service the address and end your turn. What the service sends there reaches "
+        "you as a direct message from hook:<service>, headed with `about`. If nothing arrives "
+        "within within_seconds, the address closes and you are told.",
         input_schema={
             "type": "object",
             "properties": {
                 "about": {
                     "type": "string",
-                    "description": "What you are waiting for — the job or the batch.",
+                    "description": "What you are waiting for: the job or the batch.",
                 },
                 "within_seconds": {
                     "type": "integer",
-                    "description": f"How long to wait, in seconds. 0 to {core.MAX_WAKE_SECONDS}.",
+                    "description": f"How long to wait, in seconds: 0 to {core.MAX_WAKE_SECONDS}.",
                 },
             },
             "required": ["about", "within_seconds"],
@@ -1519,53 +1530,68 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "task": types.Tool(
         name="task",
-        description="The board of kanban tasks. A task may sit under a parent task; a task with "
-        "no parent is top-level. Works are the assignments made against a task; each one closed "
-        "appends its result line to the task. "
-        "list prints one line per task: id, status, title, its children's counts (open / done) and "
-        "the dependencies that are not done. Without parent and query it lists the top-level "
-        "tasks; with parent, that task's children. query is a regular expression matched "
-        "case-insensitively against titles: alone it searches the whole board, with parent "
-        "everything under that task at any depth. status keeps one status, or all; without it "
-        "done tasks are left out. A long answer is cut, and its last line says how many tasks "
-        "were left out. read gives one task in full: body, result, the chain of parents up to the "
-        "top, the children, the dependencies both ways, the works on it and the tickets linked to "
-        "it. create takes an optional parent. update with parent moves a task under another task, "
-        "with parent=0 to the top level; a task cannot go under itself or under a task inside it. "
+        description="The board of kanban tasks: list | read | create | update | move | link. "
+        "A task may sit under a parent task. A task with no parent is top-level. Works are the "
+        "assignments made on a task. Each work that is closed adds its result line to the task. "
+        "list prints one line per task: id, status, title, the counts of its children (open / "
+        "done; a cancelled child counts in neither), and the dependencies that are not done. "
+        "With no parent and no query, list gives the top-level tasks. With parent, it gives "
+        "that task's children. query is a regular expression, matched against titles, case "
+        "ignored. query alone searches the whole board. query with parent searches everything "
+        "under that task, at any depth. status keeps one status, or all. Without status, done "
+        "and cancelled tasks are left out. A long answer is cut. Its last line says how many "
+        "tasks were left out. "
+        "read gives one task in full: body, result, the chain of parents up to the top, the "
+        "children, the dependencies both ways, the works on it and the tickets linked to it. "
+        "create takes an optional parent. "
+        "update with parent moves a task under another task. parent=0 moves it to the top "
+        "level. A task cannot go under itself or under a task inside it. "
         "A parent's status does not follow its children's. "
-        "move with status='done' requires result and closes the task with that line. Works "
-        "still open on it are deleted with it, and their assignees are not told. It is refused while a work on the task has reported "
-        "and is waiting to be closed, and while a work on it is one you could not close with "
-        "work_close — one you did not assign whose assignee is not under you. link records "
-        "that task_id depends on depends_on (it must finish first). ticket(op=link) attaches a "
-        "ticket to a task.",
+        "move with status='done' needs result and closes the task with that line. The works "
+        "still open on the task are deleted with it. Their assignees are not told. It is "
+        "refused while a work on the task has reported and waits to be closed. It is also "
+        "refused while a work on the task is one you could not close with work_close: one you "
+        "did not assign, whose assignee is not under you. "
+        "move with status='cancelled' is the director's and the leads'. It needs result: the "
+        "reason. It is refused while any work is on the task. A cancelled task still holds up "
+        "the tasks that depend on it. "
+        "link records that task_id depends on depends_on: depends_on must finish first. "
+        "ticket(op=link) attaches a ticket to a task.",
         input_schema={
             "type": "object",
             "properties": {
                 "op": {"type": "string", "enum": ["list", "read", "create", "update", "move", "link"]},
                 "task_id": {
                     "type": "integer",
-                    "description": "Required for read, update, move, link (the dependent task).",
+                    "description": "Required for read, update, move and link. For link, the dependent task.",
                 },
                 "title": {"type": "string"},
                 "body": {"type": "string"},
                 "parent": {
                     "type": "integer",
                     "description": "For list: the task whose children to list. Optional for create: the "
-                    "task to file it under. For update: the task to move it under, 0 for the top level.",
+                    "task to file it under. For update: the task to move it under; 0 for the top level.",
                 },
                 "query": {
                     "type": "string",
-                    "description": "For list: a regular expression matched case-insensitively against titles.",
+                    "description": "For list: a regular expression matched against titles, case ignored.",
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["idea", "planned", "needs_clarification", "in_progress", "paused", "done", "all"],
-                    "description": "Required for move. Optional for create, default idea. Optional for "
-                    "list: one status, or all; without it every status but done.",
+                    "enum": [
+                        "idea", "planned", "needs_clarification", "in_progress", "paused", "done",
+                        "cancelled", "all",
+                    ],
+                    "description": "Required for move. Optional for create; the default is idea. "
+                    "Optional for list: one status, or all. Without it, list shows every status but "
+                    "done and cancelled.",
                 },
-                "position": {"type": "integer", "description": "Optional order within the column, for move."},
-                "result": {"type": "string", "description": "One-line outcome, required for move to status=done."},
+                "position": {"type": "integer", "description": "Optional for move: the order within the column."},
+                "result": {
+                    "type": "string",
+                    "description": "One line. Required for move to done (the outcome) and to "
+                    "cancelled (the reason).",
+                },
                 "depends_on": {"type": "integer", "description": "Required for link: the task that must finish first."},
                 "remove": {"type": "boolean", "description": "Optional for link: true drops the dependency instead of adding it."},
             },
@@ -1574,17 +1600,19 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "work": types.Tool(
         name="work",
-        description="Your own current work: show | finish. show gives the brief you were assigned, "
-        "the branch it is to be done on, who assigned it and its status. show with work=<id> "
-        "gives one work in full — assignee, assigner, branch, status, why it failed or paused, "
-        "the brief and its stored output tail — for your own work or any work you could close "
-        "with work_close. finish REPORTS your work and optionally opens a PR for it in the same "
-        "call (it publishes your branch first; a PR already open from that branch into the same "
-        "target is answered instead of a second one); its summary is delivered to whoever "
-        "assigned the work as your own message and wakes them — do not write to them "
-        "separately. You do not close your own work: whoever assigned it does. If they send it "
-        "back, it is open again: carry on and finish it again. A work you assigned yourself is "
-        "reported to nobody, and you close it yourself with work_close.",
+        description="Your own current work: show | finish. "
+        "show gives the brief you were assigned, the branch to do it on, who assigned it and "
+        "its status. show with work=<id> gives one work in full: assignee, assigner, branch, "
+        "status, why it failed or paused, the brief and its stored output tail. It works for "
+        "your own work and for any work you could close with work_close. "
+        "finish REPORTS your work. With pr, it first publishes your branch and then opens the "
+        "PR in the same call. If a PR from that branch into the same target is already open, "
+        "finish updates that PR instead of opening a second one: its title, and its "
+        "description when you pass a body. Without pr, nothing is published. The summary goes to whoever assigned the work, as "
+        "your own message, and wakes them. Do not write to them separately. "
+        "You do not close your own work. Whoever assigned it closes it. If they send it back, "
+        "it is open again: carry on and finish it again. A work you assigned yourself is "
+        "reported to nobody. Close it yourself with work_close.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1596,12 +1624,13 @@ _TOOLS: dict[str, types.Tool] = {
                 },
                 "summary": {
                     "type": "string",
-                    "description": "Required for finish: your report, delivered to whoever assigned "
-                    "the work as a message from you.",
+                    "description": "Required for finish: your report. It goes to whoever assigned "
+                    "the work, as a message from you.",
                 },
                 "pr": {
                     "type": "object",
-                    "description": "Optional for finish: open a PR in the same call.",
+                    "description": "Optional for finish: open a PR in the same call, or update the "
+                    "one already open from this branch.",
                     "properties": {
                         "title": {"type": "string"},
                         "body": {"type": "string"},
@@ -1616,17 +1645,21 @@ _TOOLS: dict[str, types.Tool] = {
     "pr": types.Tool(
         name="pr",
         description="Pull requests: create | comment | merge | close | list | read. A PR is always "
-        "against the superproject, from your own workspace and its current branch; create "
-        "publishes that branch itself, and never the main branch. When a PR from that branch "
-        "into the same target is already open, create publishes the branch again and answers "
-        "with that PR instead of opening a second one — that is how a branch is published "
-        "again. merge and close are the director's and the leads', on a PR by themselves or by "
-        "an agent under them. merge takes a branch only when it already contains its target; "
-        "if it does not, the branch has to take its target in first, in the workspace it comes "
-        "from, and be published again with create. merge requires delete_branch. close "
-        "withdraws the request unmerged and touches no branch. Opening, commenting on, merging "
-        "and closing a PR sends nobody anything: say() whoever should know. list shows what is "
-        "open with a comment count; read gives one PR with the text of every comment on it.",
+        "against the superproject. It comes from your own workspace and its current branch. "
+        "create publishes that branch itself. It never publishes the main branch. If a PR from "
+        "that branch into the same target is already open, create publishes the branch again "
+        "and answers with that PR. It does not open a second one. That is how you publish a "
+        "branch again. The PR's title becomes the one you pass, and its description too when "
+        "you pass a body. "
+        "merge and close are the director's and the leads'. They work on a PR you opened, or on "
+        "one an agent under you opened. merge takes a branch only when the branch already contains its "
+        "target. If it does not, the branch must take its target in first, in the workspace it "
+        "comes from, and be published again with create. merge requires delete_branch. close "
+        "withdraws the PR unmerged and touches no branch. "
+        "Opening, commenting on, merging and closing a PR sends nobody anything. say() whoever "
+        "has to act on it. "
+        "list shows the open PRs, each with a comment count. read gives one PR with the text of "
+        "every comment on it.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1644,8 +1677,8 @@ _TOOLS: dict[str, types.Tool] = {
                 "comment": {"type": "string", "description": "Required for comment."},
                 "delete_branch": {
                     "type": "boolean",
-                    "description": "Required for merge: true takes the source branch out of the "
-                    "office repository once the merge is in, false leaves it standing.",
+                    "description": "Required for merge. true takes the source branch out of the "
+                    "office repository once the merge is in. false leaves it standing.",
                 },
             },
             "required": ["op"],
@@ -1653,58 +1686,63 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "note": types.Tool(
         name="note",
-        description="The knowledge base. kind=wiki is the team's shared wiki of versioned "
-        "markdown pages: list | read | search | comment | write | undo | delete. There are no "
-        "wiki files in your workspace. list gives paths, categories, titles, versions and "
-        "comment counts without bodies; read returns one page's body, its version and every "
-        "comment on it. search takes query, a regular expression matched case-insensitively "
-        "against every page's title and each line of its body, and returns each matching page's "
-        "path, title and version with its matching lines numbered as grep -n does; comments are "
-        "not searched. comment takes path and comment; the page's version is recorded with it, "
-        "and nobody is told — say() whoever should know. write saves a page, new or existing: "
-        "omit expected_version (or 0) for a page that does not exist yet, otherwise pass the "
-        "version read gave you; a mismatch is refused. delete needs it too. undo takes a path "
-        "and puts the page back to the body it had before its last write — one step only, and "
-        "itself a write. kind=rule is the flat list of standing statements the whole office "
-        "works under; a rule is a short title plus a paragraph. list gives every rule as it "
-        "stands now, '- [rule_id] Title: text'. Your system prompt carries the rules as they "
-        "stood when your session began, and every change since reached you as a line from the "
-        "office. create | update | delete are **the director's alone**. create takes title and "
-        "text: the title is a name ('No build step', 'Branch naming'), not a summary. update "
-        "takes rule_id and text, and title only to rename it.",
+        description="The knowledge base. "
+        "kind=wiki is the team's shared wiki of versioned markdown pages: list | read | comment "
+        "| write | undo | delete. Every page is a file in your sandbox: wiki/<path>.md. The "
+        "file is brought to the page's current version at the start of each of your turns and "
+        "whenever you read that page. A file you have edited is left as it is. Read and search "
+        "the pages there with your own file tools. "
+        "list gives each page's path, category, title, version and comment count. "
+        "read gives one page's version, who wrote it last, the state of your file and every "
+        "comment on it. A file you deleted comes back as the page. "
+        "write publishes your file of the page at path. A page that does not exist yet needs "
+        "category and title. For an existing page, they rename it or re-file it. If the page "
+        "has changed since your file's version, write merges the two. Where both changed the "
+        "same lines, write publishes nothing. It marks those places in your file and says how "
+        "many there are. Settle them, remove the markers and write again. "
+        "comment takes path and comment. The page's version is recorded with the comment. "
+        "Nobody is told: say() whoever has to act on it. "
+        "undo puts the page back to the body it had before its last write. It goes back one "
+        "step only, and it is itself a write. "
+        "delete removes a page. It is refused if the page has changed since your file's "
+        "version. "
+        "kind=rule is the flat list of standing statements the whole office works under. A "
+        "rule is a short title plus a paragraph. list gives every rule as it stands now, as "
+        "'- [rule_id] Title: text'. Your system prompt carries the rules as they stood when "
+        "your session began. Every change since then reached you as a line from the office. "
+        "create | update | delete are **the director's alone**. create takes title and text. "
+        "The title is a name ('No build step', 'Branch naming'), not a summary. update takes "
+        "rule_id and text, and title only to rename the rule.",
         input_schema={
             "type": "object",
             "properties": {
                 "op": {
                     "type": "string",
-                    "enum": ["list", "read", "search", "comment", "write", "undo", "create", "update", "delete"],
+                    "enum": ["list", "read", "comment", "write", "undo", "create", "update", "delete"],
                 },
                 "kind": {"type": "string", "enum": ["wiki", "rule"]},
-                "query": {
-                    "type": "string",
-                    "description": "Wiki only: the regular expression, required for search. Case is ignored.",
-                },
                 "path": {
                     "type": "string",
-                    "description": "Wiki page path, e.g. 'runbooks/deploy'. Required for read, comment, "
-                    "write, undo, delete.",
+                    "description": "Wiki page path, e.g. 'runbooks/deploy'. Its file is "
+                    "wiki/runbooks/deploy.md in your sandbox. Required for read, comment, write, "
+                    "undo, delete.",
                 },
-                "comment": {"type": "string", "description": "Wiki only: the remark, required for comment."},
-                "category": {"type": "string", "description": "Wiki only: required for write."},
+                "comment": {"type": "string", "description": "Wiki only. The remark. Required for comment."},
+                "category": {
+                    "type": "string",
+                    "description": "Wiki: required to write a page that does not exist yet. For "
+                    "an existing page, a new value re-files it.",
+                },
                 "title": {
                     "type": "string",
-                    "description": "Wiki: page title, required for write. Rule: required for "
-                    "create; on update only to rename it.",
+                    "description": "Wiki: required to write a page that does not exist yet. For "
+                    "an existing page, a new value renames it. Rule: required for create. On "
+                    "update, only to rename the rule.",
                 },
-                "text": {"type": "string", "description": "Wiki page body, or the rule's paragraph."},
-                "expected_version": {
-                    "type": "integer",
-                    "description": "Wiki only. Omit (or 0) for a page that does not exist yet; "
-                    "otherwise the version op=read reported. Required for delete.",
-                },
+                "text": {"type": "string", "description": "Rule only: the rule's paragraph."},
                 "rule_id": {
                     "type": "integer",
-                    "description": "Rule only: required for update/delete — the [n] "
+                    "description": "Rule only. Required for update and delete: the [n] that "
                     "note(op=list, kind=rule) shows against each rule.",
                 },
             },
@@ -1713,12 +1751,13 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "ticket": types.Tool(
         name="ticket",
-        description="Tickets gate a decision on the addressee: create | comment | resolve | list | "
-        "read | link. Only the addressee or the human owner may resolve a ticket. link sets "
-        "which task this ticket is about. A ticket wakes nobody and sends nothing: say() the "
-        "addressee if it needs attention now. list is the index: ids, statuses and titles, no "
-        "bodies, of the open tickets unless status says otherwise. read gives one ticket in "
-        "full — its body, its resolution if it has one, and the text of every comment.",
+        description="Tickets: create | comment | resolve | list | read | link. A ticket is a "
+        "decision that waits on its addressee. Only the addressee or the human owner may "
+        "resolve a ticket. link sets which task the ticket is about. A ticket wakes nobody and "
+        "sends nothing. say() the addressee if it needs attention now. list is the index of the "
+        "open tickets, unless status says otherwise: ids, statuses and titles, no bodies. read "
+        "gives one ticket in full: its body, its resolution if it has one, and the text of "
+        "every comment.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1728,10 +1767,10 @@ _TOOLS: dict[str, types.Tool] = {
                 "body": {"type": "string"},
                 "addressee": {
                     "type": "string",
-                    "description": "Required for create (who must resolve this); optional filter for list.",
+                    "description": "Required for create: who must resolve it. Optional for list: a filter.",
                 },
                 "kind": {"type": "string", "description": "Required for create, e.g. 'question' or 'bug'."},
-                "task_id": {"type": "integer", "description": "Optional for create; required for link."},
+                "task_id": {"type": "integer", "description": "Optional for create. Required for link."},
                 "comment": {"type": "string", "description": "Required for comment."},
                 "resolution": {"type": "string", "description": "Required for resolve."},
                 "status": {"type": "string", "enum": ["open", "resolved", "all"], "description": "Optional for list: open (the default), resolved or all."},
@@ -1741,22 +1780,24 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "run": types.Tool(
         name="run",
-        description="Run a command in your workspace under a deadline. It is for TESTS AND TRIAL "
-        "RUNS and not a general shell: reading files, editing them and ordinary quick commands "
-        "stay on your own tools. start runs the command and waits up to 150 seconds; if it "
-        "finished you get its exit code and its output, and if it did not you get the output so "
-        "far, how long ago the last line arrived, and a handle. THE DEADLINE KILLS NOTHING: the "
-        "command is still running, op=wait waits on the handle again and op=stop kills it. "
-        "op=list gives back your own handles and what each one is doing. The whole output is "
-        "in a file the result names. stage runs the command on a stage instead of in your "
-        "workspace: a working tree the office keeps prepared, which the team uses one run at a "
-        "time (roster() lists the stages). What runs there is your working tree as it stands at "
-        "this call: your commits, your uncommitted changes and your untracked files that are "
-        "not ignored. A run waiting for its turn counts as running, and your workspace can have "
-        "one run on each stage. Files the command writes into the folder the OFFICE_ARTIFACTS "
-        "environment variable names are kept until your workspace's next run on that stage. "
-        "What the command changed in the stage's tree comes back in the result as a commit, "
-        "with the commands that bring it into your working copy.",
+        description="Run a command in your workspace under a deadline: start | wait | stop | "
+        "list. It is for TESTS AND TRIAL RUNS. It is not a general shell: read files, edit "
+        "them and run ordinary quick commands with your own tools. "
+        "start runs the command and waits up to 150 seconds. If the command finished, you get "
+        "its exit code and its output. If not, you get the output so far, how long ago the "
+        "last line came, and a handle. THE DEADLINE KILLS NOTHING: the command is still "
+        "running. op=wait waits on the handle again. op=stop kills it. op=list gives back your "
+        "own handles and what each one is doing. The whole output is in a file the result "
+        "names. "
+        "stage runs the command on a stage instead of in your workspace. A stage is a working "
+        "tree the office keeps prepared. The team uses it one run at a time. roster() lists "
+        "the stages. What runs there is your working tree as it stands at this call: your "
+        "commits, your uncommitted changes, and your untracked files that are not ignored. A "
+        "run waiting for its turn counts as running. Your workspace can have one run on each "
+        "stage. Files the command writes into the folder named by the OFFICE_ARTIFACTS "
+        "environment variable are kept until your workspace's next run on that stage. What the "
+        "command changed in the stage's tree comes back in the result as a commit, large files "
+        "included, with the commands that bring it into your working copy.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1764,12 +1805,12 @@ _TOOLS: dict[str, types.Tool] = {
                 "command": {
                     "type": "string",
                     "description": "Required for start. One shell command line, run in your "
-                    "workspace, or on the stage (PowerShell on Windows).",
+                    "workspace or on the stage (PowerShell on Windows).",
                 },
                 "stage": {
                     "type": "string",
                     "description": "Optional for start: the name of the stage to run the command "
-                    "on instead of your workspace.",
+                    "on, instead of your workspace.",
                 },
                 "handle": {
                     "type": "string",
@@ -1780,7 +1821,7 @@ _TOOLS: dict[str, types.Tool] = {
                     "type": "number",
                     "maximum": 150,
                     "description": "Optional: wait fewer than 150 seconds this time. 150 is the "
-                    "default and the ceiling; a longer one is refused.",
+                    "default and the ceiling. A longer wait is refused.",
                 },
             },
             "required": ["op"],
@@ -1788,48 +1829,55 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "roster": types.Tool(
         name="roster",
-        description="The team as it stands now: the whole team as a tree, each agent under its "
-        "manager with its title; your own standing instructions as they stand now, your "
-        "workspace and sandbox paths, the stages — each one's state, who is running on it and "
-        "who is waiting — and the deferred messages and open expectations you set. The "
-        "director's and a lead's answer adds, for every agent under it, its status and context "
-        "fill and the deferred messages and expectations it set; every work that is not "
-        "finished — running, paused, reported or failed, with who assigned it, the reason it "
-        "stopped and, for a pause, the earliest it could resume — whose assignee is under it or "
-        "which it assigned; remaining quota per runtime with its reset time; tasks that look "
-        "ready but whose dependency is not done; the model catalogue; and workspaces that "
-        "belong to nobody. The director also gets how each stage is prepared, why a broken one "
-        "broke, a reset or delete waiting on a run, the free space on the office's drive, and "
-        "directories in the workspace directory the office did not create.",
+        description="The team as it stands now. Everyone gets: the whole team as a tree, each "
+        "agent under its manager, with its title; your own standing instructions as they "
+        "stand now; your workspace and sandbox paths; the stages, each with its state, who is "
+        "running on it and who is waiting; the reminders and open expectations you set. "
+        "The director and a lead also get, for every agent under them: its status, how full "
+        "its context window is, and the reminders and expectations it set. They also get: "
+        "every work not finished (running, paused, reported or failed) whose assignee is under "
+        "them or which they assigned, with who assigned it, why it stopped and, for a pause, "
+        "the earliest it can resume; remaining quota per runtime, with its reset time; each "
+        "runtime and model held for quota, with the time before which no turn starts on it; "
+        "tasks that look ready but whose dependency is not done; the model catalogue; "
+        "workspaces that belong to nobody. "
+        "The director also gets: how each stage is prepared, why a broken one broke, a reset or "
+        "delete waiting on a run, the free space on the office's drive, and directories in the "
+        "workspace directory that the office did not create.",
         input_schema={"type": "object", "properties": {}},
     ),
     "agent": types.Tool(
         name="agent",
         description="The director's and the leads'. hire | fire | stop | compact | new_session | "
-        "instruct | instructions | move | save_profile | hire_from_profile | list_profiles. Every "
-        "op that names an existing agent takes one under you — anyone whose chain of managers "
-        "reaches you, yourself excluded. hire makes you the new agent's manager; it takes name, "
-        "title (one line naming the job, 'Economy architect'), runtime, model and, where the "
-        "runtime has one, effort, with no defaults. lead=true hires a lead, who can hire, assign "
-        "and manage under itself; without it the hire is an executor. fire refuses while the "
-        "agent still has active work — running, paused, or reported and not closed — while "
-        "anybody reports to it, while an open PR names it as author, and while a turn or a "
-        "compaction is running on its session. Its failed works, the deferred messages it set "
-        "and its open expectations go with it. instruct replaces the agent's standing "
-        "instructions with text, and empty text clears them; the agent gets the change as a "
-        "quiet line, which buys it no turn — write to it as well if it should act on them now. "
-        "instructions shows them. move puts the agent, with everyone under it, under manager — "
-        "you or a lead under you, and not the agent itself or anyone under it; it refuses while "
-        "a work in the moved part of the team would be left with an assigner that is neither "
+        "instruct | instructions | move | save_profile | hire_from_profile | list_profiles. "
+        "Every op that names an existing agent takes an agent under you: anyone whose chain of "
+        "managers reaches you, not yourself. "
+        "hire makes you the new agent's manager. It takes name, title (one line naming the "
+        "job, e.g. 'Economy architect'), runtime, model and, where the runtime has one, "
+        "effort. Nothing has a default. lead=true hires a lead, who can hire, assign and "
+        "manage under itself. Without it, the hire is an executor. "
+        "fire refuses while the agent still has active work (running, paused, or reported and "
+        "not closed), while anybody reports to it, while an open PR names it as author, and "
+        "while a turn or a compaction is running on its session. Its failed works, the "
+        "reminders it set and its open expectations go with it. "
+        "instruct replaces the agent's standing instructions with text. Empty text clears "
+        "them. The agent gets the change as a quiet line that gives it no turn. Write to it as "
+        "well if it should act on them now. instructions shows them. "
+        "move puts the agent, with everyone under it, under manager. manager is you or a lead "
+        "under you. It cannot be the agent itself or anyone under it. move refuses while a "
+        "work in the moved part of the team would be left with an assigner that is neither "
         "its assignee nor above it. The moved agent gets its new manager's name as a quiet "
-        "line, which buys it no turn; nobody else is told. stop kills an agent's turn right now "
-        "and, if it had a running work, fails that work as 'killed'. save_profile remembers a "
-        "composition by name, for every manager; hire_from_profile hires using a saved one, "
-        "with name, title and lead as hire takes them. compact has the runtime summarize a "
-        "session in place, keeping it and its id — claude only. new_session throws the "
-        "conversation away and keeps the workspace, branch and working tree; the agent's next "
-        "turn starts from a full state snapshot, on every runtime. Both are refused while a "
-        "turn or a compaction is running on the agent's session, and on yourself.",
+        "line that gives it no turn. Nobody else is told. "
+        "stop kills an agent's turn right now. If the agent had a running work, that work "
+        "fails as 'killed'. "
+        "save_profile saves a composition (runtime, model, effort) under a name, for every "
+        "manager. list_profiles lists the saved profiles. hire_from_profile hires with a saved "
+        "one, taking name, title and lead as hire does. "
+        "compact has the runtime summarize a session in place. The session and its id stay. "
+        "claude only. new_session throws the conversation away and keeps the workspace, branch "
+        "and working tree. The agent's next turn starts from a full state snapshot, on every "
+        "runtime. compact and new_session are refused while a turn or a compaction is running "
+        "on the agent's session, and on yourself.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1841,21 +1889,21 @@ _TOOLS: dict[str, types.Tool] = {
                         "list_profiles",
                     ],
                 },
-                "name": {"type": "string", "description": "Required for hire, hire_from_profile (the new agent's name: Latin letters, digits, '.', '_' and '-', starting and ending with a letter or a digit) and save_profile (the profile's name)."},
+                "name": {"type": "string", "description": "Required for hire and hire_from_profile: the new agent's name. Latin letters, digits, '.', '_' and '-', starting and ending with a letter or a digit. Required for save_profile: the profile's name."},
                 "title": {
                     "type": "string",
                     "description": "Required for hire, hire_from_profile: one line naming the new agent's job.",
                 },
                 "lead": {
                     "type": "boolean",
-                    "description": "Optional for hire, hire_from_profile: true hires a lead, otherwise an executor.",
+                    "description": "Optional for hire, hire_from_profile: true hires a lead. Otherwise the hire is an executor.",
                 },
                 "runtime": {"type": "string", "enum": ["claude", "codex", "agy"], "description": "Required for hire, save_profile."},
                 "model": {"type": "string", "description": "Required for hire, save_profile."},
-                "effort": {"type": "string", "description": "Optional, runtime-dependent."},
+                "effort": {"type": "string", "description": "Optional. It depends on the runtime."},
                 "adopt_workspace_id": {
                     "type": "string",
-                    "description": "Optional for hire/hire_from_profile: take over a workspace that belongs to nobody, as roster() lists them, instead of cloning.",
+                    "description": "Optional for hire/hire_from_profile: take over a workspace that belongs to nobody, as roster() lists them, instead of a new clone.",
                 },
                 "agent": {
                     "type": "string",
@@ -1863,7 +1911,7 @@ _TOOLS: dict[str, types.Tool] = {
                 },
                 "text": {
                     "type": "string",
-                    "description": "Required for instruct: the standing instructions in full; empty clears them.",
+                    "description": "Required for instruct: the standing instructions in full. Empty clears them.",
                 },
                 "manager": {"type": "string", "description": "Required for move: the new manager."},
                 "profile": {"type": "string", "description": "Required for hire_from_profile: the saved profile's name."},
@@ -1874,22 +1922,24 @@ _TOOLS: dict[str, types.Tool] = {
     "assign": types.Tool(
         name="assign",
         description="The director's and the leads'. Assign work, on a named branch, to yourself or "
-        "to an agent under you. The branch is yours to name; the agent creates it itself, and "
-        "nothing is reserved. You are recorded as the work's assigner. On another agent's work "
-        "its report, and a notice if it fails or pauses, come to you; the brief is delivered to "
-        "the agent as your own message, with the branch name, and it starts them — do not write "
-        "to them separately. A work assigned to yourself sends nothing, its report goes to "
-        "nobody, and a notice if it fails or pauses goes to your manager (for the director, to "
-        "the owner's journal). Returns at once even if the agent is still provisioning.",
+        "to an agent under you. You name the branch. The agent creates it itself. Nothing is "
+        "reserved. You are recorded as the work's assigner. "
+        "On another agent's work: its report comes to you, and so does a notice if it fails or "
+        "pauses. The brief goes to the agent as your own message, with the branch name, and it "
+        "starts them. Do not write to them separately. "
+        "On a work assigned to yourself: nothing is sent, the report goes to nobody, and a "
+        "notice if it fails or pauses goes to your manager (for the director, to the owner's "
+        "journal). "
+        "assign returns at once, even if the agent is still being set up.",
         input_schema={
             "type": "object",
             "properties": {
                 "agent": {"type": "string", "description": "You, or an agent under you."},
                 "brief": {
                     "type": "string",
-                    "description": "The job, delivered to the agent as a direct message from you.",
+                    "description": "The job. It goes to the agent as a direct message from you.",
                 },
-                "task_id": {"type": "integer", "description": "The kanban task this work is for. Settable only here."},
+                "task_id": {"type": "integer", "description": "The kanban task this work is for. Only assign can set it."},
                 "branch": {"type": "string"},
             },
             "required": ["agent", "brief", "branch"],
@@ -1897,21 +1947,21 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "work_close": types.Tool(
         name="work_close",
-        description="The director's and the leads'. Close a work you assigned or one whose "
-        "assignee is under you: the work record goes and the summary you pass becomes its line "
-        "on the task it belonged to. An assignee's work(op=finish) is a report, not a close; the "
-        "work stands until this. Close it when you accept the result, or when you decide the "
-        "rest of it belongs to a later job. To send it back instead, work_reassign it to the "
-        "same agent with workspace=inherit and write to them what is missing. A failed work is "
-        "refused: work_dismiss writes it off, work_reassign hands it on.",
+        description="The director's and the leads'. Close a work you assigned, or one whose "
+        "assignee is under you. The work record goes. The summary you pass becomes its line on "
+        "the task it belonged to. An assignee's work(op=finish) is a report, not a close. The "
+        "work stands until you close it. Close it when you accept the result, or when you "
+        "decide the rest of it belongs to a later job. To send it back instead, work_reassign "
+        "it to the same agent with workspace=inherit, and write to them what is missing. A "
+        "failed work is refused: work_dismiss writes it off; work_reassign hands it on.",
         input_schema={
             "type": "object",
             "properties": {
                 "work": {"type": "integer", "description": "The work's id, as roster() shows it."},
                 "summary": {
                     "type": "string",
-                    "description": "The accepted result in your own words, one line, appended to "
-                    "the task's result if the work has a task.",
+                    "description": "The accepted result in your own words, one line. It is added "
+                    "to the task's result if the work has a task.",
                 },
             },
             "required": ["work"],
@@ -1919,10 +1969,10 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "work_dismiss": types.Tool(
         name="work_dismiss",
-        description="The director's and the leads'. Write off a work that has already failed — "
-        "one you assigned or one whose assignee is under you: the work record and its stored "
-        "output tail are deleted; its task is untouched. work(op=show, work=<id>) reads the tail "
-        "before it goes. Refused on a work that is open, paused or reported.",
+        description="The director's and the leads'. Write off a work that has already failed: "
+        "one you assigned, or one whose assignee is under you. The work record and its stored "
+        "output tail are deleted. Its task is untouched. work(op=show, work=<id>) reads the "
+        "tail before it goes. Refused on a work that is open, paused or reported.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1933,26 +1983,36 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "work_reassign": types.Tool(
         name="work_reassign",
-        description="The director's and the leads'. Hand a work — one you assigned or one whose "
-        "assignee is under you — to yourself or to an agent under you, and open it again. You "
-        "become its assigner: its report and its failure and pause notices come to you from then "
-        "on. workspace=inherit gives the recipient the work's workspace as it stands, and the "
-        "agent that held it gets the recipient's former workspace in exchange; it is refused "
-        "while the work's workspace belongs to a third agent that is on a work of its own. To "
-        "the agent that already holds the work's workspace — its own assignee — nothing moves: "
-        "that is how a reported work is sent back, and how a work is taken up again after a "
-        "dead turn. workspace=fresh starts the brief again: the recipient gets a clean clone on "
-        "the project's default branch, its former workspace belongs to nobody, and whatever the "
-        "previous agent had not published stays in that agent's tree. The swap applies from "
-        "each agent's next turn. Stop a turn that is still running on the work (agent(op=stop)) "
-        "before you hand it to another agent. Every agent whose workspace changes gets a quiet "
-        "line with its new workspace and sandbox paths, which buys it no turn; nobody is sent "
-        "anything else — write to whoever should act.",
+        description="The director's and the leads'. Use it to: send a reported work back to its "
+        "assignee; take up a failed work again; pass a work to another agent under you. "
+        "Who: the work is one you assigned, or one whose assignee is under you. The recipient is "
+        "an agent under you or the work's own assignee, and has no other open work. "
+        "workspace=inherit: the recipient gets the work's workspace as it stands, with its "
+        "commits, uncommitted changes and branch. The agent that had that workspace gets the "
+        "recipient's former workspace in exchange. To the work's own assignee, which already "
+        "holds its workspace, nothing moves. "
+        "workspace=fresh: the work starts over. The recipient gets a clean clone on the "
+        "project's default branch. The recipient's former workspace belongs to nobody. "
+        "Whatever the previous holder had not published stays in that holder's tree. "
+        "Refused: while the work's assignee is in a turn; while an agent whose workspace would "
+        "change is in a turn (wait for the turn to end, or stop it with agent(op=stop)); while "
+        "the recipient is still being set up; when it would change your own workspace (a "
+        "work's code reaches your workspace when you fetch its published branch; a work that "
+        "lies in your workspace is handed on with workspace=fresh once you have published its "
+        "branch); when the work's workspace now belongs to a third agent that has an open work "
+        "(use workspace=fresh). "
+        "After it: the work is open again and you are its assigner. From then on its report "
+        "and its failure and pause notices come to you. Every agent whose workspace changed "
+        "gets a quiet line with its new workspace and sandbox paths. The line gives it no "
+        "turn. Nobody is sent anything else: write to whoever has to act.",
         input_schema={
             "type": "object",
             "properties": {
                 "work": {"type": "integer"},
-                "to_agent": {"type": "string", "description": "You, or an agent under you."},
+                "to_agent": {
+                    "type": "string",
+                    "description": "An agent under you, or the work's own assignee.",
+                },
                 "workspace": {"type": "string", "enum": ["inherit", "fresh"]},
             },
             "required": ["work", "to_agent", "workspace"],
@@ -1960,18 +2020,20 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "stage": types.Tool(
         name="stage",
-        description="Director only. create | reset | delete a stage: a working tree the office "
-        "owns, cloned from the project and prepared once, on which agents run commands one at a "
-        "time with run(op=start, stage=<name>). create takes name and prepare, one shell command "
-        "line that may be empty; it returns at once, and the stage is 'preparing' while the "
-        "office clones it, puts it on the main branch's tip and runs prepare in it. Exit code 0 "
-        "makes it 'ready'; anything else makes it 'broken', and roster() shows why. A preparing "
-        "or broken stage turns runs away. reset puts the stage back on the main branch's tip and "
-        "runs prepare again, in the tree it already has. delete removes the stage, its tree and "
-        "its refs. On a stage with a run in progress, reset and delete happen when that run ends, "
-        "and the runs waiting behind it are turned away at once. To start a stage from nothing, "
-        "delete it and create it again. Write in the rules or the wiki what each stage is for "
-        "and which commands run on it.",
+        description="Director only. create | reset | delete a stage. A stage is a working tree "
+        "the office owns, cloned from the project and prepared once. Agents run commands on it "
+        "one at a time with run(op=start, stage=<name>). "
+        "create takes name and prepare, one shell command line that may be empty. It returns "
+        "at once. The stage is 'preparing' while the office clones it, puts it on the main "
+        "branch's tip and runs prepare in it. Exit code 0 makes it 'ready'. Anything else makes "
+        "it 'broken', and roster() shows why. A preparing or broken stage turns runs away. "
+        "reset puts the stage back on the main branch's tip and runs prepare again, in the tree "
+        "it already has. "
+        "delete removes the stage, its tree and its refs. "
+        "On a stage with a run in progress, reset and delete happen when that run ends. The "
+        "runs waiting behind it are turned away at once. "
+        "To start a stage from nothing, delete it and create it again. "
+        "Write in the rules or the wiki what each stage is for and which commands run on it.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1979,11 +2041,11 @@ _TOOLS: dict[str, types.Tool] = {
                 "name": {
                     "type": "string",
                     "description": "Required. Lowercase letters, digits and hyphens, starting with "
-                    "a letter or digit, at most 40 characters.",
+                    "a letter or a digit, at most 40 characters.",
                 },
                 "prepare": {
                     "type": "string",
-                    "description": "For create: one shell command line run in the stage's tree "
+                    "description": "For create: one shell command line, run in the stage's tree "
                     "(PowerShell on Windows). Leave it out for a stage that needs no preparation.",
                 },
             },

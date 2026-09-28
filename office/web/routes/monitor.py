@@ -91,7 +91,7 @@ def monitor_wakes_fragment(request: Request):
 def cancel_wake(request: Request, wake_id: int):
     """Drops one pending wake before it fires."""
     conn = get_db(request)
-    core.drop_scheduled_message(conn, wake_id, actor=get_owner_name(conn))
+    core.cancel_scheduled_message(conn, wake_id, sender=None, actor=get_owner_name(conn))
     return templates.TemplateResponse(
         request, "partials/monitor_wakes.html", _wake_context(request)
     )

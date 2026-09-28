@@ -11,7 +11,6 @@ import time
 from pathlib import Path
 
 from office import core, db
-from office import mcp as office_mcp
 from office.adapters import shared
 from office.adapters.claude import ClaudeAdapter
 import office.bus as busmod
@@ -108,9 +107,11 @@ def start_turn(bus: Bus, conn, name: str):
 
 
 def run_inbox_hook(ws_path, identity: str):
-    """The hook script, run the way the runtime's hook command runs it."""
+    """The hook script, run the way the runtime's hook command runs it, by an
+    interpreter that cannot import the office package."""
     proc = subprocess.run(
-        [sys.executable, str(HOOK_SCRIPT), "claude", str(ws_path)],
+        [sys.executable, "-S", "-E", str(HOOK_SCRIPT), "claude", str(ws_path)],
+        cwd=str(ws_path),
         env={**os.environ, "OFFICE_AGENT": identity},
         capture_output=True,
         text=True,
@@ -205,6 +206,46 @@ def test_a_message_the_hook_took_mid_turn_is_not_handed_over_again(
     assert "the errand that arrived mid-turn" not in prompt
 
 
+def test_a_message_left_in_the_inbox_when_a_turn_ends_is_answered_for_by_the_turn_that_takes_it(
+    conn, config, monkeypatch, tmp_path
+):
+    agent_id = make_agent(conn, "exec1")
+    ws_path = make_workspace(config, conn, agent_id, "ws-left")
+    make_agent(conn, "director1", kind="director")
+    bus = Bus(conn, config)
+    monkeypatch.setattr(
+        busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter(sleep=TURN_SECONDS)
+    )
+
+    core.send_message(conn, "director1", "exec1", "the first errand")
+    start_turn(bus, conn, "exec1")
+    core.send_message(conn, "director1", "exec1", "the errand no hook took")
+    bus._tick()
+    assert shared.inbox_path(ws_path).exists()
+    finish_turn(bus, "exec1")
+
+    dump = tmp_path / "second.txt"
+    monkeypatch.setattr(
+        busmod, "adapter_for",
+        lambda runtime, cfg: StubClaudeAdapter(dump_path=dump, sleep=TURN_SECONDS),
+    )
+    start_turn(bus, conn, "exec1")
+    assert wait_until(
+        lambda: dump.exists() and "the errand no hook took" in dump.read_text(encoding="utf-8")
+    )
+    assert bus.stop_agent("exec1", core.get_owner_name(conn))["ok"]
+    finish_turn(bus, "exec1")
+
+    notice = db.query_one(
+        conn,
+        "SELECT body FROM messages WHERE sender = ? AND recipient = 'director1' ORDER BY id DESC",
+        (core.OFFICE_SENDER,),
+    )["body"]
+    assert "not processed by exec1" in notice
+    assert "the errand no hook took" in notice
+    assert "the first errand" not in notice
+
+
 # --------------------------------------------------------------------------- delivery: waiting
 
 
@@ -255,6 +296,30 @@ def test_turn_drain_spawns_a_real_process_and_delivers_the_message(conn, config,
     assert (updated["last_seen_message_id"] or 0) >= message_id
 
 
+def test_a_turn_leaves_one_usage_row_with_its_requests_and_who_woke_it(
+    conn, config, monkeypatch
+):
+    agent_id = make_agent(conn, "exec1")
+    make_workspace(config, conn, agent_id, "ws-usage")
+    make_agent(conn, "director1", kind="director")
+    bus = Bus(conn, config)
+    monkeypatch.setattr(busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter())
+
+    core.send_message(conn, "director1", "exec1", "count this")
+    start_turn(bus, conn, "exec1")
+    finish_turn(bus, "exec1")
+
+    assert wait_until(
+        lambda: db.query_one(conn, "SELECT id FROM usage_turns") is not None
+    )
+    (row,) = db.query(conn, "SELECT * FROM usage_turns")
+    assert (row["agent"], row["process"], row["woken_by"], row["outcome"]) == (
+        "exec1", "turn", "director1", "clean"
+    )
+    requests = db.query(conn, "SELECT * FROM usage_requests WHERE turn_id = ?", (row["id"],))
+    assert len(requests) == 1 and requests[0]["input_tokens"] > 0
+
+
 # --------------------------------------------------------------------------- a service's message lost with a turn
 
 
@@ -295,6 +360,84 @@ def test_a_service_message_lost_with_a_stopped_turn_rides_the_next_turn_and_buys
     assert "assetfactory" in prompt
 
 
+def test_a_dead_turn_does_not_report_its_own_brief_as_unprocessed(conn, config):
+    make_agent(conn, "director1", kind="director")
+    exec_id = make_agent(conn, "exec1", manager="director1")
+    make_workspace(config, conn, exec_id, "ws-brief")
+    core.assign_work(
+        conn, agent_id=exec_id, brief="paint the fence", task_id=None, branch="fence",
+        actor="director1",
+    )
+    core.send_message(conn, "director1", "exec1", "use the green paint")
+    head = db.query_one(conn, "SELECT MAX(id) AS m FROM messages")["m"]
+    with db.transaction(conn) as c:
+        c.execute(
+            "UPDATE agents SET turn_start_message_id = 0, last_seen_message_id = ? WHERE id = ?",
+            (head, exec_id),
+        )
+
+    Bus(conn, config)._close_turn("exec1", "tool_error", None)
+
+    notice = db.query_one(
+        conn,
+        "SELECT body FROM messages WHERE sender = ? AND recipient = 'director1' ORDER BY id DESC",
+        (core.OFFICE_SENDER,),
+    )["body"]
+    assert "use the green paint" in notice
+    assert "paint the fence" not in notice
+
+
+# --------------------------------------------------------------------------- quota hold
+
+
+def test_no_turn_starts_on_a_runtime_and_model_held_for_quota_until_its_time_of_return(
+    conn, config, monkeypatch, tmp_path
+):
+    agent_id = make_agent(conn, "exec1")
+    make_workspace(config, conn, agent_id, "ws-held")
+    bus = Bus(conn, config)
+    dump = tmp_path / "dump.txt"
+    monkeypatch.setattr(
+        busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter(dump_path=dump)
+    )
+
+    core.hold_for_quota(conn, "claude", "stub-model", int(time.time()) + 3600)
+    message_id = core.send_message(conn, "director", "exec1", "when it comes back")["id"]
+    assert not tick_until(
+        bus, lambda: bus._state("exec1").turn is not None, busmod.COALESCE_SECONDS * 2
+    )
+    assert (get_agent(conn, "exec1")["last_seen_message_id"] or 0) < message_id
+
+    core.hold_for_quota(conn, "claude", "stub-model", int(time.time()) - 1)
+    assert tick_until(
+        bus, lambda: bus._state("exec1").turn is not None, busmod.COALESCE_SECONDS * 4
+    )
+    finish_turn(bus, "exec1")
+    assert "when it comes back" in dump.read_text(encoding="utf-8")
+
+
+def test_a_paused_work_resumes_when_its_holders_next_turn_starts(conn, config, monkeypatch):
+    make_agent(conn, "director1", kind="director")
+    exec_id = make_agent(conn, "exec1", manager="director1")
+    make_workspace(config, conn, exec_id, "ws-paused")
+    work = core.assign_work(
+        conn, agent_id=exec_id, brief="paint the fence", task_id=None, branch="fence",
+        actor="director1",
+    )
+    core.pause_work(conn, work["id"], "quota_exhausted", resume_after=int(time.time()) - 1)
+    bus = Bus(conn, config)
+    monkeypatch.setattr(busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter())
+
+    core.send_message(conn, "director1", "exec1", "the quota is back, carry on")
+    start_turn(bus, conn, "exec1")
+    finish_turn(bus, "exec1")
+
+    resumed = db.query_one(conn, "SELECT * FROM works WHERE id = ?", (work["id"],))
+    assert (resumed["status"], resumed["pause_reason"], resumed["resume_after"]) == (
+        "running", None, None
+    )
+
+
 # --------------------------------------------------------------------------- expectations
 
 
@@ -322,63 +465,113 @@ def test_an_expectation_nobody_answers_wakes_its_agent(conn, config, monkeypatch
     assert "the portrait batch" in dump.read_text(encoding="utf-8")
 
 
-def test_a_remind_or_an_expectation_set_in_a_turn_is_speech_for_that_turn_only(
-    conn, config, monkeypatch
-):
-    agent_id = make_agent(conn, "exec1")
-    make_workspace(config, conn, agent_id, "ws-speech")
-    make_agent(conn, "director1", kind="director")
-    bus = Bus(conn, config)
-    monkeypatch.setattr(
-        busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter(sleep=TURN_SECONDS)
-    )
+# --------------------------------------------------------------------------- progress check
 
-    def office_messages_to(name):
-        return db.query_one(
-            conn,
-            "SELECT COUNT(*) AS n FROM messages WHERE channel = 'dm' AND sender = ? "
-            "AND recipient = ?",
+
+def read_everything(conn):
+    """Every agent has taken every message there is."""
+    with db.transaction(conn) as c:
+        c.execute("UPDATE agents SET last_seen_message_id = (SELECT MAX(id) FROM messages)")
+
+
+def office_bodies(conn, name):
+    return [
+        r["body"] for r in db.query(
+            conn, "SELECT body FROM messages WHERE sender = ? AND recipient = ? ORDER BY id",
             (core.OFFICE_SENDER, name),
-        )["n"]
+        )
+    ]
 
-    def a_turn(during):
-        core.send_message(conn, "director1", "exec1", "the next step")
-        start_turn(bus, conn, "exec1")
-        during()
-        finish_turn(bus, "exec1")
 
-    a_turn(lambda: office_mcp._h_expect(
-        conn, config, "exec1", "executor", {"about": "the batch", "within_seconds": 3600}
-    ))
-    assert office_messages_to("exec1") == 0
+def a_lead_with_a_failed_work(conn, director_model="stub-model"):
+    make_agent(conn, "director1", kind="director", model=director_model)
+    make_agent(conn, "lead1", kind="lead", manager="director1")
+    hand = make_agent(conn, "hand", manager="lead1")
+    work = core.assign_work(
+        conn, agent_id=hand, brief="dig the well", task_id=None, branch="well", actor="lead1"
+    )
+    core.fail_work(conn, work["id"], "crash")
+    read_everything(conn)
 
-    # Control: a turn that does neither is nudged, the expectation still open from
-    # the turn before notwithstanding.
-    a_turn(lambda: None)
-    assert office_messages_to("exec1") == 1
 
-    a_turn(lambda: office_mcp._h_remind(
-        conn, config, "exec1", "executor", {"to": "exec1", "text": "look again", "in_seconds": 3600}
-    ))
-    assert office_messages_to("exec1") == 1
-    assert office_messages_to("director1") == 0
+def test_a_stuck_agent_is_told_then_the_manager_above_then_the_journal(conn, config):
+    a_lead_with_a_failed_work(conn)
+    bus = Bus(conn, config)
+
+    def journal():
+        return db.query_one(conn, "SELECT COUNT(*) AS n FROM notices")["n"]
+
+    bus._check_progress()
+    assert len(office_bodies(conn, "lead1")) == 1
+    assert "dig the well" in office_bodies(conn, "lead1")[0]
+    bus._check_progress()
+    assert len(office_bodies(conn, "lead1")) == 1
+
+    read_everything(conn)
+    bus._check_progress()
+    assert len(office_bodies(conn, "director1")) == 1
+    assert "lead1 answers for" in office_bodies(conn, "director1")[0]
+
+    read_everything(conn)
+    before = journal()
+    bus._check_progress()
+    bus._check_progress()
+    assert journal() == before + 1
+
+    # A word to the stuck agent starts the chain again one level up.
+    told = len(office_bodies(conn, "director1"))
+    core.send_message(conn, "director1", "lead1", "what now?")
+    read_everything(conn)
+    bus._check_progress()
+    assert len(office_bodies(conn, "director1")) == told + 1
+    assert "lead1 answers for" in office_bodies(conn, "director1")[-1]
+
+
+def test_a_level_held_for_quota_is_passed_over(conn, config):
+    a_lead_with_a_failed_work(conn, director_model="other-model")
+    core.hold_for_quota(conn, "claude", "stub-model", int(time.time()) + 3600)
+
+    Bus(conn, config)._check_progress()
+
+    assert office_bodies(conn, "lead1") == []
+    assert len(office_bodies(conn, "director1")) == 1
+
+
+def test_nothing_moving_tells_the_director_once(conn, config):
+    make_agent(conn, "director1", kind="director")
+    make_agent(conn, "hand", manager="director1")
+    core.send_message(conn, "director1", "hand", "look into it")
+    read_everything(conn)
+    bus = Bus(conn, config)
+
+    bus._check_progress()
+    assert len(office_bodies(conn, "director1")) == 1
+    assert office_bodies(conn, "director1")[0].startswith("[office] Nothing in the office is moving")
+
+    read_everything(conn)
+    bus._check_progress()
+    core.send_message(conn, core.get_owner_name(conn), "director1", "thanks")
+    read_everything(conn)
+    bus._check_progress()
+    assert len(office_bodies(conn, "director1")) == 1
 
 
 # --------------------------------------------------------------------------- no double delivery
 
 
-def test_no_double_delivery_when_hook_and_turn_claims_race(config):
+def test_no_double_delivery_when_hook_and_piggyback_claims_race(config):
     ws = config.ws_dir / "ws-race"
     ws.mkdir(parents=True)
     shared.claim_owner(ws, "agent1")
 
     for i in range(20):
-        shared.deliver(ws, f"msg-{i}", "agent1")
+        shared.deliver(ws, f"msg-{i}", "agent1", 0)
         proc_holder: list[subprocess.Popen | None] = [None]
 
         def start_hook() -> None:
             proc_holder[0] = subprocess.Popen(
-                [sys.executable, str(HOOK_SCRIPT), "claude", str(ws)],
+                [sys.executable, "-S", "-E", str(HOOK_SCRIPT), "claude", str(ws)],
+                cwd=str(ws),
                 env={**os.environ, "OFFICE_AGENT": "agent1"},
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -491,6 +684,7 @@ def test_restart_recovery_fails_only_the_work_that_had_a_turn_on_it(conn, config
     make_agent(conn, "director1", kind="director")
     exec_id = make_agent(conn, "exec1", manager="director1", status="running")
     waiting_id = make_agent(conn, "exec2", manager="director1", status="idle")
+    make_workspace(config, conn, exec_id, "ws-restart")
     core.assign_work(
         conn, agent_id=exec_id, brief="refactor the widget", task_id=None, branch="feature-x",
         actor="director1",
@@ -580,6 +774,8 @@ def test_a_report_reaches_its_assigner_and_a_restart_tells_the_assigner_or_the_s
         conn, agent_id=lower, brief="plan the garden", task_id=None, branch="garden",
         actor="lower",
     )
+    make_workspace(config, conn, hand, "ws-hand")
+    make_workspace(config, conn, lower, "ws-lower")
     mark_mid_turn(conn, hand)
     mark_mid_turn(conn, lower)
 

@@ -36,7 +36,7 @@ CONTEXT_POLL_SECONDS = 5.0
 CONTEXT_OVERFLOW_AT = 0.85
 
 _QUOTA_SIGNS = re.compile(
-    r"usage limit|rate.?limit|quota|resource[ _]exhausted|insufficient_quota|\b429\b",
+    r"usage limit|session limit|rate.?limit|quota|resource[ _]exhausted|insufficient_quota|\b429\b",
     re.IGNORECASE,
 )
 
@@ -101,6 +101,8 @@ class ProcessGone(RuntimeError):
 class Death:
     reason: str  # context_overflow | quota_exhausted | tool_error | crash | killed
     tail: list[str] = field(default_factory=list)
+    # The text the reason was read from.
+    error: str | None = None
 
 # Every live child. Children of children are covered by the tree kill below.
 _live: set["AgentTurn"] = set()
@@ -481,8 +483,9 @@ class AgentTurn:
         if self._killed or not (
             exit_code == 0 or (self._lingered and not self.turn_end_error)
         ):
-            self.death = Death(reason=self._classify(), tail=list(self._tail))
-        # Written for every turn. office/bus.py deletes it for a turn that spoke.
+            self.death = Death(reason=self._classify(), tail=list(self._tail),
+                               error=self._last_error)
+        # Written for every turn; the agent's next turn writes over it.
         self._tail_dirty = True
         self._flush_tail()
         self._tail.clear()
@@ -529,21 +532,28 @@ def run_turn(
     `resume` separates the first turn of a session from every later one. It
     is not redundant with `session_id`; the caller has to say which.
 
-    `office_url` is this agent's own office MCP endpoint. `agent` goes into
-    the child's environment as OFFICE_AGENT.
-
-    The adapter's own `child_env()` goes in first, under the office's own
-    variables. Each runtime states its own timeout explicitly.
+    `office_url` is this agent's own office MCP endpoint.
     """
     cmd = adapter.build_command(ws, model, effort, office_url, session_id, resume)
+    turn = AgentTurn(adapter, cmd, ws, prompt, agent,
+                     env=turn_env(adapter, agent, session_id, office_url),
+                     tail_path=tail_path,
+                     context_limit=context_limit_for(adapter.runtime, model))
+    turn.start()
+    return turn
+
+
+def turn_env(adapter, agent: str, session_id: str | None, office_url: str) -> dict[str, str]:
+    """The variables a vendor process of `agent`'s session gets over the hub's
+    own environment: a turn and a compaction alike.
+
+    The adapter's own `child_env()` goes in first, under the office's own
+    variables. Each runtime states its own timeout explicitly. `agent` goes in
+    as OFFICE_AGENT.
+    """
     identity = dict(getattr(adapter, "child_env", dict)())
     identity[shared.AGENT_ENV] = agent
     if session_id:
         identity["OFFICE_SESSION"] = session_id
     identity["OFFICE_MCP_URL"] = office_url
-    turn = AgentTurn(adapter, cmd, ws, prompt, agent,
-                     env=identity,
-                     tail_path=tail_path,
-                     context_limit=context_limit_for(adapter.runtime, model))
-    turn.start()
-    return turn
+    return identity
