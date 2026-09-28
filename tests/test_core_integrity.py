@@ -68,3 +68,10 @@ def test_a_bucket_whose_reset_has_passed_reads_as_unused(conn):
     # The same reading again changes nothing, in the snapshot or in the history.
     assert core.record_quota(conn, polled) == 0
     assert db.query_one(conn, "SELECT COUNT(*) AS n FROM quota_polls")["n"] == 2
+
+    # A stored reading whose reset passes later, with no new reading, reads as unused too.
+    db.execute(conn, "UPDATE quota SET remaining_fraction = 0.3, reset_time = ? WHERE label = 'week'",
+               (str(now - 1),))
+    assert core.expire_passed_quota(conn) == 1
+    stored = {r["label"]: (r["remaining_fraction"], r["reset_time"]) for r in core.quota_buckets(conn)}
+    assert stored == {"5h": (1.0, None), "week": (1.0, None)}

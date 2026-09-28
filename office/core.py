@@ -1102,6 +1102,22 @@ def record_quota(conn, snapshots) -> int:
     return changed
 
 
+def expire_passed_quota(conn) -> int:
+    """Store every bucket whose reset time has passed as fully remaining, with no
+    reset time: a runtime nobody has used since its reset gives no fresh reading."""
+    with db.transaction(conn):
+        cur = db.execute(
+            conn,
+            "UPDATE quota SET remaining_fraction = 1.0, reset_time = NULL, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE reset_time IS NOT NULL AND CAST(reset_time AS INTEGER) <= ?",
+            (int(time.time()),),
+        )
+        if cur.rowcount:
+            _emit(conn, "quota", "quota", None, {})
+    return cur.rowcount
+
+
 def hold_for_quota(conn, runtime: str, model: str, until: int) -> None:
     """Record that `runtime` refused a turn on `model` for quota: no turn starts on
     them before `until`."""

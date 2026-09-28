@@ -1380,7 +1380,8 @@ Two numbers are normalised:
   substituted. claude's `/usage` names no year: the one that puts the moment
   nearest to now is taken;
 - a bucket whose reset time has passed is stored as fully remaining, with no
-  reset time. The history keeps the vendor's figure.
+  reset time — when a reading is saved, and in every polling round for buckets
+  no reading has refreshed. The history keeps the vendor's figure.
 
 Reading it is free for all three, with no turn, at any moment:
 

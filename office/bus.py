@@ -140,6 +140,7 @@ class Bus:
         """One round of quota polling, out of band. Also the startup round."""
         for runtime in QUOTA_RUNTIMES:
             self._poll_runtime(runtime)
+        core.expire_passed_quota(self.conn)
 
     def _poll_runtime(self, runtime: str) -> None:
         """Poll one runtime's quota: in each round, and as soon as a turn or a
@@ -152,7 +153,8 @@ class Bus:
             # Named by window (5h / week) before it is stored, for all three runtimes
             # (office/adapters/base.py).
             polled = adapter.poll_quota(self._office_session_ids(runtime))
-            self._record_quota(name_quota_windows(polled) if polled else polled)
+            if polled:
+                core.record_quota(self.conn, name_quota_windows(polled))
         except Exception:
             _log.exception("quota poll failed for %s", runtime)
 
@@ -977,17 +979,6 @@ class Bus:
                 )
         except Exception:
             _log.exception("could not record the usage of %s's %s", row["agent"], row["process"])
-
-    def _record_quota(self, snapshots) -> None:
-        """Through core, like every other mutation, so the `quota` event reaches the
-                page.
-        """
-        if not snapshots:
-            return
-        try:
-            core.record_quota(self.conn, snapshots)
-        except Exception:
-            _log.exception("could not record a quota reading")
 
     # -- compaction ---------------------------------------------------------
     #
