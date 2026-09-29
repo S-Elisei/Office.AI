@@ -232,8 +232,10 @@ class ClaudeAdapter:
         return None
 
     def quota_reset(self, error: str | None) -> int | None:
-        """When a quota refusal says the limit resets, as epoch seconds, or None."""
-        return _reset_epoch(error)
+        """When a quota refusal says the limit resets, as epoch seconds, or None: the
+        end of the named minute."""
+        at = _reset_epoch(error)
+        return at + 60 if at is not None else None
 
     def poll_quota(self, session_ids: Sequence[str] = ()) -> list[QuotaSnapshot] | None:
         """`claude -p /usage --output-format json`. Reaches the CLI only as the
@@ -373,7 +375,8 @@ def _reset_epoch(text: str) -> int | None:
 
     With a date, the year is inferred: of last year, this year and the next, the
     one that puts the moment nearest to now. A reset that has passed stays in the
-    past. Without one, it is the next time the clock in that zone shows the time.
+    past. Without one, it is the start of the next minute in that zone that shows
+    the time and has not ended yet.
 
     Returns None if the zone name does not resolve.
 
@@ -394,7 +397,7 @@ def _reset_epoch(text: str) -> int | None:
     now = datetime.now(zone)
     if month_name is None:
         when = now.replace(hour=hour, minute=int(minute or 0), second=0, microsecond=0)
-        if when <= now:
+        if when + timedelta(minutes=1) <= now:
             when += timedelta(days=1)
         return int(when.timestamp())
     month = _MONTHS.get(month_name.lower())

@@ -451,8 +451,8 @@ class CodexAdapter:
     def quota_reset(self, error: str | None) -> int | None:
         """When a quota refusal says to try again, as epoch seconds, or None.
 
-        The moment is read in the machine's own zone; without a date, it is the
-        next time the clock shows it.
+        The moment is read in the machine's own zone, and is the end of the named
+        minute. Without a date, it is the next time that minute ends.
         """
         match = _TRY_AGAIN.search(error or "")
         if match is None:
@@ -462,11 +462,11 @@ class CodexAdapter:
             now = datetime.now()
             at = datetime.strptime(clock, "%I:%M %p")
             when = now.replace(hour=at.hour, minute=at.minute, second=0, microsecond=0)
-            if when <= now:
+            if when + timedelta(minutes=1) <= now:
                 when += timedelta(days=1)
         else:
             when = datetime.strptime(f"{month} {day} {year} {clock}", "%b %d %Y %I:%M %p")
-        return int(when.timestamp())
+        return int(when.timestamp()) + 60
 
     def turn_requests(self, session_id: str | None, since: str) -> list[dict]:
         """The model requests of this thread from `since` on, read off its

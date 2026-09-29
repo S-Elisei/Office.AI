@@ -107,8 +107,8 @@ def test_each_vendors_quota_refusal_names_its_time_of_return():
     refusal = "You've hit your session limit · resets 12:50am (Europe/Istanbul)"
     assert _QUOTA_SIGNS.search(refusal)
     back = ClaudeAdapter(bin_path="claude").quota_reset(refusal)
-    assert now < back <= now + 86400
-    local = datetime.fromtimestamp(back, ZoneInfo("Europe/Istanbul"))
+    assert now < back <= now + 86400 + 60
+    local = datetime.fromtimestamp(back - 60, ZoneInfo("Europe/Istanbul"))
     assert (local.hour, local.minute) == (0, 50)
 
     # codex: both forms copied verbatim from codex rollout files.
@@ -119,7 +119,7 @@ def test_each_vendors_quota_refusal_names_its_time_of_return():
         "Sep 10th, 2026 1:43 AM."
     )
     assert _QUOTA_SIGNS.search(refusal)
-    assert codex.quota_reset(refusal) == int(datetime(2026, 9, 10, 1, 43).timestamp())
+    assert codex.quota_reset(refusal) == int(datetime(2026, 9, 10, 1, 43).timestamp()) + 60
     back = codex.quota_reset(refusal.replace("Sep 10th, 2026 1:43 AM", "3:20 PM"))
-    assert now < back <= now + 86400
-    assert (datetime.fromtimestamp(back).hour, datetime.fromtimestamp(back).minute) == (15, 20)
+    assert now < back <= now + 86400 + 60
+    assert (datetime.fromtimestamp(back - 60).hour, datetime.fromtimestamp(back - 60).minute) == (15, 20)
