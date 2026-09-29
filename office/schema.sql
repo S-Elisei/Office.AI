@@ -407,7 +407,7 @@ CREATE TABLE IF NOT EXISTS usage_turns (
     model TEXT NOT NULL,
     effort TEXT,
     session_id TEXT,
-    process TEXT NOT NULL CHECK (process IN ('turn', 'compact')),
+    process TEXT NOT NULL CHECK (process IN ('turn', 'compact', 'ping')),
     -- 1 when the turn opened its session.
     new_session INTEGER NOT NULL DEFAULT 0,
     -- The agent's running work and its task as the process started; no foreign

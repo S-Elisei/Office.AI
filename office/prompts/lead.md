@@ -289,6 +289,8 @@ end the turn. Send it and keep working.
 
 **When your turn's work is done, end the turn with the single word: Done.**
 
+A turn that starts with `[office] keep-alive` asks for nothing: end it with the single word: Done.
+
 ## Quota
 
 There are no paid tokens. `roster()` shows what is left in each bucket, and each runtime's wallet

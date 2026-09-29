@@ -56,6 +56,17 @@ QUOTA_RUNTIMES = ("claude", "codex", "agy")
 # thread, and one round at startup.
 MODEL_POLL_SECONDS = 3600.0
 
+# Seconds after an agent's last process ended at which a keep-alive turn is due
+# (_keep_alive_due), seconds after which none is, and its whole prompt. Documented
+# for claude, measured for codex: the prompt cache lives about one hour.
+KEEP_ALIVE_SECONDS = 55 * 60
+CACHE_SECONDS = 60 * 60
+KEEP_ALIVE_PROMPT = "[office] keep-alive"
+
+# How many keep-alive turns in a row each runtime allows an agent; a runtime not
+# named gets none.
+KEEP_ALIVE_CAPS = {"claude": 8, "codex": 5}
+
 # The office's one-shot timer for its run/pause switch: a settings row holding the
 # state to switch to, "run" or "pause", and the epoch second, separated by a space.
 # Empty when no timer is set.
@@ -86,6 +97,8 @@ class _AgentState:
     # True for exactly as long as a compaction of this agent's session is
     # running. _start_turn refuses while it is set.
     compacting: bool = False
+    # Whether the turn now running is a keep-alive turn.
+    pinging: bool = False
 
 
 class Bus:
@@ -458,7 +471,7 @@ class Bus:
             if pending.anything:
                 # The inbox is a forward cache for a turn already in progress: a hook
                 # only fires on the agent's own activity, and an idle agent has none.
-                if running:
+                if running and not state.pinging:
                     self._cache_for_hook(agent, pending)
                 if pending.guaranteed:
                     # Common chat never buys a turn of its own; a direct message
@@ -494,6 +507,60 @@ class Bus:
                         # exception. The debt stands and the queue keeps growing;
                         # this timer is what brings it back.
                         state.drain_at = now + COALESCE_SECONDS
+
+            if self.running and self._keep_alive_due(agent, state):
+                self._start_turn(agent, ping=True)
+
+    def _keep_alive_due(self, agent: dict, state: "_AgentState") -> bool:
+        """Whether an agent is due a keep-alive turn.
+
+                It is on a runtime KEEP_ALIVE_CAPS names, idle, with a session, no unread
+                direct message and no quota hold; its last process of any kind ended
+                KEEP_ALIVE_SECONDS ago but not CACHE_SECONDS ago, and it has not had its
+                runtime's cap of keep-alives in a row; and it waits on somebody: it has
+                assigned a running work whose holder has a turn that is not itself a
+                keep-alive, or, an executor, it holds a work of its own that is running
+                or reported.
+        """
+        if (
+            agent["runtime"] not in KEEP_ALIVE_CAPS or not agent["session_id"]
+            or state.turn is not None or state.compacting
+        ):
+            return False
+        cap = KEEP_ALIVE_CAPS[agent["runtime"]]
+        latest = db.query(
+            self.conn,
+            "SELECT process, ended_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) AS recent, "
+            "ended_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) AS cached "
+            "FROM usage_turns WHERE agent = ? ORDER BY id DESC LIMIT ?",
+            (f"-{KEEP_ALIVE_SECONDS} seconds", f"-{CACHE_SECONDS} seconds", agent["name"], cap),
+        )
+        if not latest or latest[0]["recent"] or not latest[0]["cached"]:
+            return False
+        if len(latest) == cap and all(r["process"] == "ping" for r in latest):
+            return False
+        if core.quota_hold(self.conn, agent["runtime"], agent["model"]) is not None:
+            return False
+        if db.query_one(
+            self.conn,
+            "SELECT 1 FROM messages WHERE channel = 'dm' AND recipient = ? AND id > ?",
+            (agent["name"], agent["last_seen_message_id"] or 0),
+        ) is not None:
+            return False
+        for holder in db.query(
+            self.conn,
+            "SELECT agents.name FROM works JOIN agents ON agents.id = works.agent_id "
+            "WHERE works.assigned_by_agent_id = ? AND works.status = 'running'",
+            (agent["id"],),
+        ):
+            held = self._state(holder["name"])
+            if held.turn is not None and not held.pinging:
+                return True
+        return agent["kind"] == "executor" and db.query_one(
+            self.conn,
+            "SELECT 1 FROM works WHERE agent_id = ? AND status IN ('running', 'done')",
+            (agent["id"],),
+        ) is not None
 
     # -- the office's alarm ------------------------------------------------
 
@@ -799,7 +866,11 @@ class Bus:
 
     # -- the turn drain ----------------------------------------------------
 
-    def _start_turn(self, agent: dict) -> bool:
+    def _start_turn(self, agent: dict, ping: bool = False) -> bool:
+        """Start a turn for `agent`. With `ping`, a keep-alive turn instead: the
+                agent's session is resumed with KEEP_ALIVE_PROMPT alone, nothing is
+                delivered and no watermark moves.
+        """
         name = agent["name"]
         state = self._state(name)
         if not state.lock.acquire(blocking=False):
@@ -819,6 +890,8 @@ class Bus:
             if agent is None:
                 return False  # fired since the tick read it
             agent = dict(agent)
+            if ping and not agent["session_id"]:
+                return False  # dropped since the tick read it
             if core.quota_hold(self.conn, agent["runtime"], agent["model"]) is not None:
                 return False  # messages wait for the time of return
             ws = self._workspace_of(name)
@@ -837,16 +910,17 @@ class Bus:
                 shared.system_prompt_path(ws).write_text(system, encoding="utf-8")
                 system = ""
 
-            fresh = self._undelivered(agent)
-            prompt = self._compose(agent, fresh, resume, system)
+            fresh = _Pending() if ping else self._undelivered(agent)
+            prompt = KEEP_ALIVE_PROMPT if ping else self._compose(agent, fresh, resume, system)
             if not prompt:
                 # Nothing left to send: the hook took it mid-turn. The debt
                 # is discharged, not deferred.
                 return True
             wiki_files.sync(self.conn, self.config, ws.name)
             state.wake_times.append(time.monotonic())
-            core.resume_paused_work(self.conn, agent["id"])
-            usage = self._usage_meta(agent, session_id, "turn")
+            if not ping:
+                core.resume_paused_work(self.conn, agent["id"])
+            usage = self._usage_meta(agent, session_id, "ping" if ping else "turn")
             usage.row.update(
                 new_session=int(not resume),
                 woken_by=",".join(fresh.senders) or None,
@@ -869,6 +943,7 @@ class Bus:
                 tail_path=self.config.tails_dir / f"{name}.log",
             )
             state.turn = turn
+            state.pinging = ping
             # Cleared here, under the same lock that installs the turn.
             state.silence_reported = False
             # A turn exists, so whatever the office last failed to do for this agent
@@ -878,8 +953,9 @@ class Bus:
             state.tick_failure_at = 0.0
             # Watermark only once the process exists. The same write opens the range
             # this turn will have to be answered for.
-            self._mark_turn_start(agent, fresh)
-            if agent["kind"] == "director":
+            if not ping:
+                self._mark_turn_start(agent, fresh)
+            if agent["kind"] == "director" and not ping:
                 self._director_stopped = False
             self._set_status(agent["id"], "running")
             threading.Thread(target=self._watch, args=(name, turn, usage), daemon=True).start()
@@ -951,16 +1027,18 @@ class Bus:
             if agent:
                 self._record_context(agent["id"], turn.context_used, turn.context_limit)
                 self._set_status(agent["id"], "idle")
-            if reason is not None:
+            if reason is not None and not state.pinging:
                 self._record_death(name, turn, resume_after)
+            # Before the turn is let go: _keep_alive_due reads the row.
+            self._record_usage(usage, turn)
         finally:
             # Unconditionally: _start_turn refuses for as long as this is set.
             state.turn = None
 
         # Whatever became of this turn, the owner's journal gets one line about
-        # it.
-        self._journal_turn_end(name, reason, runtime, model, resume_after)
-        self._record_usage(usage, turn)
+        # it; a keep-alive's only line is a quota wall.
+        if not state.pinging or reason == "quota_exhausted":
+            self._journal_turn_end(name, reason, runtime, model, resume_after)
         self._poll_runtime(runtime)
         # Anything that arrived while the turn ran is now deliverable.
         self._schedule()

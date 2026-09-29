@@ -843,3 +843,150 @@ def test_a_report_reaches_its_assigner_and_a_restart_tells_the_assigner_or_the_s
     to_director = last_from(core.OFFICE_SENDER, "director1")
     assert "mend the gate" in to_director and "plan the garden" in to_director
     assert last_from(core.OFFICE_SENDER, "hand") is None
+
+
+# --------------------------------------------------------------------------- the keep-alive turn
+
+
+def add_usage_row(conn, agent, process, ended_minutes_ago, runtime="claude"):
+    with db.transaction(conn) as c:
+        c.execute(
+            "INSERT INTO usage_turns (agent, agent_kind, runtime, model, process, started_at, "
+            "ended_at, outcome) VALUES (?, 'executor', ?, 'stub-model', ?, "
+            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?), strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?), "
+            "'clean')",
+            (agent, runtime, process, f"-{ended_minutes_ago + 1} minutes",
+             f"-{ended_minutes_ago} minutes"),
+        )
+
+
+def test_a_keep_alive_turn_is_due_for_an_agent_waiting_on_a_holder_at_work_and_delivers_nothing(
+    conn, config, monkeypatch, tmp_path
+):
+    director_id = make_agent(conn, "director1", kind="director")
+    exec_id = make_agent(conn, "exec1", manager="director1")
+    make_workspace(config, conn, director_id, "ws-director")
+    make_workspace(config, conn, exec_id, "ws-exec")
+    core.assign_work(
+        conn, agent_id=exec_id, brief="paint the fence", task_id=None, branch="fence",
+        role="coding", complexity="medium", actor="director1",
+    )
+    with db.transaction(conn) as c:
+        c.execute("UPDATE agents SET session_id = 'sess-director' WHERE id = ?", (director_id,))
+    bus = Bus(conn, config)
+    dump = tmp_path / "dump.txt"
+    monkeypatch.setattr(
+        busmod, "adapter_for",
+        lambda runtime, cfg: StubClaudeAdapter(dump_path=dump, sleep=TURN_SECONDS),
+    )
+
+    def due() -> bool:
+        return bus._keep_alive_due(dict(get_agent(conn, "director1")), bus._state("director1"))
+
+    def last_process_ended(minutes_ago: int) -> None:
+        with db.transaction(conn) as c:
+            c.execute(
+                "UPDATE usage_turns SET ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) "
+                "WHERE agent = 'director1'",
+                (f"-{minutes_ago} minutes",),
+            )
+
+    add_usage_row(conn, "director1", "turn", 56)
+    assert not due()  # the holder has no turn
+    core.send_message(conn, "director1", "exec1", "start")
+    start_turn(bus, conn, "exec1")
+    assert due()
+
+    last_process_ended(54)
+    assert not due()  # too soon
+    last_process_ended(61)
+    assert not due()  # too late
+    last_process_ended(56)
+    assert due()
+
+    message_id = core.send_message(conn, "exec1", "director1", "an unread message")["id"]
+    assert not due()
+
+    # The executor's stub has written the dump before the keep-alive's overwrites it.
+    assert wait_until(lambda: dump.exists() and dump.read_text(encoding="utf-8") != "")
+    assert bus._start_turn(dict(get_agent(conn, "director1")), ping=True) is True
+    finish_turn(bus, "director1")
+    assert wait_until(lambda: bus._state("exec1").turn is None)
+
+    assert dump.read_text(encoding="utf-8") == busmod.KEEP_ALIVE_PROMPT
+    ping = db.query_one(conn, "SELECT * FROM usage_turns WHERE process = 'ping'")
+    assert (ping["agent"], ping["session_id"]) == ("director1", "sess-director")
+    director = get_agent(conn, "director1")
+    assert (director["last_seen_message_id"] or 0) < message_id
+    assert director["turn_start_message_id"] is None
+
+
+def test_an_executor_with_an_open_work_of_its_own_is_due_a_keep_alive_up_to_its_runtimes_cap_in_a_row(
+    conn, config
+):
+    director_id = make_agent(conn, "director1", kind="director")
+    lead_id = make_agent(conn, "lead1", kind="lead", manager="director1")
+    claude_id = make_agent(conn, "exec1", manager="lead1")
+    codex_id = make_agent(conn, "exec2", manager="lead1", runtime="codex")
+    with db.transaction(conn) as c:
+        c.execute("UPDATE agents SET session_id = 'sess'")
+    bus = Bus(conn, config)
+
+    def due(name: str) -> bool:
+        return bus._keep_alive_due(dict(get_agent(conn, name)), bus._state(name))
+
+    def read_everything(name: str) -> None:
+        with db.transaction(conn) as c:
+            c.execute(
+                "UPDATE agents SET last_seen_message_id = (SELECT MAX(id) FROM messages) WHERE name = ?",
+                (name,),
+            )
+
+    add_usage_row(conn, "exec1", "turn", 56)
+    add_usage_row(conn, "lead1", "turn", 56)
+    assert not due("exec1")  # no work
+    work = core.assign_work(
+        conn, agent_id=claude_id, brief="paint the fence", task_id=None, branch="fence",
+        role="coding", complexity="medium", actor="lead1",
+    )
+    assert not due("exec1")  # its brief is unread
+    read_everything("exec1")
+    assert due("exec1")
+    core.pause_work(conn, work["id"], "quota_exhausted", resume_after=None)
+    assert not due("exec1")
+    core.assign_work(
+        conn, agent_id=lead_id, brief="plan the garden", task_id=None, branch="garden",
+        role=None, complexity=None, actor="director1",
+    )
+    read_everything("lead1")
+    assert not due("lead1")  # a lead's own work does not make it wait
+
+    core.assign_work(
+        conn, agent_id=codex_id, brief="mend the gate", task_id=None, branch="gate", role="coding",
+        complexity="medium", actor="lead1"
+    )
+    read_everything("exec2")
+    for _ in range(4):
+        add_usage_row(conn, "exec2", "ping", 56, runtime="codex")
+    assert due("exec2")
+    add_usage_row(conn, "exec2", "ping", 56, runtime="codex")
+    assert not due("exec2")
+    add_usage_row(conn, "exec2", "turn", 56, runtime="codex")
+    assert due("exec2")
+
+    core.hold_for_quota(conn, "codex", "stub-model", int(time.time()) + 600)
+    assert not due("exec2")
+
+    claude2_id = make_agent(conn, "exec3", manager="lead1")
+    with db.transaction(conn) as c:
+        c.execute("UPDATE agents SET session_id = 'sess' WHERE id = ?", (claude2_id,))
+    core.assign_work(
+        conn, agent_id=claude2_id, brief="weed the beds", task_id=None, branch="beds",
+        role="coding", complexity="medium", actor="lead1",
+    )
+    read_everything("exec3")
+    for _ in range(7):
+        add_usage_row(conn, "exec3", "ping", 56)
+    assert due("exec3")
+    add_usage_row(conn, "exec3", "ping", 56)
+    assert not due("exec3")

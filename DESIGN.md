@@ -457,6 +457,40 @@ While the office is paused:
 - quota polling, quota holds, the owner's interface, the compact button and the
   director's stop button work as ever.
 
+### The keep-alive turn
+
+An idle claude or codex agent that waits on somebody gets a **keep-alive turn**: its
+session is resumed, through the same command a real turn of it uses, with the prompt
+`[office] keep-alive` and nothing else. agy agents never get one. The bus tick starts
+one when all of these hold:
+
+- the office is running, the agent has a session, no turn and no compaction is running
+  on it, it has no unread direct message, and its runtime and model are not under a
+  quota hold;
+- at least 55 and less than 60 minutes have passed since its last vendor process of
+  any kind ended (`usage_turns.ended_at`, keep-alives included); an agent with no
+  process on record gets none;
+- its last processes — eight for claude, five for codex — are not all keep-alives;
+- it waits on somebody: it has assigned a work that is `running` and whose holder has
+  a turn running that is not itself a keep-alive; or it is an executor holding a work
+  of its own that is `running` or `done` (reported, awaiting its assigner). A `paused`
+  or `failed` work does not count, and a lead's or the director's own work does not
+  make it eligible.
+
+It repeats every 55 minutes for as long as that holds, up to eight in a row for claude
+and five for codex; a real turn of the agent resets the count.
+
+A keep-alive delivers nothing: it reads nothing from the queue, writes nothing to
+the inbox, moves no watermark and sets no turn-start marker, so a message that
+arrives while it runs stays unread and buys the next turn once it ends. It does not
+resume a paused work and does not clear the owner's stop of the director. In every
+other respect it is a turn: the agent shows as `running`, a quota hold defers it, its
+output tail overwrites the agent's tail file, and its row in `usage_turns` has the
+process `ping`. The progress check and every reader of whether a turn is running see
+it as a turn. Its death is not handled like a turn's: it fails or pauses no work, sends
+no message and drops no session; a quota refusal still holds the runtime and is the
+only keep-alive end the owner's journal records.
+
 ### Expectations
 
 `expect(about, within_seconds)` records an open expectation — a random token, the
@@ -1971,8 +2005,8 @@ office did not create. Apart from the caller's own instructions and paths, which
 system prompt carries as they stood when the session was created, none of that is in
 any system prompt.
 
-`remind` is the only alarm in the system. A turn is bought by a message and by
-nothing else, so an agent that needs to continue later leaves itself a message and
+`remind` is the only alarm in the system. Apart from the keep-alive (section 4), a turn
+is bought by a message and by nothing else, so an agent that needs to continue later leaves itself a message and
 ends its turn. The row sits in `scheduled_messages`; on its tick the bus takes what
 has come due and sends it by the ordinary `say` path, then deletes the row — from
 there it is an ordinary message, with its own turn, its own thread and its own

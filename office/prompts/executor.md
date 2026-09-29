@@ -259,6 +259,8 @@ have to end the turn. Send it and keep working.
 
 **When your turn's work is done, end the turn with the single word: Done.**
 
+A turn that starts with `[office] keep-alive` asks for nothing: end it with the single word: Done.
+
 ## Before a pull request
 
 Run `git fetch origin`. Then merge `origin/<target branch>` into your branch.
