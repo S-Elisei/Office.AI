@@ -128,8 +128,10 @@ def render_markdown(text: str | None) -> str:
 
 
 from office.web.routes.nav import nav_counts as _nav_counts  # noqa: E402
+from office.web.routes.nav import office_switch as _office_switch  # noqa: E402
 
 templates.env.globals["nav_counts"] = _nav_counts
+templates.env.globals["office_switch"] = _office_switch
 templates.env.filters["fmt_time"] = fmt_time
 templates.env.filters["fmt_duration"] = fmt_duration
 templates.env.filters["pct"] = pct

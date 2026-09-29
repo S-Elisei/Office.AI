@@ -70,7 +70,7 @@
     for (const field of fields) {
       const details = field.closest("details");
       if (details && !details.open) continue;
-      if (field.value !== field.defaultValue) return true;
+      if (field.value !== field.defaultValue || field.validity.badInput) return true;
     }
     return false;
   }

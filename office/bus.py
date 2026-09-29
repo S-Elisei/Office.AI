@@ -56,6 +56,11 @@ QUOTA_RUNTIMES = ("claude", "codex", "agy")
 # thread, and one round at startup.
 MODEL_POLL_SECONDS = 3600.0
 
+# The office's one-shot timer for its run/pause switch: a settings row holding the
+# state to switch to, "run" or "pause", and the epoch second, separated by a space.
+# Empty when no timer is set.
+SWITCH_TIMER_SETTING = "switch_timer"
+
 # The event kinds that can change what this module has to do.
 _WAKING_KINDS = frozenset({"messages"})
 
@@ -92,6 +97,10 @@ class Bus:
         # Set when the owner stops the director's turn, cleared when the director's
         # next turn starts. In memory.
         self._director_stopped = False
+        # The office's switch. A bus that has not been started runs; start() pauses it.
+        # While it is False, _tick_agent starts no turn but one for an owner's direct
+        # message, and the progress check does not run. In memory.
+        self.running = True
         # The progress check's chains, by stuck agent (_check_progress), and the id
         # of the last message telling the director that nothing moves. In memory.
         self._stalls: dict[str, dict] = {}
@@ -107,10 +116,14 @@ class Bus:
         for warning in self.health():
             _log.warning("%s", warning)
         self._install_agy_mcp()
+        # A timer whose moment passed while the hub was down is dropped.
+        timer = self.switch_timer()
+        if timer is not None and timer[1] <= time.time():
+            self.cancel_switch_timer()
+        self.set_running(False, "the hub started")
         self._thread = threading.Thread(target=self._loop, daemon=True, name="office-bus")
         self._thread.start()
-        # One round immediately, then every QUOTA_POLL_SECONDS. Off-thread.
-        threading.Thread(target=self.poll_quota_now, daemon=True, name="office-quota-first").start()
+        # The first round is the bus loop's; this thread carries every round after it.
         threading.Thread(target=self._quota_loop, daemon=True, name="office-quota").start()
         # Same two-thread shape as quota.
         threading.Thread(target=self.poll_models_now, daemon=True, name="office-models-first").start()
@@ -137,7 +150,8 @@ class Bus:
             self.poll_quota_now()
 
     def poll_quota_now(self) -> None:
-        """One round of quota polling, out of band. Also the startup round."""
+        """One round of quota polling, out of band. Also the round the bus loop runs
+                before its first tick."""
         for runtime in QUOTA_RUNTIMES:
             self._poll_runtime(runtime)
         core.expire_passed_quota(self.conn)
@@ -315,6 +329,56 @@ class Bus:
     def _schedule(self) -> None:
         self._wakeup.set()
 
+    # -- the office's switch -----------------------------------------------
+
+    def set_running(self, running: bool, cause: str, actor: str | None = None) -> None:
+        """Set the office running or paused, and journal the flip with its cause.
+                Setting the state it is already in does nothing.
+
+                Paused, no turn starts, for a keep-alive or any message, except a
+                direct message from the owner to its addressee; turns already running
+                go on, and messages are still stored and wait. Switching to running
+                drops the progress check's chains and puts its first check a full
+                interval away.
+        """
+        if self.running == running:
+            return
+        self.running = running
+        if running:
+            self._stalls.clear()
+            self._progress_due = time.monotonic() + PROGRESS_CHECK_SECONDS
+        core.record_notice(
+            self.conn, "info",
+            f"The office is now {'running' if running else 'paused'} ({cause}).",
+            actor=actor,
+        )
+        self._schedule()
+
+    def switch_timer(self) -> tuple[str, int] | None:
+        """The pending timer as ("run" or "pause", epoch second), or None."""
+        raw = core.get_setting(self.conn, SWITCH_TIMER_SETTING, "")
+        if not raw:
+            return None
+        to, at = raw.split()
+        return to, int(at)
+
+    def set_switch_timer(self, to: str, at: int, actor: str) -> None:
+        """Set the one-shot timer to switch the office to `to`, "run" or "pause", at
+                the epoch second `at`, replacing a pending one."""
+        core.set_setting(self.conn, SWITCH_TIMER_SETTING, f"{to} {at}", actor=actor)
+
+    def cancel_switch_timer(self, actor: str | None = None) -> None:
+        core.set_setting(self.conn, SWITCH_TIMER_SETTING, "", actor=actor)
+
+    def _fire_due_switch(self, now: float) -> None:
+        """Switch the office as the timer says once its moment has come, and clear
+                the timer."""
+        timer = self.switch_timer()
+        if timer is None or timer[1] > now:
+            return
+        self.cancel_switch_timer()
+        self.set_running(timer[0] == "run", "by the timer")
+
     # -- the free piggyback drain -----------------------------------------
 
     def piggyback(self, agent_name: str) -> str | None:
@@ -332,6 +396,8 @@ class Bus:
     # the recipient name itself.
 
     def _loop(self) -> None:
+        # The first quota round runs to its end before the first tick.
+        self.poll_quota_now()
         while not self._stopping.is_set():
             self._wakeup.wait(timeout=TICK_SECONDS)
             self._wakeup.clear()
@@ -345,6 +411,9 @@ class Bus:
 
     def _tick(self) -> None:
         now = time.monotonic()
+        # Before the agents are read: a timer that runs the office is honoured in
+        # this same pass.
+        self._fire_due_switch(time.time())
         # Before the queue is read, not after: a wake sent on this tick reaches
         # its recipient in this same pass.
         try:
@@ -369,7 +438,7 @@ class Bus:
                 # as logged.
                 _log.exception("bus tick failed for %s", agent["name"])
                 self._note_tick_failure(agent, exc)
-        if now >= self._progress_due:
+        if self.running and now >= self._progress_due:
             self._progress_due = now + PROGRESS_CHECK_SECONDS
             try:
                 self._check_progress()
@@ -407,7 +476,10 @@ class Bus:
                 # before it is delivered.
                 self._advance(agent, pending)
 
-            if state.owes_turn and state.drain_at is not None and now >= state.drain_at:
+            if (
+                state.owes_turn and state.drain_at is not None and now >= state.drain_at
+                and (self.running or pending.from_owner)
+            ):
                 # The timer is cleared only by a turn that actually started,
                 # and re-armed in a finally.
                 started = False
@@ -490,7 +562,7 @@ class Bus:
             "SELECT * FROM messages WHERE id > ? ORDER BY id",
             (agent["last_seen_message_id"] or 0,),
         )
-        return _Pending.build(agent, messages)
+        return _Pending.build(agent, messages, core.get_owner_name(self.conn))
 
     def _cache_for_hook(self, agent: dict, pending: "_Pending") -> None:
         """Write the queue where the hook will find it, and mark it delivered.
@@ -1706,8 +1778,12 @@ class Bus:
         if director is None:
             return
         # The director hears of every interrupted work; everybody else only of
-        # what it would have been told of, and only when there is something.
-        messages = {director["name"]: (list(interrupted), told.get(director["name"], ([], []))[1])}
+        # what it would have been told of. Nobody is written to when nothing was
+        # interrupted.
+        director_leads = told.get(director["name"], ([], []))[1]
+        messages = {}
+        if interrupted or director_leads:
+            messages[director["name"]] = (list(interrupted), director_leads)
         for recipient, (works, leads) in told.items():
             if recipient != director["name"]:
                 messages[recipient] = (works, leads)
@@ -1849,6 +1925,8 @@ class _Pending:
     last_message_id: int = 0
     # The distinct senders of its direct messages, in order.
     senders: list[str] = field(default_factory=list)
+    # Whether one of its direct messages is the owner's.
+    from_owner: bool = False
     chat_count: int = 0
     quiet_count: int = 0
 
@@ -1860,7 +1938,7 @@ class _Pending:
         return "\n".join(self.lines)
 
     @classmethod
-    def build(cls, agent: dict, messages) -> "_Pending":
+    def build(cls, agent: dict, messages, owner: str) -> "_Pending":
         pending = cls()
         name = agent["name"]
         chat_lines: list[tuple[int, int]] = []  # (index in lines, message id)
@@ -1881,6 +1959,8 @@ class _Pending:
                 pending.guaranteed = True
                 if row["sender"] not in pending.senders:
                     pending.senders.append(row["sender"])
+                if row["sender"] == owner:
+                    pending.from_owner = True
                 # Both prefixes say what they are in words.
                 if row["sender"] == name:
                     # The wake it set for itself, come due. Labelled as what it
@@ -2253,8 +2333,6 @@ def _restart_killed_director(interrupted: list) -> str:
 def _restart_delta(interrupted: list, leads: list[str]) -> str:
     """The office's message after a restart: the interrupted works and the leads
     reporting to the recipient whose turn died."""
-    if not interrupted and not leads:
-        return f"[office] {_restart_summary(interrupted)} Pick up wherever you left off."
     if interrupted:
         lines = [
             f"[office] {_restart_summary(interrupted)}",

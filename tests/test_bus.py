@@ -722,21 +722,69 @@ def test_restart_recovery_fails_only_the_work_that_had_a_turn_on_it(conn, config
     assert bus._wakeup.is_set()
 
 
-def test_restart_recovery_with_nothing_interrupted_still_wakes_the_director(conn, config):
+def test_restart_recovery_with_nothing_interrupted_sends_no_message(conn, config):
     make_agent(conn, "director1", kind="director")
 
+    Bus(conn, config).recover_after_restart()
+
+    assert db.query_one(conn, "SELECT id FROM messages") is None
+    assert "Nothing was in progress" in db.query_one(conn, "SELECT text FROM notices")["text"]
+
+
+# --------------------------------------------------------------------------- the switch
+
+
+def test_a_paused_office_starts_a_turn_for_the_owners_direct_message_only(
+    conn, config, monkeypatch, tmp_path
+):
+    agent_id = make_agent(conn, "exec1")
+    make_workspace(config, conn, agent_id, "ws-paused")
     bus = Bus(conn, config)
-    bus._wakeup.clear()
-    bus.recover_after_restart()
+    dump = tmp_path / "dump.txt"
+    monkeypatch.setattr(busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter(dump_path=dump))
+    state = bus._state("exec1")
 
-    delta = db.query_one(
-        conn, "SELECT * FROM messages WHERE recipient = 'director1' ORDER BY id DESC"
-    )
-    assert delta is not None
-    assert "Nothing was in progress" in delta["body"]
-    assert bus._wakeup.is_set()
+    def tick_past_the_window() -> None:
+        bus._tick()
+        state.drain_at = time.monotonic() - 1
+        bus._tick()
+
+    bus.set_running(False, "by hand")
+    core.send_message(conn, "director", "exec1", "from an agent")
+    tick_past_the_window()
+    assert state.turn is None
+
+    core.send_message(conn, core.get_owner_name(conn), "exec1", "from the owner")
+    bus._tick()
+    assert state.turn is not None
+    finish_turn(bus, "exec1")
+    prompt = dump.read_text(encoding="utf-8")
+    assert "from an agent" in prompt and "from the owner" in prompt
+
+    core.send_message(conn, "director", "exec1", "waiting")
+    tick_past_the_window()
+    assert state.turn is None
+
+    bus.set_running(True, "by hand")
+    bus._tick()
+    assert state.turn is not None
+    finish_turn(bus, "exec1")
+    assert "waiting" in dump.read_text(encoding="utf-8")
 
 
+def test_a_due_timer_flips_the_office_and_is_cleared(conn, config):
+    bus = Bus(conn, config)
+    bus.set_switch_timer("pause", 1000, "Owner")
+
+    bus._fire_due_switch(999)
+    assert bus.running and bus.switch_timer() == ("pause", 1000)
+
+    bus._fire_due_switch(1000)
+    assert not bus.running and bus.switch_timer() is None
+
+    bus.set_switch_timer("run", 2000, "Owner")
+    bus._fire_due_switch(2001)
+    assert bus.running and bus.switch_timer() is None
 
 
 # --------------------------------------------------------------------------- who hears of a work

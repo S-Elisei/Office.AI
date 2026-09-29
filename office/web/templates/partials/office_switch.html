@@ -1,0 +1,31 @@
+{% set sw = office_switch(request) %}
+{# The office's run/pause switch. Whichever form is answered swaps this whole region. #}
+<div id="office-switch" class="office-switch" hx-get="/fragments/office-switch"
+     hx-trigger="office:notices[!officeShouldSkip(this)] from:body, office:settings[!officeShouldSkip(this)] from:body, office:agents[!officeShouldSkip(this)] from:body"
+     hx-swap="outerHTML">
+  <span class="badge {{ 'ok' if sw.running else 'warn' }}">{{ 'Running' if sw.running else 'Paused' }}</span>
+  {% if sw.finishing %}
+  <span class="text-faint">{{ sw.finishing }} turn{{ '' if sw.finishing == 1 else 's' }} still finishing</span>
+  {% endif %}
+  <form method="post" action="/office/switch" hx-post="/office/switch"
+        hx-target="#office-switch" hx-swap="outerHTML">
+    <input type="hidden" name="to" value="{{ 'pause' if sw.running else 'run' }}">
+    <button type="submit" class="small">{{ 'Pause' if sw.running else 'Run' }}</button>
+  </form>
+  <span class="office-switch-timer">
+    {% if sw.timer %}
+    <span>{{ sw.timer.to }} at {{ sw.timer.at }}</span>
+    <form method="post" action="/office/timer/cancel" hx-post="/office/timer/cancel"
+          hx-target="#office-switch" hx-swap="outerHTML">
+      <button type="submit" class="small">Cancel</button>
+    </form>
+    {% endif %}
+    <form method="post" action="/office/timer" hx-post="/office/timer" data-office-required="at"
+          hx-target="#office-switch" hx-swap="outerHTML">
+      <input type="hidden" name="to" value="{{ 'pause' if sw.running else 'run' }}">
+      <label for="office-switch-at" class="text-faint">{{ 'Pause' if sw.running else 'Run' }} at</label>
+      <input type="time" id="office-switch-at" name="at" required>
+      <button type="submit" class="small" disabled>Set</button>
+    </form>
+  </span>
+</div>

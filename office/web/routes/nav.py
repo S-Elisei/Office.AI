@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from office import core, db
-from office.web.deps import get_db
+from office.web.deps import get_bus, get_db
 
 router = APIRouter()
 
@@ -50,6 +51,21 @@ def nav_counts(request: Request) -> dict[str, dict]:
     return {
         name: {"value": _count(conn, name, owner), "trigger": nav_trigger(name)}
         for name in COUNTS
+    }
+
+
+def office_switch(request: Request) -> dict:
+    """The header's state: whether the office runs, its pending timer as the state it
+    sets and the local time of day, and, while it is paused, how many turns are
+    still finishing."""
+    bus = get_bus(request)
+    timer = bus.switch_timer()
+    return {
+        "running": bus.running,
+        "timer": None if timer is None else {
+            "to": timer[0], "at": datetime.fromtimestamp(timer[1]).strftime("%H:%M")
+        },
+        "finishing": 0 if bus.running else len(bus.live_turns()),
     }
 
 

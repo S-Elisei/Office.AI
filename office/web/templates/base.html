@@ -33,6 +33,7 @@
     </div>
   </nav>
   <main class="page-{{ active }}">
+    {% include "partials/office_switch.html" %}
     {% block content %}{% endblock %}
   </main>
   <div id="office-notices" class="notice-area" aria-live="polite"></div>

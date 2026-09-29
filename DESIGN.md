@@ -252,15 +252,17 @@ At startup the hub:
    and tells the senders whose messages that turn consumed that they were not
    processed (section 4);
 5. moves agents from `running` to `idle`;
-6. sends the director a message from `office` listing the interrupted works, and
-   every other agent that section 4 would tell of an interrupted work or of a
-   lead's killed turn one message listing those;
+6. when a work was interrupted or a lead's turn was killed, sends the director a
+   message from `office` listing the interrupted works, and every other agent that
+   section 4 would tell of an interrupted work or of a lead's killed turn one message
+   listing those; when nothing was interrupted, sends nothing;
 7. writes a line to the owner's journal; if the restart killed the director's
-   turn the line is critical and raises the plate.
+   turn the line is critical and raises the plate;
+8. pauses the office (section 4, "The switch"): the messages of step 6 wait there
+   until the office runs.
 
-Step 6 is required: there is no autonomous heartbeat in the system. A turn is bought
-by a message and by nothing else, so a restart that told nobody would leave the
-office standing still.
+The first round of quota polling (section 10) runs to its end before the bus's first
+tick; the web app does not wait for it.
 
 Only a claude session is recoverable across a restart — only its id is ours.
 
@@ -421,7 +423,39 @@ ones were left out and which `chat(before_id=…)` call can read them. Wakes coa
 3-second window; the bus ticks once a second; the fuse allows at most 6 wakes per
 agent in 300 seconds, with extras collapsing while the queue keeps growing. The
 environment never interrupts a turn that has started. A quota hold (section 10)
-also defers a turn; the messages wait.
+also defers a turn; the messages wait. So does a paused office (below).
+
+### The switch
+
+The office is **running** or **paused**. The owner flips it with a button, or sets a
+**one-shot timer** that flips it at a local time of day ("pause at 10:00", "run at
+23:00"): the timer fires at the next occurrence of that time and makes the flip its
+time field was labelled with when it was set. There is one timer at most; setting one
+replaces the pending one and the owner can cancel it. There is no recurring schedule.
+Flipping by hand does not clear a pending timer; a timer that fires flips the state and
+is cleared.
+
+The hub always starts paused. The state is in memory. A pending timer is a settings row
+(`switch_timer`, section 15) and survives a restart; one whose moment passed while the
+hub was down is dropped at startup. Every flip is a line in the owner's journal with its
+cause: by hand, by the timer, or the hub's start.
+
+While the office is paused:
+
+- no turn starts, for any cause — a direct message, a reminder that came due, a
+  keep-alive, a restart notice — except that a direct message **from the owner** starts
+  its addressee's turn as it would when running, and that turn delivers whatever the
+  agent has unread. A common-chat post by the owner, and a message from `office` or a
+  service, start nothing;
+- turns already running go on to their end; nothing is stopped or killed, and the hook
+  and the piggyback deliver into them as ever;
+- messages are still accepted and stored, and reminders and expectations still come due
+  and become messages; they wait, and buy their turns once the office runs;
+- the progress check and the director's "nothing in the office is moving" notice do not
+  run. On switching to running the check's chains are dropped and its first check is a
+  full interval away;
+- quota polling, quota holds, the owner's interface, the compact button and the
+  director's stop button work as ever.
 
 ### Expectations
 
@@ -491,7 +525,7 @@ participant `office`:
 |---|---|---|
 | A work failed or was paused (unless whoever would be told caused it with `agent(op=stop)`) | the work's assigner; for a work its assignee assigned itself, the assignee's manager, and for the director the owner's journal | yes; the journal buys nothing |
 | A lead's turn ended abnormally — for any reason but a stop | its manager | yes |
-| Hub restart, with the list of interrupted works | the director, with all of them; every other agent the two rows above name for an interrupted work or a killed turn, with those | yes |
+| Hub restart that interrupted a work or killed a lead's turn, with the list of interrupted works | the director, with all of them; every other agent the two rows above name for an interrupted work or a killed turn, with those | yes |
 | Your message was not processed | the sender | yes |
 | A deferred message has nowhere to go (the recipient was fired) | the sender | yes |
 | Your expectation ran out of time: nothing came, and its address is closed | that agent | yes |
@@ -500,7 +534,7 @@ participant `office`:
 | Nothing in the office moves | the director | yes |
 
 **The progress check** runs on the bus thread once a minute, and not at all without
-a director. It works from the database and from which turns are running. It keeps
+a director or while the office is paused. It works from the database and from which turns are running. It keeps
 three things in memory: whether the owner has stopped the director's turn (set by
 that stop, cleared by the director's next turn), where each stuck agent's chain
 stands, and the last "nothing moves" notice. A hub restart forgets all three.
@@ -1398,8 +1432,9 @@ Reading it is free for all three, with no turn, at any moment:
 | codex | `rate_limits` from the newest session file of a session the office itself started |
 | agy | `agy --output-format json --print /usage`, `command.data.groups[].buckets[]` |
 
-Polling is every 60 seconds plus one round at hub startup, on its own thread, and
-one round of a runtime as soon as a turn or a compaction on it ends. A successful
+Polling is one round at hub startup, run by the bus loop before its first tick, then
+every 60 seconds on a thread of its own, and one round of a runtime as soon as a turn or
+a compaction on it ends. The web app does not wait for the first round. A successful
 poll of a runtime deletes the buckets its answer did not mention. A failed poll
 deletes and changes nothing. A runtime that has never answered has no row, and
 `health()` says so.
@@ -2012,6 +2047,13 @@ chat, waiting PRs. A zero is not drawn.
 Each counter is its own region listening for the event kinds that can change it. The
 list of kinds is declared in one place (`office/web/routes/nav.py`) and the markup
 takes its trigger from there.
+
+The head of every page carries the office's switch (section 4): its state, "Running" or
+"Paused"; a button that flips it; while it is paused and turns are still running, how many
+are still finishing; a pending timer as "pause at 10:00" or "run at 23:00" with a button
+that cancels it; and a time field that sets the timer, labelled with the flip it would
+make. The region refreshes on the events of the journal, of settings and of agents, and
+its time field counts as a draft.
 
 Two pages are **screens** rather than documents: the main page and the board. They
 take the window's height, and what scrolls inside them is what grows — the
