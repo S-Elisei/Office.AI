@@ -475,7 +475,8 @@ def _request(msg: dict, message: dict, calls: list[dict]) -> dict | None:
         "cache_read": usage.get("cache_read_input_tokens"),
         "cache_write": usage.get("cache_creation_input_tokens"),
         "cache_write_1h": (usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens"),
-        "output": usage.get("output_tokens"),
+        # Not recorded per request; usage_turns holds the turn's total.
+        "output": None,
         "thinking": None,
         "tools": tools,
     }

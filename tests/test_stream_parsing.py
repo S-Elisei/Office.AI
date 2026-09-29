@@ -41,12 +41,30 @@ def test_claude_capture_yields_its_requests_and_its_totals():
     requests = [event.request for event in events if event.request]
     assert [r["tools"] for r in requests] == [["Write"], []]
     assert [(r["input"], r["cache_read"], r["cache_write"], r["cache_write_1h"], r["output"])
-            for r in requests] == [(10, 23733, 0, 0, 3), (8, 23733, 478, 478, 2)]
+            for r in requests] == [(10, 23733, 0, 0, None), (8, 23733, 478, 478, None)]
     assert all(r["at"] and r["model"] for r in requests)
 
     totals = next(event.totals for event in events if event.kind == "turn_end")
     assert totals == {"input": 18, "cache_read": 47466, "cache_write": 478,
                       "cache_write_1h": 478, "output": 361, "thinking": 201}
+
+
+def test_agy_turn_totals_are_the_sums_of_its_requests_and_not_the_results_usage():
+    adapter = AgyAdapter(bin_path="agy")
+    text = (STREAMS / "agy_tool_error_capture.jsonl").read_text(encoding="utf-8")
+    events = [
+        event
+        for event in (adapter.parse_line(line) for line in text.splitlines() if line.strip())
+        if event
+    ]
+
+    requests = [event.request for event in events if event.request]
+    assert len(requests) == 3
+    assert adapter.turn_totals(requests) == {
+        "input": 14544 + 2525 + 2695, "cache_read": 12193 + 12186, "output": 40 + 67 + 1,
+        "thinking": 0,
+    }
+    assert next(event for event in events if event.kind == "turn_end").totals is None
 
 
 def test_codex_rollout_requests_are_the_token_counts_since_the_turn_began():

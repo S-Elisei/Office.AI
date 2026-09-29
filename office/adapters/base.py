@@ -131,7 +131,7 @@ class Event:
     # value the vendor does not print is None.
     request: dict | None = None
     # On `turn_end`: the process's own totals, under the same number keys as
-    # `request`.
+    # `request`. An adapter with a `turn_totals` supplies its own and sets none.
     totals: dict | None = None
 
 

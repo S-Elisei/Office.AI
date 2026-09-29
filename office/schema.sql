@@ -368,8 +368,9 @@ CREATE TABLE IF NOT EXISTS usage_turns (
     -- 'clean', or the death's reason.
     outcome TEXT NOT NULL,
     context_used INTEGER,
-    -- The process's own totals as the vendor printed them; NULL where it
-    -- prints none.
+    -- The process's own totals: as the vendor printed them, except agy's, which
+    -- are the sums of the process's requests, NULL for a process with none; NULL
+    -- where the vendor prints none.
     input_tokens INTEGER,
     cache_read_tokens INTEGER,
     cache_write_tokens INTEGER,
@@ -394,7 +395,8 @@ CREATE TABLE IF NOT EXISTS usage_requests (
     cache_write_tokens INTEGER,
     -- claude: the part of cache_write_tokens written with the one-hour TTL.
     cache_write_1h_tokens INTEGER,
-    output_tokens INTEGER NOT NULL DEFAULT 0,
+    -- NULL for claude.
+    output_tokens INTEGER,
     -- codex: reasoning_output_tokens; agy: thinking_tokens; claude: NULL.
     thinking_tokens INTEGER,
     -- Tool names called in this request, comma-separated; an office tool with

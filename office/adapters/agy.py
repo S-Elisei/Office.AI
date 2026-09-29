@@ -164,13 +164,11 @@ class AgyAdapter:
 
         if event == "result":
             status = str(body.get("status", "")).upper()
-            usage = body.get("usage")
             return Event(
                 kind="turn_end",
                 text=body.get("response"),
                 session_id=session_id,
                 error=None if status in ("", "SUCCESS") else (body.get("error") or status),
-                totals=_counts(usage) if usage else None,
             )
 
         if event == "step_update":
@@ -180,6 +178,16 @@ class AgyAdapter:
             return Event(kind="error", error=json.dumps(body or msg), session_id=session_id)
 
         return None
+
+    def turn_totals(self, requests: list[dict]) -> dict | None:
+        """The turn's totals, in the keys of Event.totals: the sums of its requests,
+        or None when it has none."""
+        if not requests:
+            return None
+        return {
+            key: sum(request[key] or 0 for request in requests)
+            for key in ("input", "cache_read", "output", "thinking")
+        }
 
     def quota_reset(self, error: str | None) -> int | None:
         """When a quota refusal says the quota comes back, as epoch seconds, or None."""

@@ -946,7 +946,9 @@ class Bus:
             requests = list(usage.requests.values())
             if hasattr(adapter, "turn_requests"):
                 requests = adapter.turn_requests(row["session_id"], row["started_at"])
-            totals = usage.totals or {}
+            totals = (
+                adapter.turn_totals(requests) if hasattr(adapter, "turn_totals") else usage.totals
+            ) or {}
             row.update({f"{key}_tokens": totals.get(key) for key in _USAGE_COUNTS})
             row.update(
                 ended_at=_utc_stamp(),
@@ -967,7 +969,7 @@ class Bus:
                     [
                         (turn_id, seq, r["at"], r["model"], r["input"] or 0,
                          r["cache_read"] or 0, r["cache_write"], r["cache_write_1h"],
-                         r["output"] or 0, r["thinking"],
+                         r["output"], r["thinking"],
                          ",".join(r["tools"]) if r["tools"] else None)
                         for seq, r in enumerate(requests, start=1)
                     ],
