@@ -1,5 +1,5 @@
 -- Office.AI schema. CREATE TABLE IF NOT EXISTS only; no migrations.
--- A closed work and a merged or closed PR are deleted, not archived.
+-- A closed work and a merged or closed PR are deleted, not archived; work_log keeps a work's record.
 
 CREATE TABLE IF NOT EXISTS agents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -360,9 +360,45 @@ CREATE TABLE IF NOT EXISTS notices (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
--- One vendor process an agent ran: a turn, or a compaction the office asked
--- for. Numbers and names only; no text of any message, prompt or tool. Nothing
--- in the office reads it; the owner does, with SQL.
+-- One row per work, written when it is assigned and updated as it goes; no
+-- code path deletes a row, and no foreign key reaches it. Numbers and names
+-- only; no text of any brief or report. The owner reads it with SQL.
+CREATE TABLE IF NOT EXISTS work_log (
+    work_id INTEGER PRIMARY KEY,
+    task_id INTEGER,
+    -- The work's current holder: the assignee, and the agent it was last
+    -- reassigned to.
+    agent TEXT NOT NULL,
+    runtime TEXT NOT NULL,
+    model TEXT NOT NULL,
+    -- The agent that assigned the work first.
+    assigned_by TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    -- NULL for a work assigned to a lead or the director.
+    role TEXT,
+    complexity TEXT,
+    assigned_at TEXT NOT NULL,
+    -- How many times the holder reported it with work(op=finish).
+    reports INTEGER NOT NULL DEFAULT 0,
+    -- The latest merged PR from the work's branch, its merge commit, and the size
+    -- of every merge of that branch added up: files changed, and insertions plus
+    -- deletions. NULL for a work with no merge; the size is also NULL where git
+    -- refused to measure it.
+    pr_id INTEGER,
+    merge_commit TEXT,
+    files_changed INTEGER,
+    lines_changed INTEGER,
+    -- NULL while the work is open. 'closed', 'dismissed', 'failed' or
+    -- 'task_closed' (deleted with its task); a failed work that is reassigned
+    -- is open again.
+    ended_at TEXT,
+    ended_as TEXT
+);
+
+-- One vendor process an agent ran: a turn, a compaction the office asked for,
+-- or a keep-alive ping. Numbers and names only; no text of any message, prompt
+-- or tool. The office reads it for the keep-alive ping; the owner reads the
+-- rest with SQL.
 CREATE TABLE IF NOT EXISTS usage_turns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent TEXT NOT NULL,

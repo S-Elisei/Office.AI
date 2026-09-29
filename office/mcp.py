@@ -1388,14 +1388,31 @@ def _ask_for_yourself(conn, me: dict, button: str) -> str:
     return f"Ask {core.get_owner_name(conn)} to use {button}."
 
 
+def _one_of(name: str, value, allowed: list[str]) -> None:
+    """Refuse a value that is not one of `allowed`, naming both."""
+    if value not in allowed:
+        raise ValueError(
+            f"{name} '{value}' is not in effect — assign again with one of: {', '.join(allowed)}"
+        )
+
+
 def _h_assign(conn, config, agent_name, role, args) -> str:
     # task is optional: filing a kanban card is not a precondition for
     # giving someone a job.
     _require(args, "brief", "branch")
     target = _named_agent(conn, args, "agent")
+    if target["kind"] == "executor":
+        _require(args, "role", "complexity")
+        _one_of("role", args["role"], core.work_roles(conn))
+        _one_of("complexity", args["complexity"], core.work_complexities(conn))
+    elif args.get("role") is not None or args.get("complexity") is not None:
+        raise ValueError(
+            f"'{target['name']}' is a {target['kind']}: a work for a {target['kind']} takes no "
+            "role or complexity — assign again without them"
+        )
     work = core.assign_work(
         conn, agent_id=target["id"], brief=args["brief"], task_id=args.get("task_id"), branch=args["branch"],
-        actor=agent_name,
+        role=args.get("role"), complexity=args.get("complexity"), actor=agent_name,
     )
     pending = " (workspace still provisioning — it attaches once ready)" if work["workspace_id"] is None else ""
     if target["name"] == agent_name:
@@ -1976,7 +1993,10 @@ _TOOLS: dict[str, types.Tool] = {
         name="assign",
         description="The director's and the leads'. Assign work, on a named branch, to yourself or "
         "to an agent under you. You name the branch. The agent creates it itself. Nothing is "
-        "reserved. You are recorded as the work's assigner. "
+        "reserved. You are recorded as the work's assigner. A work for an executor takes a role, "
+        "one of the roles of the works price list roster() shows (the default roles when that list "
+        "is empty), and a complexity, one of the complexities roster() lists as in effect; a work "
+        "for a lead or for the director takes neither. "
         "On another agent's work: its report comes to you, and so does a notice if it fails or "
         "pauses. The brief goes to the agent as your own message, with the branch name, and it "
         "starts them. Do not write to them separately. "
@@ -1994,6 +2014,14 @@ _TOOLS: dict[str, types.Tool] = {
                 },
                 "task_id": {"type": "integer", "description": "The kanban task this work is for. Only assign can set it."},
                 "branch": {"type": "string"},
+                "role": {
+                    "type": "string",
+                    "description": "Executors only: one of the roles of the works price list roster() shows.",
+                },
+                "complexity": {
+                    "type": "string",
+                    "description": "Executors only: one of the complexities roster() lists as in effect.",
+                },
             },
             "required": ["agent", "brief", "branch"],
         },

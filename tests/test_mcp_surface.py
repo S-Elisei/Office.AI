@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from pathlib import Path
 
 import mcp.types as types
 from mcp.server.context import ServerRequestContext
 from starlette.applications import Starlette
 from starlette.requests import Request
 
-from office import core, db
+from office import core, db, git
 from office import mcp as office_mcp
 from office import wiki_files
 
@@ -135,7 +136,8 @@ def test_a_lead_reaches_nothing_outside_its_own_subtree(conn, config):
     add_agent(conn, "n-hand", "executor", manager="north")
     add_agent(conn, "s-hand", "executor", manager="south")
     failed, text = answer_to(
-        conn, config, "south", "assign", {"agent": "s-hand", "brief": "dig", "branch": "main"}
+        conn, config, "south", "assign",
+        {"agent": "s-hand", "brief": "dig", "branch": "main", "role": "coding", "complexity": "medium"},
     )
     assert not failed, text
     work_id = db.query_one(conn, "SELECT id FROM works")["id"]
@@ -147,7 +149,8 @@ def test_a_lead_reaches_nothing_outside_its_own_subtree(conn, config):
 
     before = row_counts(conn)
     reaching_out = [
-        ("assign", {"agent": "s-hand", "brief": "dig elsewhere", "branch": "main"}),
+        ("assign", {"agent": "s-hand", "brief": "dig elsewhere", "branch": "main",
+                    "role": "coding", "complexity": "medium"}),
         ("agent", {"op": "instruct", "agent": "s-hand", "text": "stop digging"}),
         ("agent", {"op": "instructions", "agent": "boss"}),
         ("agent", {"op": "new_session", "agent": "s-hand"}),
@@ -203,7 +206,8 @@ def test_a_move_is_refused_while_a_failed_work_would_leave_its_assigner_behind(c
     add_agent(conn, "south", "lead", manager="boss")
     add_agent(conn, "hand", "executor", manager="north")
     failed, text = answer_to(
-        conn, config, "north", "assign", {"agent": "hand", "brief": "dig", "branch": "main"}
+        conn, config, "north", "assign",
+        {"agent": "hand", "brief": "dig", "branch": "main", "role": "coding", "complexity": "medium"},
     )
     assert not failed, text
     work_id = db.query_one(conn, "SELECT id FROM works")["id"]
@@ -380,7 +384,8 @@ def test_an_inherited_workspace_is_swapped_for_the_recipients_own(conn, config):
     first_tree = git_workspace(conn, config, "first", "ws-first")
     second_tree = git_workspace(conn, config, "second", "ws-second")
     failed, text = answer_to(
-        conn, config, "boss", "assign", {"agent": "first", "brief": "dig", "branch": "main"}
+        conn, config, "boss", "assign",
+        {"agent": "first", "brief": "dig", "branch": "main", "role": "coding", "complexity": "medium"},
     )
     assert not failed, text
     work_id = db.query_one(conn, "SELECT id FROM works")["id"]
@@ -412,3 +417,95 @@ def test_an_inherited_workspace_is_swapped_for_the_recipients_own(conn, config):
             ["git", "config", "user.name"], cwd=tree, capture_output=True, text=True, timeout=60
         ).stdout.strip()
         assert identity == agent
+
+
+def test_an_assignment_with_a_role_that_is_not_in_effect_is_refused_naming_the_roles(conn, config):
+    add_agent(conn, "boss", "director")
+    add_agent(conn, "hand", "executor", manager="boss")
+
+    failed, refusal = answer_to(
+        conn, config, "boss", "assign",
+        {"agent": "hand", "brief": "dig", "branch": "dig", "role": "art", "complexity": "medium"},
+    )
+
+    assert failed
+    assert "art" in refusal and "coding, review, consultation, design" in refusal, refusal
+    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM work_log")["n"] == 0
+
+    # A stored price list decides the roles in place of the defaults. Invented row.
+    core.set_price_lists(
+        conn,
+        [{"role": "art", "complexity": "medium", "size": "S", "model": "m", "price": "1 CL"}],
+        [],
+        actor="boss",
+    )
+    failed, refusal = answer_to(
+        conn, config, "boss", "assign",
+        {"agent": "hand", "brief": "dig", "branch": "main", "role": "coding", "complexity": "medium"},
+    )
+    assert failed
+    assert "coding" in refusal and "art" in refusal, refusal
+    failed, text = answer_to(
+        conn, config, "boss", "assign",
+        {"agent": "hand", "brief": "dig", "branch": "main", "role": "art", "complexity": "medium"},
+    )
+    assert not failed, text
+
+
+def test_a_work_log_row_follows_the_work_and_outlives_it(conn, config):
+    # The repositories are invented: an empty first commit, and two files the branch adds.
+    owner = git.owner_repo(config)
+    for args in (["init", "--initial-branch=main", "."],
+                 ["-c", "user.name=owner", "-c", "user.email=owner@example.com",
+                  "commit", "--allow-empty", "-m", "start"]):
+        git.git(args, cwd=owner)
+    git.init_project(config, branch="main")
+
+    add_agent(conn, "boss", "director")
+    add_agent(conn, "hand", "executor", manager="boss")
+    workspace = git.create_workspace(config, "hand")
+    with db.transaction(conn) as c:
+        c.execute(
+            "INSERT INTO workspaces (id, path, owner_agent_id) "
+            "VALUES (?, ?, (SELECT id FROM agents WHERE name = 'hand'))",
+            (workspace.id, workspace.path),
+        )
+    tree = workspace.path
+
+    failed, text = answer_to(
+        conn, config, "boss", "assign",
+        {"agent": "hand", "brief": "dig", "branch": "feature-x", "role": "coding",
+         "complexity": "high"},
+    )
+    assert not failed, text
+    work_id = db.query_one(conn, "SELECT id FROM works")["id"]
+
+    git.git(["switch", "-c", "feature-x"], cwd=tree)
+    for name, body in (("a.txt", "one\ntwo\n"), ("b.txt", "three\n")):
+        (Path(tree) / name).write_text(body, encoding="utf-8", newline="")
+    git.git(["add", "a.txt", "b.txt"], cwd=tree)
+    git.git(["commit", "-m", "dig"], cwd=tree)
+    failed, text = answer_to(
+        conn, config, "hand", "work",
+        {"op": "finish", "summary": "dug",
+         "pr": {"title": "dig", "target_branch": "main"}},
+    )
+    assert not failed, text
+    failed, text = answer_to(conn, config, "hand", "work", {"op": "finish", "summary": "dug more"})
+    assert not failed, text
+    pr_id = db.query_one(conn, "SELECT id FROM prs")["id"]
+
+    failed, text = answer_to(
+        conn, config, "boss", "pr", {"op": "merge", "pr_id": pr_id, "delete_branch": False}
+    )
+    assert not failed, text
+    failed, text = answer_to(conn, config, "boss", "work_close", {"work": work_id, "summary": "ok"})
+    assert not failed, text
+
+    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM works")["n"] == 0
+    row = dict(db.query_one(conn, "SELECT * FROM work_log WHERE work_id = ?", (work_id,)))
+    assert (row["agent"], row["assigned_by"], row["branch"]) == ("hand", "boss", "feature-x")
+    assert (row["role"], row["complexity"], row["reports"]) == ("coding", "high", 2)
+    assert (row["pr_id"], row["files_changed"], row["lines_changed"]) == (pr_id, 2, 3)
+    assert row["merge_commit"]
+    assert row["ended_at"] and row["ended_as"] == "closed"

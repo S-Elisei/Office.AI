@@ -366,7 +366,7 @@ def test_a_dead_turn_does_not_report_its_own_brief_as_unprocessed(conn, config):
     make_workspace(config, conn, exec_id, "ws-brief")
     core.assign_work(
         conn, agent_id=exec_id, brief="paint the fence", task_id=None, branch="fence",
-        actor="director1",
+        role="coding", complexity="medium", actor="director1",
     )
     core.send_message(conn, "director1", "exec1", "use the green paint")
     head = db.query_one(conn, "SELECT MAX(id) AS m FROM messages")["m"]
@@ -422,7 +422,7 @@ def test_a_paused_work_resumes_when_its_holders_next_turn_starts(conn, config, m
     make_workspace(config, conn, exec_id, "ws-paused")
     work = core.assign_work(
         conn, agent_id=exec_id, brief="paint the fence", task_id=None, branch="fence",
-        actor="director1",
+        role="coding", complexity="medium", actor="director1",
     )
     core.pause_work(conn, work["id"], "quota_exhausted", resume_after=int(time.time()) - 1)
     bus = Bus(conn, config)
@@ -488,7 +488,8 @@ def a_lead_with_a_failed_work(conn, director_model="stub-model"):
     make_agent(conn, "lead1", kind="lead", manager="director1")
     hand = make_agent(conn, "hand", manager="lead1")
     work = core.assign_work(
-        conn, agent_id=hand, brief="dig the well", task_id=None, branch="well", actor="lead1"
+        conn, agent_id=hand, brief="dig the well", task_id=None, branch="well", role="coding",
+        complexity="medium", actor="lead1"
     )
     core.fail_work(conn, work["id"], "crash")
     read_everything(conn)
@@ -687,11 +688,11 @@ def test_restart_recovery_fails_only_the_work_that_had_a_turn_on_it(conn, config
     make_workspace(config, conn, exec_id, "ws-restart")
     core.assign_work(
         conn, agent_id=exec_id, brief="refactor the widget", task_id=None, branch="feature-x",
-        actor="director1",
+        role="coding", complexity="medium", actor="director1",
     )
     core.assign_work(
         conn, agent_id=waiting_id, brief="waiting on an answer", task_id=None, branch="feature-y",
-        actor="director1",
+        role="coding", complexity="medium", actor="director1",
     )
     mark_mid_turn(conn, exec_id)
 
@@ -750,7 +751,7 @@ def test_a_report_reaches_its_assigner_and_a_restart_tells_the_assigner_or_the_s
     hand = make_agent(conn, "hand", manager="lower")
     reported = core.assign_work(
         conn, agent_id=hand, brief="paint the fence", task_id=None, branch="fence",
-        actor="lower",
+        role="coding", complexity="medium", actor="lower",
     )
 
     def last_from(sender, recipient):
@@ -768,11 +769,12 @@ def test_a_report_reaches_its_assigner_and_a_restart_tells_the_assigner_or_the_s
     core.close_work(conn, reported["id"], actor="lower")
 
     core.assign_work(
-        conn, agent_id=hand, brief="mend the gate", task_id=None, branch="gate", actor="lower"
+        conn, agent_id=hand, brief="mend the gate", task_id=None, branch="gate", role="coding",
+        complexity="medium", actor="lower"
     )
     core.assign_work(
         conn, agent_id=lower, brief="plan the garden", task_id=None, branch="garden",
-        actor="lower",
+        role=None, complexity=None, actor="lower",
     )
     make_workspace(config, conn, hand, "ws-hand")
     make_workspace(config, conn, lower, "ws-lower")

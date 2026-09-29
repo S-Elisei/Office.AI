@@ -136,9 +136,9 @@ These are the tools of the MCP server named `office`:
   notifies that address when the job ends.
 - `roster` — the picture now: the team as a tree; who under you is busy and how
   full each one's context window is; every work still on the books that concerns
-  you; quota; the model catalogue; the stages; the reminders set, with their
-  numbers; the expectations set; your own standing instructions; your workspace
-  and sandbox paths.
+  you; quota; the roles and complexities `assign` takes; the model catalogue;
+  the stages; the reminders set, with their numbers; the expectations set; your
+  own standing instructions; your workspace and sandbox paths.
 - `agent` — the agents under you:
   - `hire` — hire a lead or an executor under you;
   - `fire` — take an agent off the team;
@@ -153,7 +153,8 @@ These are the tools of the MCP server named `office`:
   - `list_profiles` — list the saved profiles;
   - `hire_from_profile` — hire with a saved profile.
 - `assign` — give a work to an agent under you or to yourself: a branch and a
-  brief, optionally on a task.
+  brief, optionally on a task. A work for an executor also takes a role and a
+  complexity.
 - `work_close` — end a work that has been reported. Your summary becomes its line
   on the task.
 - `work_reassign` — hand a work to an agent, its own assignee included. Use it to

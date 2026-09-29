@@ -1709,6 +1709,7 @@ def close_task(conn, task_id: int, result: str, actor: str, status: str = "done"
             "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
             (status, result, task_id),
         )
+        _log_ended(conn, "task_closed", "task_id = ?", (task_id,))
         db.execute(conn, "DELETE FROM works WHERE task_id = ?", (task_id,))
         _emit(conn, "tasks", "task", task_id, {"status": status, "result": result}, actor=actor)
     return _row(conn, "tasks", "id", task_id)
@@ -1761,10 +1762,32 @@ def unlink_tasks(conn, blocking_task_id: int, blocked_task_id: int, actor: str |
 # --------------------------------------------------------------------------- works
 
 
+def _log_holder(conn, work_id: int, agent_id: int) -> None:
+    """Point a work's log row at its holder, and open the row again."""
+    agent = _row(conn, "agents", "id", agent_id)
+    db.execute(
+        conn,
+        "UPDATE work_log SET agent = ?, runtime = ?, model = ?, ended_at = NULL, ended_as = NULL "
+        "WHERE work_id = ?",
+        (agent["name"], agent["runtime"], agent["model"], work_id),
+    )
+
+
+def _log_ended(conn, ended_as: str, where: str, params: tuple) -> None:
+    """Stamp the end of the works whose work_log rows `where` selects, by work_id."""
+    db.execute(
+        conn,
+        "UPDATE work_log SET ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ended_as = ? "
+        f"WHERE work_id IN (SELECT id FROM works WHERE {where})",
+        (ended_as, *params),
+    )
+
+
 def assign_work(
-    conn, *, agent_id: int, brief: str, task_id: int | None, branch: str, actor: str
+    conn, *, agent_id: int, brief: str, task_id: int | None, branch: str, role: str | None,
+    complexity: str | None, actor: str
 ) -> dict:
-    """assign(agent, brief, task, branch).
+    """assign(agent, brief, task, branch, role, complexity).
 
     `actor` is the calling manager, recorded as the assigner; the agent is the
     caller itself or one in its subtree.
@@ -1775,6 +1798,9 @@ def assign_work(
 
     The name lives in works.branch as what the assigner asked for; the agent
     creates the branch itself.
+
+    `role` and `complexity` go to the work's work_log row and nowhere else; None
+    for a work whose assignee is not an executor.
 
     The decision and the write are one transaction.
     """
@@ -1801,6 +1827,14 @@ def assign_work(
             (task_id, agent_id, caller["id"], brief, branch, workspace_id),
         )
         work_id = cur.lastrowid
+        db.execute(
+            conn,
+            "INSERT INTO work_log (work_id, task_id, agent, runtime, model, assigned_by, branch, "
+            "role, complexity, assigned_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT started_at FROM works WHERE id = ?))",
+            (work_id, task_id, agent["name"], agent["runtime"], agent["model"], caller["name"],
+             branch, role, complexity, work_id),
+        )
         _emit(
             conn, "works", "work", work_id,
             {"agent_id": agent_id, "task_id": task_id, "branch": branch, "pending": workspace_id is None},
@@ -1884,6 +1918,7 @@ def finish_work(conn, work_id: int, summary: str | None = None, actor: str | Non
             "resume_after = NULL WHERE id = ?",
             (work_id,),
         )
+        db.execute(conn, "UPDATE work_log SET reports = reports + 1 WHERE work_id = ?", (work_id,))
         _emit(conn, "works", "work", work_id, {"status": "done", "agent": agent_name}, actor=actor)
     # Outside the transaction: send_message opens its own. The sender is the
     # agent the work belonged to rather than `actor`.
@@ -1928,6 +1963,7 @@ def close_work(conn, work_id: int, summary: str | None = None, *, actor: str) ->
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
                 (summary, work["task_id"]),
             )
+        _log_ended(conn, "closed", "id = ?", (work_id,))
         db.execute(conn, "DELETE FROM works WHERE id = ?", (work_id,))
         _emit(conn, "works", "work", work_id, {"status": "closed", "agent": agent_name}, actor=actor)
     # The one who did it is told, quietly, unless it closed the work itself.
@@ -1957,6 +1993,7 @@ def fail_work(conn, work_id: int, reason: str, output_tail: str | None = None, a
             conn, "UPDATE works SET status = 'failed', fail_reason = ?, output_tail = ? WHERE id = ?",
             (reason, output_tail, work_id),
         )
+        _log_ended(conn, "failed", "id = ?", (work_id,))
         _emit(conn, "works", "work", work_id, {"status": "failed", "fail_reason": reason, "agent": agent_name}, actor=actor)
     return _row(conn, "works", "id", work_id)
 
@@ -2029,6 +2066,7 @@ def dismiss_work(conn, work_id: int, *, actor: str) -> dict:
         )
     agent_name = _agent_name(conn, work["agent_id"])
     with db.transaction(conn):
+        _log_ended(conn, "dismissed", "id = ?", (work_id,))
         db.execute(conn, "DELETE FROM works WHERE id = ?", (work_id,))
         _emit(
             conn, "works", "work", work_id,
@@ -2146,6 +2184,7 @@ def reassign_work(
             "WHERE id = ?",
             (to_agent_id, caller["id"], new_ws["id"], work_id),
         )
+        _log_holder(conn, work_id, to_agent_id)
         _emit(conn, "works", "work", work_id, {"agent_id": to_agent_id, "workspace": workspace}, actor=actor)
     for agent_id, ws in handed:
         name = _agent_name(conn, agent_id)
@@ -2543,6 +2582,32 @@ def _record_delivery(conn, delivery: git.Delivery) -> dict:
     return payload
 
 
+def _log_merge(conn, pr: dict, commit: str, size: tuple[int, int] | None) -> None:
+    """Record a merge on the log row of the work that carried the PR's branch: the
+    newest logged work of the PR's author on that branch, closed or not. The PR and the
+    commit are the latest merge's;
+    `size` is added to what the row holds, and a merge whose size is None leaves the
+    sizes as they are."""
+    work = db.query_one(
+        conn,
+        "SELECT work_id AS id FROM work_log WHERE branch = ? AND agent = ? ORDER BY work_id DESC",
+        (pr["source_branch"], _agent_name(conn, pr["author_agent_id"])),
+    )
+    if work is None:
+        return
+    files, lines = size if size is not None else (None, None)
+    db.execute(
+        conn,
+        "UPDATE work_log SET pr_id = :pr, merge_commit = :commit, "
+        "files_changed = CASE WHEN :files IS NULL THEN files_changed "
+        "ELSE COALESCE(files_changed, 0) + :files END, "
+        "lines_changed = CASE WHEN :lines IS NULL THEN lines_changed "
+        "ELSE COALESCE(lines_changed, 0) + :lines END "
+        "WHERE work_id = :work",
+        {"pr": pr["id"], "commit": commit, "files": files, "lines": lines, "work": work["id"]},
+    )
+
+
 def merge_pr(
     conn,
     config: Config,
@@ -2554,7 +2619,8 @@ def merge_pr(
     """pr(op=merge) - the merge itself is git.merge()'s.
 
     A merge writes the PR's description and a digest of its comments into the
-    merge-commit message and deletes the row.
+    merge-commit message, records itself on the work's work_log row
+    (_log_merge) and deletes the row.
 
     'behind', 'blocked', 'diverged' and 'missing' all leave the PR open and hand
     the sentence back to whoever merged. 'up_to_date' deletes the row like a
@@ -2593,7 +2659,9 @@ def merge_pr(
         delivery = _record_delivery(conn, result.delivery)
 
     if result.status == "merged":
+        size = git.change_size(config, result.commit)
         with db.transaction(conn):
+            _log_merge(conn, pr, result.commit, size)
             db.execute(conn, "DELETE FROM prs WHERE id = ?", (pr_id,))
             _emit(conn, "prs", "pr", pr_id, {"status": "merged", "commit": result.commit}, actor=actor)
         # The detail is empty on an ordinary merge and carries a sentence when

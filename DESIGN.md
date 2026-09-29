@@ -748,8 +748,16 @@ session. Statuses: `running` · `paused` · `failed` · `done`. A paused work go
 to `running` when its holder's next turn starts; a failed one only by
 `work_reassign`.
 
-`assign(agent, brief, task_id, branch)` — the branch is required, the task is not.
-The caller is recorded as the assigner, `works.assigned_by_agent_id`; a manager
+`assign(agent, brief, task_id, branch, role, complexity)` — the branch is required, the
+task is not. `role` and `complexity` are required when the assignee is an executor and
+refused when it is a lead or the director: only an executor's work is classified. The
+role is one of the roles of the works price list (section 10), the distinct values of
+its Role column, and the complexity one of the values of the setting `work_complexities`,
+one value per line; a setting with no lines gives the defaults, `fully specified`,
+`medium`, `high`; a price list with no rows gives `coding`, `review`, `consultation`,
+`design`. A value outside the list is refused; the refusal names the value and lists the
+values in effect. Both go to the work's row in `work_log` (section 13), NULL for a lead's
+or the director's work. The caller is recorded as the assigner, `works.assigned_by_agent_id`; a manager
 that assigns a work to itself is its own assigner. `work_reassign` records its
 caller as the assigner in the same way, and the work's report and notices go to
 that caller from then on. `work_reassign` sends nobody anything; the caller writes
@@ -1744,7 +1752,8 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | The current quota snapshot | One row per bucket |
 | Quota holds: runtime, model, the time of return | A hold outlives a hub restart |
 | Quota history: every reading that differs from the one before it for its bucket | Nothing in the office reads it; the owner does, with SQL |
-| Usage: one row per vendor process — a turn or a compaction — with the agent, its work and task, who woke it, its outcome and its token totals; one row per model request and per compaction inside it. Numbers and names, no text | Nothing in the office reads it; the owner does, with SQL |
+| The work log: one row per work, kept after the work is closed. Numbers and names, no text | The owner reads it with SQL |
+| Usage: one row per vendor process — a turn, a compaction or a keep-alive — with the agent, its work and task, who woke it, its outcome and its token totals; one row per model request and per compaction inside it. Numbers and names, no text. A turn's totals are the vendor's own, except agy's, which are the sums of its requests; a claude request's output count is NULL, the turn's total holds it | The keep-alive reads it; the owner reads the rest with SQL |
 | Each runtime's model catalogue | A snapshot, overwritten hourly |
 | Owner notices | The record of what happened while he was not looking |
 | How far the owner has read each conversation | Not recoverable from anywhere else |
@@ -1778,6 +1787,36 @@ resolution time with `id` as the second key. Indexes: `(channel, id)`,
 `(recipient, id)`, `(sender, id)`; the last also carries the DM thread list as one
 grouped query.
 
+### The work log
+
+`work_log` holds one row per work, keyed by `work_id`, the id of the row in `works`.
+Nothing deletes a row and no foreign key reaches it. It holds names and numbers only: no
+brief, no summary. The owner reads it with SQL, together with `usage_turns` and
+`usage_requests`, which carry `work_id` and `task_id`.
+
+Columns: `work_id`, `task_id`, `agent`, `runtime` and `model` (the work's holder),
+`assigned_by`, `branch`, `role`, `complexity`, `assigned_at`, `reports`, `pr_id`,
+`merge_commit`, `files_changed`, `lines_changed`, `ended_at`, `ended_as`.
+
+Each column is written by the function that changes the fact:
+
+- `assign_work` inserts the row with everything known at that moment; `assigned_by` is
+  the first assigner;
+- `finish_work` adds one to `reports`;
+- `reassign_work` sets `agent`, `runtime` and `model` to the new holder's and clears
+  `ended_at` and `ended_as`;
+- `merge_pr`, on a merge, finds the newest logged work, closed or not, whose `branch` is
+  the PR's source branch and whose holder is the PR's author, and sets its `pr_id` and `merge_commit`. It adds
+  the merge's size to `files_changed` and `lines_changed`: the files changed and the
+  insertions plus deletions of the merge commit against its first parent, from
+  `git diff --numstat`. A binary file counts as a file and no lines. Where git refuses
+  the size is left as it was, NULL when nothing was measured. `pr_id` and
+  `merge_commit` hold the latest merge, the size all of them. A work on the default
+  branch has no merge and no PR fields; a PR that ends as `up_to_date` writes nothing;
+- `close_work` sets `ended_at` and `ended_as` = `closed`; `dismiss_work`, `dismissed`;
+  `fail_work`, `failed`; moving the task to `done` with the work still on it,
+  `task_closed`.
+
 ### Schema
 
 `schema.sql` is `CREATE TABLE IF NOT EXISTS` only; there are no migrations. A new
@@ -1788,9 +1827,6 @@ brings that database up to the schema by hand before the hub starts.
 The `CHECK` on `prs.status` lists four values of which two are reachable: `merged`
 and `closed` are states in which the row stops existing rather than states it lives
 in.
-
-Beyond the usage rows, which name each process's work and task, the system does
-not answer "who worked on this task a month ago".
 
 ---
 
@@ -1831,7 +1867,7 @@ Managers only — the director and the leads:
 ```
 agent(op, ...)   # hire | fire | stop | compact | new_session | instruct | instructions | move
                  # save_profile | hire_from_profile | list_profiles
-assign(agent, brief, task_id, branch)
+assign(agent, brief, task_id, branch, role, complexity)
 work_close(work, summary)        # accept a reported work: the row goes, the result lands on the task
 work_dismiss(work)               # write off a failed work together with its tail
 work_reassign(work, to_agent, workspace)   # workspace = inherit | fresh

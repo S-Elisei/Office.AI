@@ -21,7 +21,7 @@ def hire_row(conn, name, kind="executor", manager_id=None):
 def make_work(conn, agent_id, task_id=None):
     return core.assign_work(
         conn, agent_id=agent_id, brief="do the thing", task_id=task_id, branch="feature-x",
-        actor="dir",
+        role="coding", complexity="medium", actor="dir",
     )["id"]
 
 

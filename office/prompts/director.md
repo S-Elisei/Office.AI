@@ -149,8 +149,8 @@ These are the tools of the MCP server named `office`:
 - `expect` — wait for a service's long job. It gives you an address. The service
   notifies that address when the job ends.
 - `roster` — the picture now: the team as a tree; who is busy; how full each
-  agent's context window is; every work still on the books; quota; the model
-  catalogue; the stages; the reminders set, with their numbers; the expectations
+  agent's context window is; every work still on the books; quota; the roles and
+  complexities `assign` takes; the model catalogue; the stages; the reminders set, with their numbers; the expectations
   set; your own standing instructions; your workspace and sandbox paths.
 - `agent` — the team:
   - `hire` — hire a lead or an executor under you;
@@ -166,7 +166,7 @@ These are the tools of the MCP server named `office`:
   - `list_profiles` — list the saved profiles;
   - `hire_from_profile` — hire with a saved profile.
 - `assign` — give a work to an agent, yourself included: a branch and a brief,
-  optionally on a task.
+  optionally on a task. A work for an executor also takes a role and a complexity.
 - `work_close` — end a work that has been reported. Your summary becomes its line
   on the task.
 - `work_reassign` — hand a work to an agent, its own assignee included. Use it to

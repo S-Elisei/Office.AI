@@ -1300,3 +1300,16 @@ def merge(
             "merged", commit=commit, detail=said, delivery=delivery, intake=intake,
             source_deleted=deleted,
         )
+
+
+def change_size(config: Config, commit: str) -> tuple[int, int] | None:
+    """What `commit` changes against its first parent in project.git: the number
+    of files, and insertions plus deletions (a binary file counts as a file and
+    no lines). None when git refuses."""
+    proc = git(
+        ["diff", "--numstat", f"{commit}^1", commit], cwd=project_git(config), check=False
+    )
+    if proc.returncode != 0:
+        return None
+    rows = [line.split("\t") for line in proc.stdout.splitlines()]
+    return len(rows), sum(int(a) + int(d) for a, d, _ in rows if a != "-")
