@@ -34,3 +34,39 @@
 {% macro kind_badge(kind) %}
   <span class="badge {{ 'danger' if kind == 'bug' else '' }}">{{ kind }}</span>
 {% endmacro %}
+
+{% macro editor_row(spec, cells) %}
+<tr>
+  {% for column in spec.columns %}
+  <td><input type="text" name="{{ spec.fields[loop.index0] }}" value="{{ cells[loop.index0] if cells else '' }}" aria-label="{{ column }}"{{ ' required' if loop.first }}></td>
+  {% endfor %}
+  <td class="editor-actions">
+    <button type="button" class="small" data-editor-act="up" aria-label="Move up" title="Move up">&uarr;</button>
+    <button type="button" class="small" data-editor-act="down" aria-label="Move down" title="Move down">&darr;</button>
+    <button type="button" class="small" data-editor-act="delete" aria-label="Delete row" title="Delete row">&times;</button>
+  </td>
+</tr>
+{% endmacro %}
+
+{# A table as an editable table, or as a list when `spec.table` is false. Every row
+   posts its cells as repeated fields named by `spec.fields`, in document order. #}
+{% macro table_editor(spec, label, hint) %}
+<div class="form-row editor" data-editor>
+  <label>{{ label }}</label>
+  <div class="editor-scroll" id="s-{{ spec.id }}-scroll">
+    <table class="editor-table">
+      {% if spec.table %}
+      <thead>
+        <tr>{% for column in spec.columns %}<th>{{ column }}</th>{% endfor %}<th></th></tr>
+      </thead>
+      {% endif %}
+      <tbody>
+        {% for cells in spec.rows %}{{ editor_row(spec, cells) }}{% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <template data-editor-blank>{{ editor_row(spec, []) }}</template>
+  <div><button type="button" class="small" data-editor-act="add">Add row</button></div>
+  <span class="hint">{{ hint }}</span>
+</div>
+{% endmacro %}

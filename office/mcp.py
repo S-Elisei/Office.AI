@@ -11,7 +11,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.concurrency import run_in_threadpool
 
-from office import commands, core, db, stages, wiki_files
+from office import commands, core, db, stages, wallets, wiki_files
 
 # --------------------------------------------------------------------------- the free drain seam
 
@@ -1087,11 +1087,15 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
                 f"  {q['runtime']} · {q['label']}: {q['remaining_fraction']:.0%} remaining, "
                 f"resets {_fmt_epoch(q['reset_time'])}"
             )
+        lines.extend(_wallet_lines(conn))
         for h in snap["holds"]:
             lines.append(
                 f"  held: {h['runtime']} · {h['model']} — no turn starts on it before "
                 f"{_fmt_epoch(h['until'])}; it refused one for quota"
             )
+    lines.extend(_price_list_lines(conn))
+    lines.append(f"Roles in effect: {', '.join(core.work_roles(conn))}.")
+    lines.append(f"Complexities in effect: {', '.join(core.work_complexities(conn))}.")
     if snap["blocked_tasks"]:
         lines.append("Blocked (looks ready but its dependency isn't done):")
         for b in snap["blocked_tasks"]:
@@ -1119,6 +1123,56 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
             "agent(op=hire, adopt_workspace_id=<id>) hands one to a new agent."
         )
     return "\n".join(lines)
+
+
+def _units(value: float) -> str:
+    """A wallet figure: whole units from a hundred up, one decimal below."""
+    return f"{value:.0f}" if abs(value) >= 100 else f"{value:.1f}"
+
+
+def _wallet_lines(conn) -> list[str]:
+    """roster()'s wallets, one line per runtime with a weekly limit."""
+    owned = wallets.overview(conn)
+    if not owned:
+        return []
+    lines = ["  Wallets (payday = the weekly reset):"]
+    for w in owned:
+        line = (
+            f"    {w['currency']} ({w['runtime']}): {_units(w['left'])} of {_units(w['share'])} left "
+            f"until payday, {_fmt_epoch(w['payday'])}"
+        )
+        if w["window"] is not None:
+            line += (
+                f"; {_units(w['window_left'])} of {_units(w['window'])} left in the current "
+                f"window, until {_fmt_epoch(w['next_window'])}"
+            )
+        lines.append(line)
+    return lines
+
+
+def _price_list_lines(conn) -> list[str]:
+    """roster()'s price list: the owner's note, the two lists' rows with the cells
+    joined by ` | `, and the rule about work that is not on them."""
+    owner = core.get_owner_name(conn)
+    note = (core.get_setting(conn, core.PRICE_LIST_NOTE_SETTING, "") or "").splitlines()
+    works = [
+        "    " + " | ".join(row[column] for column in core.PRICE_WORKS_COLUMNS)
+        for row in core.price_works(conn)
+    ]
+    own = [
+        "    " + " | ".join(row[column] for column in core.PRICE_OWN_COLUMNS)
+        for row in core.price_own(conn)
+    ]
+    return [
+        "Price list (typical / with margin):",
+        *(f"  {line}" for line in note if line.strip()),
+        "  Works you assign:",
+        *(works or ["    (empty)"]),
+        "  What a lead spends on its own:",
+        *(own or ["    (empty)"]),
+        f"Work that is not in the price list is not assigned, unless the list is empty or {owner} "
+        "has instructed otherwise.",
+    ]
 
 
 def _stage_lines(conn, config, role) -> list[str]:
@@ -1833,8 +1887,11 @@ _TOOLS: dict[str, types.Tool] = {
         "its context window is, and the reminders and expectations it set. They also get: "
         "every work not finished (running, paused, reported or failed) whose assignee is under "
         "them or which they assigned, with who assigned it, why it stopped and, for a pause, "
-        "the earliest it can resume; remaining quota per runtime, with its reset time; each "
-        "runtime and model held for quota, with the time before which no turn starts on it; "
+        "the earliest it can resume; remaining quota per runtime, with its reset time; per "
+        "runtime, its wallet in the runtime's currency (CL claude, CD codex, GM agy): what the team "
+        "has left of its weekly share until payday and of the current 5-hour window; the owner's "
+        "price list; the roles and the complexities in effect for assign; each runtime and "
+        "model held for quota, with the time before which no turn starts on it; "
         "tasks that look ready but whose dependency is not done; the model catalogue; "
         "workspaces that belong to nobody. "
         "The director also gets: how each stage is prepared, why a broken one broke, a reset or "

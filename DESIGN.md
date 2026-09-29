@@ -1402,11 +1402,78 @@ before it for its bucket, as the poll gave it.
 Only Gemini models are used from agy; the "Claude and GPT" group is dropped
 entirely — the one place where part of a vendor's answer is not shown.
 
-There are no derived figures: no burn rate, no estimate of hours left.
+The buckets carry no derived figure; the wallets below are derived from them.
 
 A quota change publishes the SSE event `quota` and the page redraws itself. Quota
 is not substituted into any system prompt; the director and the leads read it
 through `roster()`.
+
+### Wallets
+
+Each runtime's subscription is a **wallet** in its own currency — CL for claude, CD
+for codex, GM for agy — where one unit is one dollar at the vendor's API list prices.
+The weekly reset is **payday**; the 5-hour window limits what may be spent now.
+
+The owner sets, on the settings page, per runtime a total weekly limit (the worth of the
+weekly bucket, in units) and a 5h window (the worth of the `5h` bucket; empty when the
+subscription has none), and a reserve: a percentage of the week the team leaves
+untouched, 0 by default. The settings are `wallet_<runtime>_week`,
+`wallet_<runtime>_window` and `wallet_<runtime>_reserve`. A runtime with no weekly limit, or with no weekly bucket
+stored, shows no wallet. A runtime with no 5h window set, or with no `5h` bucket stored,
+shows its weekly part only. The weekly bucket is `week (all models)` for claude and `week`
+for codex and agy.
+
+`roster()` gives a manager, in its quota part, per wallet:
+
+- what is **left** until payday, out of the weekly share. The share is the weekly limit
+  times one less the reserve; what is left is the weekly bucket's remaining fraction times
+  the weekly limit, less the reserve times the weekly limit, not below zero;
+- where there is a 5h window, what is **left in the current window** out of the 5h
+  window: the `5h` bucket's remaining fraction times the 5h window, or what is left of the
+  week if that is less; and the time the window resets;
+- the payday.
+
+The settings page shows, for each runtime whose CLI this machine has, its total weekly limit, 5h window and reserve; the reserve is a control: a thin bar that is the whole
+weekly bucket, its filled part at the right being the remaining fraction and draining to
+the left, with a slider (0 to 100) over it. The reserve is 100 less the slider's value, so
+a slider at the right edge is a reserve of 0. A label beside it gives the reserve in percent
+and in units of the runtime's currency, and follows the slider and the weekly limit field. A
+runtime with no weekly reading stored has a bar with no fill and a working slider. The
+reserve is saved with the rest of the form.
+
+Right after the quota part, `roster()` gives a manager the **price list**: a header naming
+its figures typical / with margin; the lines of the setting `price_list_note`, indented,
+when it has any; "Works you assign:" and the rows of the table `price_works`, indented
+(`(empty)` when it has none), each row `role | complexity | size | model | price`; "What a
+lead spends on its own:" and the rows of `price_own` the same way, each row `what | size |
+price`; and the line "Work that is not in the price list is not assigned, unless the list
+is empty or <owner> has instructed otherwise." An executor does not see it.
+
+The office reads one thing in these rows: the **roles in effect** are the distinct
+`role` values of `price_works`, in order of first position. With no row, the defaults
+apply. Nothing is decided from `price_own`.
+
+The two price lists are stored as the tables `price_works` (position, role, complexity,
+size, model, price) and `price_own` (position, what, size, price), every column but
+`position` text. `position` is the order the owner set; `price` is the owner's own text
+("0.1 / 0.3 CD", "unknown yet"). The setting `price_list_note` holds the free text shown
+above the price list, and `work_complexities` stays a setting.
+
+The settings page edits the two price lists as tables and the work complexities as a
+list. Above the works table sits a text box, "Note shown above the price list", for
+`price_list_note`. A table has a header row, one text input per cell, and per row buttons
+that move it up, move it down and delete it, with an "Add row" button under it; the list
+has the same without the header. A row's first cell is required. Every row posts its cells as repeated fields in document
+order: `works_role`, `works_complexity`, `works_size`, `works_model` and `works_price` for
+the works table; `own_what`, `own_size` and `own_price` for the own table; `complexity`
+for the list. Saving zips each table's fields into rows, trims every cell, and replaces
+both tables in one transaction; the note is written as posted, and the complexities as the
+trimmed values, one per line. The wallet fields are written only for the runtimes the page
+shows. A
+table scrolls inside its own box.
+
+Right after the price list, one line names the roles in effect and one the complexities in
+effect, as `assign` takes them for an executor.
 
 There is no notion of paid overflow: the vendors' overdraft fields are not read. An
 exhausted window arrives as a turn error and is classified as `quota_exhausted`.
@@ -1681,6 +1748,7 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | Each runtime's model catalogue | A snapshot, overwritten hourly |
 | Owner notices | The record of what happened while he was not looking |
 | How far the owner has read each conversation | Not recoverable from anywhere else |
+| The two price lists: rows in the order the owner set, cells as the owner's text | The owner's own words |
 | Settings | |
 | Stages: name, preparation command, state, reason | Not recoverable |
 | Open expectations: token, agent, what is awaited, when opened, due time | A service answers across a hub restart |
@@ -1824,7 +1892,7 @@ manager additionally gets, for its subtree, each agent's status and context fill
 and every deferred message and open expectation; every work that is not finished
 (running, paused, reported or failed, with the reason it stopped and, for a pause,
 the earliest it could resume) whose assignee is in its subtree or which it
-assigned; remaining quota per runtime with its reset time, and each runtime and
+assigned; remaining quota per runtime with its reset time, each wallet (section 10), and each runtime and
 model on which no turn starts before its time of return; tasks that look ready
 but whose dependency is not done; the model catalogue; and workspaces that belong
 to nobody. The director alone additionally gets the directories under `ws/` the
@@ -1958,7 +2026,7 @@ All times are shown local and stored UTC.
    marked process that survived being killed, and open works that nothing moves and
    nobody above their agent has moved.
 10. **Settings** — the owner's name, the director's standing instructions, the
-    silence threshold, and the director's runtime/model/effort with the cost shown
+    silence threshold, the wallets' weekly limits, 5h windows and reserve, the two price lists (a table each) and their note, the work complexities (a list, showing the values in effect), and the director's runtime/model/effort with the cost shown
     before confirmation. Also the delivery address, the outcome of the last delivery,
     and — while the owner's repository is missing `receive.denyCurrentBranch` — the
     "Set up delivery" button that writes it back.
@@ -2017,9 +2085,9 @@ tickets · notices · stages
 
 `app.js` subscribes to all of them and re-dispatches each as the DOM event
 `office:<kind>` on `<body>`; a region re-requests its own fragment through
-`hx-trigger`. A region containing an unsaved draft (an `input[type=text]` or
-`textarea` whose value differs from the one the server rendered, outside a closed
-`<details>`) skips the update and catches itself up the moment the draft is gone. Each
+`hx-trigger`. A region containing an unsaved draft (a text, time, number or range input
+or a `textarea` whose value differs from the one the server rendered, outside a closed
+`<details>`, or a table editor whose rows were added, deleted or moved) skips the update and catches itself up the moment the draft is gone. Each
 region uses its own `hx-swap`.
 
 After the connection drops — and only after a drop, not on the first connect — every
@@ -2035,6 +2103,12 @@ stays where the reader left it.
 ```
 owner_name              the owner's name (default "Owner")
 silence_notice_minutes  the silence threshold; 0 or less means never report
+switch_timer            the pending timer of the office's switch: "run" or "pause", a space, an epoch second; empty means none
+wallet_<runtime>_week   the total weekly limit of a runtime's wallet, in units; empty means no wallet
+wallet_<runtime>_window the 5h window of a runtime's wallet, in units; empty means none
+wallet_<runtime>_reserve the percentage of the week the team leaves untouched; empty means 0
+price_list_note         the free text shown above the price list in roster; plain text
+work_complexities       the complexities assign accepts, one per line; empty means the defaults
 delivery_last           the outcome of the last delivery (JSON), for the settings page
 ```
 

@@ -60,8 +60,13 @@
     return box.scrollHeight - box.scrollTop - box.clientHeight < FOOT_SLACK_PX;
   }
 
+  // A region is a draft while a field differs from its value or an editor's rows were
+  // added, deleted or moved.
   function isDirty(region) {
-    const fields = region.querySelectorAll('input[type="text"], textarea');
+    if (region.querySelector("[data-editor-changed]")) return true;
+    const fields = region.querySelectorAll(
+      'input[type="text"], input[type="time"], input[type="number"], input[type="range"], textarea'
+    );
     for (const field of fields) {
       const details = field.closest("details");
       if (details && !details.open) continue;
@@ -116,7 +121,7 @@
 
   // ---- keeping the reader's place across a swap ---------------------------
   const SCROLL_BOXES =
-    "[data-office-lazy], .thread[data-office-stick], .kanban-scroll, .kanban-cards, #main-chat";
+    "[data-office-lazy], .thread[data-office-stick], .kanban-scroll, .kanban-cards, #main-chat, .editor-scroll";
   const scrollPlace = new Map();
 
   function scrollKey(box) {
@@ -305,6 +310,45 @@
   function syncAllRequired(root) {
     for (const form of root.querySelectorAll("form[data-office-required]")) syncRequired(form);
   }
+
+  // A wallet's reserve is the slider's distance from the right edge of its bar.
+  function syncReserve(row) {
+    const reserve = 100 - Number(row.querySelector("[data-reserve-slider]").value);
+    const week = Number(row.querySelector("[data-week]").value) || 0;
+    row.querySelector("[data-reserve]").value = reserve;
+    row.querySelector("[data-reserve-label]").textContent =
+      `${reserve}% reserved \u00b7 ${(reserve * week / 100).toFixed(1)} ${row.dataset.currency}`;
+  }
+
+  // ---- table and list editors ---------------------------------------------
+  document.addEventListener("click", (e) => {
+    const button = e.target.closest && e.target.closest("[data-editor-act]");
+    if (!button) return;
+    const editor = button.closest("[data-editor]");
+    const row = button.closest("tr");
+    switch (button.dataset.editorAct) {
+      case "add":
+        editor.querySelector("tbody").append(
+          editor.querySelector("[data-editor-blank]").content.cloneNode(true)
+        );
+        break;
+      case "up":
+        if (row.previousElementSibling) row.previousElementSibling.before(row);
+        break;
+      case "down":
+        if (row.nextElementSibling) row.nextElementSibling.after(row);
+        break;
+      case "delete":
+        row.remove();
+        break;
+    }
+    editor.dataset.editorChanged = "1";
+  });
+
+  document.addEventListener("input", (e) => {
+    const row = e.target.closest && e.target.closest("[data-wallet]");
+    if (row) syncReserve(row);
+  });
 
   document.addEventListener("input", (e) => syncRequired(e.target.form));
   document.addEventListener("htmx:afterSwap", () => syncAllRequired(document));

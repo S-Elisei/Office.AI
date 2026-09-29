@@ -1,6 +1,7 @@
-"""Settings: owner_name and the silence threshold (core.set_setting), the
-director's standing instructions (core.set_instructions), and the director's
-live runtime/model/effort (core.update_agent_model).
+"""Settings: owner_name, the silence threshold, the wallets and the work
+complexities (core.set_setting), the two price lists (core.set_price_lists) and
+their note, the director's standing instructions (core.set_instructions), and the
+director's live runtime/model/effort (core.update_agent_model).
 """
 
 from __future__ import annotations
@@ -9,9 +10,12 @@ import sqlite3
 
 from fastapi import APIRouter, Request
 
-from office import core, db, git
+from office import core, db, git, wallets
+from office.adapters import installed
 from office.bus import SILENCE_NOTICE_DEFAULT_MINUTES, SILENCE_NOTICE_SETTING
-from office.web.deps import get_bus, get_config, get_db, get_owner_name, read_form
+from office.web.deps import (
+    get_bus, get_config, get_db, get_owner_name, read_form, read_form_lists
+)
 from office.web.templating import templates
 
 router = APIRouter()
@@ -23,6 +27,15 @@ RUNTIMES = ["claude", "codex", "agy"]
 # It can never be saved.
 CUSTOM_MODEL = "__custom__"
 
+# The header cells of the two price lists' tables.
+WORKS_COLUMNS = ["Role", "Complexity", "Size", "Model", "Price (typical / with margin)"]
+OWN_COLUMNS = ["What", "Size", "Price (typical / with margin)"]
+
+# The names of the fields a row's cells post, in column order.
+WORKS_FIELDS = ["works_role", "works_complexity", "works_size", "works_model", "works_price"]
+OWN_FIELDS = ["own_what", "own_size", "own_price"]
+COMPLEXITY_FIELD = "complexity"
+
 
 def _director(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return db.query_one(conn, "SELECT * FROM agents WHERE kind = 'director' LIMIT 1")
@@ -30,6 +43,25 @@ def _director(conn: sqlite3.Connection) -> sqlite3.Row | None:
 
 def _fmt_minutes(minutes: float) -> str:
     return str(int(minutes)) if float(minutes).is_integer() else str(minutes)
+
+
+def _editor(
+    id: str, fields: list[str], columns: list[str], rows: list[list[str]], *, table: bool = True
+) -> dict:
+    """What macros.html's `table_editor` draws: one input per cell, named by the
+    column's entry in `fields`; a list (`table` false) has no header row."""
+    return {"id": id, "fields": fields, "columns": columns, "rows": rows, "table": table}
+
+
+def _table_rows(
+    lists: dict[str, list[str]], fields: list[str], columns: tuple[str, ...]
+) -> list[dict]:
+    """The rows a table editor posted: the fields zipped by position, each cell
+    trimmed."""
+    return [
+        dict(zip(columns, (cell.strip() for cell in cells)))
+        for cells in zip(*(lists.get(f, []) for f in fields))
+    ]
 
 
 def _cost_note(
@@ -108,8 +140,9 @@ def _context(
     applied_note: str | None = None,
     form: dict[str, str] | None = None,
 ) -> dict:
-    """This page's two forms, drawn from what a refused submit posted where
-    there is one and from storage otherwise.
+    """This page's two forms, drawn from storage; `form` is what a refused change
+    of the director's model posted, and only its runtime, model, effort and mode are
+    read.
     """
     conn = get_db(request)
     director = _director(conn)
@@ -118,13 +151,40 @@ def _context(
         "request": request,
         "active": "settings",
         "director": director,
-        "owner_name": form.get("owner_name", get_owner_name(conn)),
+        "owner_name": get_owner_name(conn),
         # The stored row, or the default when there is no row.
-        "silence_minutes": form.get(
-            "silence_minutes",
-            core.get_setting(conn, SILENCE_NOTICE_SETTING, "")
-            or _fmt_minutes(SILENCE_NOTICE_DEFAULT_MINUTES),
+        "silence_minutes": core.get_setting(conn, SILENCE_NOTICE_SETTING, "")
+        or _fmt_minutes(SILENCE_NOTICE_DEFAULT_MINUTES),
+        "wallet_rows": [
+            {
+                "currency": currency,
+                "week_key": wallets.week_key(runtime),
+                "window_key": wallets.window_key(runtime),
+                "reserve_key": wallets.reserve_key(runtime),
+                "remaining": wallets.week_remaining(conn, runtime),
+            }
+            for runtime, currency in wallets.CURRENCY.items()
+            if installed(runtime, get_config(request))
+        ],
+        "price_list_note": core.get_setting(conn, core.PRICE_LIST_NOTE_SETTING, "") or "",
+        "price_list_works": _editor(
+            "works", WORKS_FIELDS, WORKS_COLUMNS,
+            [[row[c] for c in core.PRICE_WORKS_COLUMNS] for row in core.price_works(conn)],
         ),
+        "price_list_own": _editor(
+            "own", OWN_FIELDS, OWN_COLUMNS,
+            [[row[c] for c in core.PRICE_OWN_COLUMNS] for row in core.price_own(conn)],
+        ),
+        # The values in effect: the stored lines, or the defaults when there are none.
+        "work_complexities": _editor(
+            "complexities", [COMPLEXITY_FIELD], ["Complexity"],
+            [[value] for value in core.work_complexities(conn)],
+            table=False,
+        ),
+        # The stored value of every wallet field, by its setting key.
+        "wallet_values": {
+            key: core.get_setting(conn, key, "") or "" for key in wallets.SETTING_KEYS
+        },
         # partials/notice.html's contract: a refusal, a confirmation, or neither.
         "notice_error": error,
         "notice_ok": (applied_note or "Saved.") if saved else None,
@@ -162,16 +222,37 @@ def settings_fragment(request: Request):
 
 @router.post("/settings")
 async def save_settings(request: Request):
-    """Owner-facing config only: owner_name and the silence threshold. Both are
-    plain settings rows.
+    """Owner-facing config only: owner_name, the silence threshold, the wallets'
+    weekly limits, 5h windows and reserve, the two price lists with their note, and
+    the work complexities.
     """
     conn = get_db(request)
     data = await read_form(request)
+    lists = await read_form_lists(request)
     owner_name = data.get("owner_name", "").strip()
     silence_minutes = data.get("silence_minutes", "").strip()
     core.set_setting(conn, "owner_name", owner_name, actor=owner_name)
     # Written verbatim, empty string included.
     core.set_setting(conn, SILENCE_NOTICE_SETTING, silence_minutes, actor=owner_name)
+    # Only the runtimes whose rows the page drew posted theirs.
+    for key in wallets.SETTING_KEYS:
+        if key in data:
+            core.set_setting(conn, key, data[key].strip(), actor=owner_name)
+    core.set_price_lists(
+        conn,
+        _table_rows(lists, WORKS_FIELDS, core.PRICE_WORKS_COLUMNS),
+        _table_rows(lists, OWN_FIELDS, core.PRICE_OWN_COLUMNS),
+        actor=owner_name,
+    )
+    # Written verbatim.
+    core.set_setting(
+        conn, core.PRICE_LIST_NOTE_SETTING, data.get(core.PRICE_LIST_NOTE_SETTING, ""),
+        actor=owner_name,
+    )
+    complexities = [v.strip() for v in lists.get(COMPLEXITY_FIELD, [])]
+    core.set_setting(
+        conn, core.WORK_COMPLEXITIES_SETTING, "\n".join(complexities), actor=owner_name
+    )
     return templates.TemplateResponse(request, "partials/settings_form.html", _context(request, saved=True))
 
 

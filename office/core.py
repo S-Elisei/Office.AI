@@ -124,6 +124,68 @@ def set_setting(conn, key: str, value: str, actor: str | None = None) -> None:
         _emit(conn, "settings", "setting", None, {"key": key}, actor=actor)
 
 
+#: The free text shown above the price list in roster.
+PRICE_LIST_NOTE_SETTING = "price_list_note"
+#: The owner's list of complexities, one per line.
+WORK_COMPLEXITIES_SETTING = "work_complexities"
+DEFAULT_WORK_ROLES = ("coding", "review", "consultation", "design")
+DEFAULT_WORK_COMPLEXITIES = ("fully specified", "medium", "high")
+
+PRICE_WORKS_COLUMNS = ("role", "complexity", "size", "model", "price")
+PRICE_OWN_COLUMNS = ("what", "size", "price")
+
+
+def price_works(conn) -> list[dict]:
+    """The works price list's rows, in the order the owner set."""
+    rows = db.query(conn, "SELECT * FROM price_works ORDER BY position")
+    return [dict(row) for row in rows]
+
+
+def price_own(conn) -> list[dict]:
+    """The own price list's rows, in the order the owner set."""
+    rows = db.query(conn, "SELECT * FROM price_own ORDER BY position")
+    return [dict(row) for row in rows]
+
+
+def set_price_lists(conn, works: list[dict], own: list[dict], actor: str | None = None) -> None:
+    """Replace both price lists' rows in one transaction. Each row is a dict of the
+    table's columns; `position` is the row's index in its list."""
+    with db.transaction(conn):
+        for table, columns, rows in (
+            ("price_works", PRICE_WORKS_COLUMNS, works),
+            ("price_own", PRICE_OWN_COLUMNS, own),
+        ):
+            db.execute(conn, f"DELETE FROM {table}")
+            for position, row in enumerate(rows):
+                db.execute(
+                    conn,
+                    f"INSERT INTO {table} (position, {', '.join(columns)}) "
+                    f"VALUES (?{', ?' * len(columns)})",
+                    (position, *(row[column] for column in columns)),
+                )
+        _emit(conn, "settings", "setting", None, {"key": "price_list"}, actor=actor)
+
+
+def work_roles(conn) -> list[str]:
+    """The roles a work may be assigned as, in effect now: the distinct roles of the
+    works price list, in order of first appearance; the defaults when it has no row."""
+    roles = [row["role"] for row in db.query(
+        conn, "SELECT role FROM price_works GROUP BY role ORDER BY MIN(position)"
+    )]
+    return roles or list(DEFAULT_WORK_ROLES)
+
+
+def work_complexities(conn) -> list[str]:
+    """The complexities a work may be assigned as, in effect now: the lines of the
+    setting, blank ones dropped; the defaults when it has none."""
+    lines = [
+        line.strip()
+        for line in (get_setting(conn, WORK_COMPLEXITIES_SETTING, "") or "").splitlines()
+        if line.strip()
+    ]
+    return lines or list(DEFAULT_WORK_COMPLEXITIES)
+
+
 def get_owner_name(conn) -> str:
     """The human owner's name in the shared participant namespace."""
     return get_setting(conn, "owner_name", DEFAULT_OWNER_NAME)

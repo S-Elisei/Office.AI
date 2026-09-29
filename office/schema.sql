@@ -284,6 +284,27 @@ CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender, id);
 
 -- Every ordering and every cursor in this office runs on `id`.
 
+-- The owner's price list of the works a manager assigns, in the order the owner
+-- set. `price` is the owner's own text; the distinct roles are the roles assign
+-- accepts.
+CREATE TABLE IF NOT EXISTS price_works (
+    position INTEGER PRIMARY KEY,
+    role TEXT NOT NULL,
+    complexity TEXT NOT NULL,
+    size TEXT NOT NULL,
+    model TEXT NOT NULL,
+    price TEXT NOT NULL
+);
+
+-- The owner's price list of what a lead spends on its own, in the order the
+-- owner set. `price` is the owner's own text.
+CREATE TABLE IF NOT EXISTS price_own (
+    position INTEGER PRIMARY KEY,
+    what TEXT NOT NULL,
+    size TEXT NOT NULL,
+    price TEXT NOT NULL
+);
+
 -- One-off key/value config.
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,

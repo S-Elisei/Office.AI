@@ -301,7 +301,10 @@ Stopping to ask is normal.
 
 ## Quota
 
-There are no paid tokens. `roster()` shows what is left in each bucket.
+There are no paid tokens. `roster()` shows what is left in each bucket, and each runtime's wallet
+in its own currency (CL claude, CD codex, GM agy): what the team has left of its weekly share
+until payday, the weekly reset, and what is left of the current 5-hour window, the most it may
+spend now.
 
 **All agents on one runtime share its buckets.**
 

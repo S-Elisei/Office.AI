@@ -30,11 +30,7 @@
   <label for="{{ prefix }}-model">Model</label>
   {% if not m_catalogue %}
   <input id="{{ prefix }}-model" name="model" type="text" value="{{ m_model }}" required {{ live() }}>
-  <span class="hint">
-    No model list for {{ m_runtime }}: the office asks each vendor for its own list every hour
-    and {{ m_runtime }} has not given one. Type the id yourself — nothing can check it until
-    the vendor answers again.
-  </span>
+  <span class="hint">Type the model id; {{ m_runtime }} has listed no models.</span>
   {% elif m_custom %}
   <div class="field-with-alt">
     <input id="{{ prefix }}-model" name="model" type="text" value="{{ m_model }}" required
@@ -46,17 +42,9 @@
   </div>
   <input type="hidden" name="model_mode" value="custom">
   {% if m_runtime == 'claude' %}
-  <span class="hint">
-    claude takes a full model id (claude-…) as well as the names in the list, and publishes no
-    list of full ids — so that is the one model string the office cannot check, and a wrong one
-    is found by the agent's first turn in claude's own words. Anything else typed here is
-    refused when you save.
-  </span>
+  <span class="hint">Type a full claude model id; it is not checked until an agent's first turn.</span>
   {% else %}
-  <span class="hint">
-    Not one of the models {{ m_runtime }} lists, so saving it will be refused. Pick from the list
-    instead — or leave it, if {{ m_runtime }} is about to list it again.
-  </span>
+  <span class="hint">Only a model {{ m_runtime }} lists can be saved.</span>
   {% endif %}
   {% else %}
   <select id="{{ prefix }}-model" name="model" required {{ live() }}>
@@ -83,18 +71,18 @@
     <option value="{{ level }}" {{ 'selected' if level == m_effort }}>{{ level }}</option>
     {% endfor %}
   </select>
-  <span class="hint">The levels {{ m_runtime }} publishes for {{ m_model }} — the same ones a save is checked against.</span>
+  <span class="hint">The levels {{ m_runtime }} publishes for {{ m_model }}.</span>
   {% elif m_known %}
   <select disabled><option>not published by {{ m_runtime }}</option></select>
   <input type="hidden" name="effort" value="">
-  <span class="hint">{{ m_runtime }} publishes no effort levels, so there is nothing to pick and nothing is sent.</span>
+  <span class="hint">{{ m_runtime }} publishes no effort levels for {{ m_model }}.</span>
   {% elif m_catalogue and not m_custom %}
   <select disabled><option>pick a model first</option></select>
   <input type="hidden" name="effort" value="">
-  <span class="hint">The levels depend on the model — this fills in when you pick one.</span>
+  <span class="hint">Pick a model to see its effort levels.</span>
   {% else %}
   <input id="{{ prefix }}-effort" name="effort" type="text" value="{{ m_effort or '' }}" {{ live() }}>
-  <span class="hint">Not known for this model, and not checked when you save it.</span>
+  <span class="hint">The effort is not checked when you save it.</span>
   {% endif %}
 </div>
 

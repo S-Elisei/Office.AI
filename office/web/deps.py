@@ -34,3 +34,13 @@ async def read_form(request: Request) -> dict[str, str]:
     """
     body = await request.body()
     return dict(parse_qsl(body.decode("utf-8"), keep_blank_values=True))
+
+
+async def read_form_lists(request: Request) -> dict[str, list[str]]:
+    """Parse an application/x-www-form-urlencoded POST body, keeping every value of
+    a repeated key in document order."""
+    body = await request.body()
+    fields: dict[str, list[str]] = {}
+    for key, value in parse_qsl(body.decode("utf-8"), keep_blank_values=True):
+        fields.setdefault(key, []).append(value)
+    return fields

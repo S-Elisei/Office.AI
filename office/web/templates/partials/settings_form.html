@@ -1,3 +1,4 @@
+{% import "macros.html" as m %}
 {% include "partials/notice.html" %}
 
 <form method="post" action="/settings" hx-post="/settings" hx-target="#settings-form" hx-swap="innerHTML"
@@ -5,19 +6,59 @@
   <div class="form-row mb-0">
     <label for="s-owner-name">Owner name</label>
     <input id="s-owner-name" name="owner_name" type="text" value="{{ owner_name }}" required pattern="[^:]*">
-    <span class="hint">How you appear to agents in chat. A name may not contain a colon.</span>
+    <span class="hint">How you appear to agents in chat; it may not contain a colon.</span>
   </div>
   <div class="form-row mb-0" style="margin-top: 16px;">
     <label for="s-silence-minutes">Silence notice, minutes</label>
     <input id="s-silence-minutes" name="silence_minutes" type="number" step="any"
            value="{{ silence_minutes }}">
-    <span class="hint">
-      How long an agent may print nothing before the office mentions it to its manager.
-      It only tells the manager — nothing is stopped and nothing is killed. The director's
-      own silence is not reported.
-      Enter <strong>0</strong> to never report; clear the box to go back to the default.
-    </span>
+    <span class="hint">Minutes an agent may print nothing before its manager is told; 0 never tells, empty uses the default.</span>
   </div>
+  <div class="form-row mb-0" style="margin-top: 16px;">
+    <label>Wallets</label>
+    <span class="hint">Each runtime's weekly limit and 5h window in its currency (CL claude, CD codex, GM agy), empty when there is none; the slider sets the share of the week the team leaves untouched.</span>
+    {% for row in wallet_rows %}
+    {% set reserve = (wallet_values[row.reserve_key] or 0)|float %}
+    <div data-wallet data-currency="{{ row.currency }}" style="margin-top: 10px;">
+      <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center;">
+        <strong style="width: 28px;">{{ row.currency }}</strong>
+        <label for="s-{{ row.week_key }}" style="margin: 0;">Total weekly limit</label>
+        <input id="s-{{ row.week_key }}" name="{{ row.week_key }}" type="number" step="any" min="0"
+               value="{{ wallet_values[row.week_key] }}" style="width: 110px;" data-week>
+        <label for="s-{{ row.window_key }}" style="margin: 0;">5h window</label>
+        <input id="s-{{ row.window_key }}" name="{{ row.window_key }}" type="number" step="any" min="0"
+               value="{{ wallet_values[row.window_key] }}" style="width: 110px;">
+      </div>
+      <div class="bar-row">
+        <div class="bar-track wallet-bar">
+          {% if row.remaining is not none %}
+          <div class="bar-fill wallet-fill" style="width: {{ (row.remaining * 100) | round(0, 'floor') }}%"></div>
+          {% endif %}
+          <input type="range" min="0" max="100" step="1" value="{{ (100 - reserve) | round | int }}" data-reserve-slider
+                 aria-label="{{ row.currency }} reserve">
+        </div>
+        <div class="bar-meta" data-reserve-label>{{ reserve | round | int }}% reserved &middot; {{ (reserve * (wallet_values[row.week_key] or 0)|float / 100) | round(1) }} {{ row.currency }}</div>
+        <input type="hidden" name="{{ row.reserve_key }}" value="{{ wallet_values[row.reserve_key] }}" data-reserve>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="form-row mb-0" style="margin-top: 16px;">
+    <label for="s-price-list-note">Note shown above the price list</label>
+    <textarea id="s-price-list-note" name="price_list_note">{{ price_list_note }}</textarea>
+  </div>
+  {{ m.table_editor(
+    price_list_works, "Price list: works a manager assigns",
+    "Shown to the director and the leads as written; the Role column's values are the roles assign accepts, and with no rows the defaults apply."
+  ) }}
+  {{ m.table_editor(
+    price_list_own, "Price list: what a lead spends on its own",
+    "Shown to the director and the leads as written."
+  ) }}
+  {{ m.table_editor(
+    work_complexities, "Work complexities",
+    "The values assign accepts as a work's complexity; with none the defaults apply."
+  ) }}
   <div class="form-actions">
     <button type="submit" class="primary" disabled>Save</button>
   </div>
@@ -33,8 +74,7 @@
   <div class="form-row mb-0">
     <label for="s-instructions">{{ director.name }}'s standing instructions</label>
     <textarea id="s-instructions" name="instructions">{{ instructions }}</textarea>
-    <span class="hint">Project rules and wiki are injected separately — this is the standing brief.
-      Leave it empty for none.</span>
+    <span class="hint">The director's standing brief; rules and wiki reach it separately.</span>
   </div>
   <div class="form-actions">
     <button type="submit" class="primary">Save instructions</button>
@@ -44,7 +84,7 @@
 <hr style="border: none; border-top: 1px solid var(--border); margin: 22px 0;">
 
 <p class="text-dim" style="margin-top: 0; font-size: 12.5px;">
-  Replacing the director happens here, in place.
+  Change the director's runtime, model and effort here.
 </p>
 <form method="post" action="/settings/director-model" hx-post="/settings/director-model" hx-target="#settings-form" hx-swap="innerHTML">
   <div id="s-model-fields">{% include "partials/model_fields.html" %}</div>
@@ -54,7 +94,7 @@
   </div>
 </form>
 <p class="text-faint" style="font-size: 11.5px; margin-bottom: 0;">
-  The director cannot change its own model; only you can.
+  Only you can change the director's model.
 </p>
 {% endif %}
 

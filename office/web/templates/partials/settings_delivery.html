@@ -1,21 +1,18 @@
 {% include "partials/notice.html" %}
 {% if delivery %}
 <p class="text-dim" style="margin-top: 0; font-size: 12.5px;">
-  The office keeps its own copy of the project in <code>{{ delivery.office_repo }}</code>, and
-  everything the team does happens there. Every merge into
+  The team works in the office's own copy of the project in <code>{{ delivery.office_repo }}</code>,
+  and every merge into
   {% if delivery.branch %}<code>{{ delivery.branch }}</code>{% else %}the main branch{% endif %} is sent to
-  your own repository, on the same branch name, before the office records it — so a merge that
-  went through is a merge you have.
+  your repository on the same branch before the office records it.
 </p>
 
 <div class="form-row">
   <label>Your repository</label>
   {% if delivery.repo %}<div><code>{{ delivery.repo }}</code></div>{% endif %}
   <span class="hint">
-    Not a setting and nothing to correct: the office keeps its data inside your project, so this
-    is the folder that data directory is in.
-    {% if delivery.not_a_repo %}There is no git repository there now, so a merge is refused until
-    there is one again.{% endif %}
+    The folder the office's data directory is in{% if delivery.not_a_repo %}; it holds no git
+    repository now{% endif %}.
   </span>
 </div>
 
@@ -23,13 +20,8 @@
 <form method="post" action="/settings/project/configure" hx-post="/settings/project/configure"
       hx-target="#settings-project" hx-swap="innerHTML" style="margin-top: 14px;">
   <p class="text-dim" style="font-size: 12.5px; margin-bottom: 6px;">
-    The repository in {{ delivery.repo }} does not carry
-    <code>receive.denyCurrentBranch = updateInstead</code>, which is what lets the office send
-    work to a branch you have open there and have git write the new files into that folder as
-    well as the history. Setting the project up puts that line there; it is missing now, so a
-    delivery would be refused. The button puts it back and changes nothing else in your
-    repository, now or later. To remove it again, run
-    <code>git config --unset receive.denyCurrentBranch</code> in that folder.
+    The repository in {{ delivery.repo }} lacks <code>receive.denyCurrentBranch = updateInstead</code>;
+    the button adds it.
   </p>
   <div class="form-actions">
     <button type="submit">Set up delivery</button>
