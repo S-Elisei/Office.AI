@@ -1505,6 +1505,9 @@ for codex and agy.
 - what is **left** until payday, out of the weekly share. The share is the weekly limit
   times one less the reserve; what is left is the weekly bucket's remaining fraction times
   the weekly limit, less the reserve times the weekly limit, not below zero;
+- the **spare**: what is left above the line, not below zero. The line is the share times
+  1 − e², where e is the part of the week gone since the last payday: the payday less
+  seven days, measured to now, over seven days; e is 0 when no payday is stored;
 - where there is a 5h window, what is **left in the current window** out of the 5h
   window: the `5h` bucket's remaining fraction times the 5h window, or what is left of the
   week if that is less; and the time the window resets;

@@ -1139,7 +1139,7 @@ def _wallet_lines(conn) -> list[str]:
     for w in owned:
         line = (
             f"    {w['currency']} ({w['runtime']}): {_units(w['left'])} of {_units(w['share'])} left "
-            f"until payday, {_fmt_epoch(w['payday'])}"
+            f"until payday, {_fmt_epoch(w['payday'])}; spare {_units(w['spare'])}"
         )
         if w["window"] is not None:
             line += (
@@ -1906,7 +1906,8 @@ _TOOLS: dict[str, types.Tool] = {
         "them or which they assigned, with who assigned it, why it stopped and, for a pause, "
         "the earliest it can resume; remaining quota per runtime, with its reset time; per "
         "runtime, its wallet in the runtime's currency (CL claude, CD codex, GM agy): what the team "
-        "has left of its weekly share until payday and of the current 5-hour window; the owner's "
+        "has left of its weekly share until payday, its spare (what is left above a line that holds "
+        "more in hand the further payday is) and what is left of the current 5-hour window; the owner's "
         "price list; the roles and the complexities in effect for assign; each runtime and "
         "model held for quota, with the time before which no turn starts on it; "
         "tasks that look ready but whose dependency is not done; the model catalogue; "

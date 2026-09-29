@@ -3,6 +3,8 @@ one unit being one dollar at the vendor's API list prices."""
 
 from __future__ import annotations
 
+import time
+
 from office import core
 
 #: A runtime's currency.
@@ -13,6 +15,9 @@ _WEEK_BUCKET = {"claude": "week (all models)", "codex": "week", "agy": "week"}
 
 #: The quota bucket that limits what may be spent right now.
 _WINDOW_BUCKET = "5h"
+
+#: The span from one payday to the next.
+_WEEK_SECONDS = 7 * 24 * 3600
 
 
 def week_key(runtime: str) -> str:
@@ -60,9 +65,12 @@ def overview(conn) -> list[dict]:
     payday: the weekly remainder less the reserve, not below zero), `share` (the
     team's weekly share: the weekly limit less the reserve), `window_left` and
     `window` (what the 5h window lets it spend now, and its limit; None unless the
-    5h window is set and its bucket is stored), `payday` and `next_window`.
+    5h window is set and its bucket is stored), `spare` (what is left above the line:
+    the share times 1 - e², e being the part of the week gone since the last payday; e
+    is 0 when no payday is stored), `payday` and `next_window`.
     """
     buckets = {(q["runtime"], q["label"]): q for q in core.quota_buckets(conn)}
+    now = time.time()
     wallets = []
     for runtime, currency in CURRENCY.items():
         limit = _number(core.get_setting(conn, week_key(runtime)))
@@ -74,11 +82,14 @@ def overview(conn) -> list[dict]:
         window = _number(core.get_setting(conn, window_key(runtime)))
         five_hours = buckets.get((runtime, _WINDOW_BUCKET))
         has_window = window and five_hours is not None
+        share = limit * (1 - reserve)
+        gone = 1 - min(1, (int(week["reset_time"]) - now) / _WEEK_SECONDS) if week["reset_time"] else 0
         wallets.append({
             "runtime": runtime,
             "currency": currency,
             "left": left,
-            "share": limit * (1 - reserve),
+            "share": share,
+            "spare": max(0, left - share * (1 - gone ** 2)),
             "window_left": min(five_hours["remaining_fraction"] * window, left) if has_window else None,
             "window": window if has_window else None,
             "payday": week["reset_time"],
