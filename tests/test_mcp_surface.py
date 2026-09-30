@@ -435,7 +435,7 @@ def test_an_assignment_with_a_role_that_is_not_in_effect_is_refused_naming_the_r
     # A stored price list decides the roles in place of the defaults. Invented row.
     core.set_price_lists(
         conn,
-        [{"role": "art", "complexity": "medium", "size": "S", "model": "m", "price": "1 CL"}],
+        [{"role": "art", "complexity": "medium", "model": "m", "effort": "", "price": "1 CL"}],
         [],
         actor="boss",
     )

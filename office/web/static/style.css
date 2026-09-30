@@ -1087,7 +1087,7 @@ textarea {
   font-size: 12.5px;
 }
 
-/* A table or list editor: the table scrolls inside its own box, never the page. */
+/* A table editor: the table scrolls inside its own box, never the page. */
 .form-row.editor {
   max-width: none;
   margin: 16px 0 0;
@@ -1098,7 +1098,7 @@ textarea {
 .editor-table td { padding: 3px 4px; }
 
 .editor-table input[type="text"] {
-  width: 100%;
+  field-sizing: content;
   min-width: 96px;
 }
 

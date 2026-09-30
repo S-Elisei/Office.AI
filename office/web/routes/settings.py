@@ -1,7 +1,7 @@
-"""Settings: owner_name, the silence threshold, the wallets and the work
-complexities (core.set_setting), the two price lists (core.set_price_lists) and
-their note, the director's standing instructions (core.set_instructions), and the
-director's live runtime/model/effort (core.update_agent_model).
+"""Settings: owner_name, the silence threshold and the wallets (core.set_setting),
+the two price lists (core.set_price_lists) and their note, the director's standing
+instructions (core.set_instructions), and the director's live runtime/model/effort
+(core.update_agent_model).
 """
 
 from __future__ import annotations
@@ -28,13 +28,12 @@ RUNTIMES = ["claude", "codex", "agy"]
 CUSTOM_MODEL = "__custom__"
 
 # The header cells of the two price lists' tables.
-WORKS_COLUMNS = ["Role", "Complexity", "Size", "Model", "Price (typical / with margin)"]
+WORKS_COLUMNS = ["Role", "Complexity", "Model", "Effort", "Price (typical / with margin)"]
 OWN_COLUMNS = ["What", "Size", "Price (typical / with margin)"]
 
 # The names of the fields a row's cells post, in column order.
-WORKS_FIELDS = ["works_role", "works_complexity", "works_size", "works_model", "works_price"]
+WORKS_FIELDS = ["works_role", "works_complexity", "works_model", "works_effort", "works_price"]
 OWN_FIELDS = ["own_what", "own_size", "own_price"]
-COMPLEXITY_FIELD = "complexity"
 
 
 def _director(conn: sqlite3.Connection) -> sqlite3.Row | None:
@@ -46,11 +45,11 @@ def _fmt_minutes(minutes: float) -> str:
 
 
 def _editor(
-    id: str, fields: list[str], columns: list[str], rows: list[list[str]], *, table: bool = True
+    id: str, fields: list[str], columns: list[str], rows: list[list[str]], required: int
 ) -> dict:
     """What macros.html's `table_editor` draws: one input per cell, named by the
-    column's entry in `fields`; a list (`table` false) has no header row."""
-    return {"id": id, "fields": fields, "columns": columns, "rows": rows, "table": table}
+    column's entry in `fields`; a row's first `required` cells are required."""
+    return {"id": id, "fields": fields, "columns": columns, "rows": rows, "required": required}
 
 
 def _table_rows(
@@ -172,16 +171,12 @@ def _context(
         "price_list_works": _editor(
             "works", WORKS_FIELDS, WORKS_COLUMNS,
             [[row[c] for c in core.PRICE_WORKS_COLUMNS] for row in core.price_works(conn)],
+            required=2,
         ),
         "price_list_own": _editor(
             "own", OWN_FIELDS, OWN_COLUMNS,
             [[row[c] for c in core.PRICE_OWN_COLUMNS] for row in core.price_own(conn)],
-        ),
-        # The values in effect: the stored lines, or the defaults when there are none.
-        "work_complexities": _editor(
-            "complexities", [COMPLEXITY_FIELD], ["Complexity"],
-            [[value] for value in core.work_complexities(conn)],
-            table=False,
+            required=1,
         ),
         # The stored value of every wallet field, by its setting key.
         "wallet_values": {
@@ -225,8 +220,8 @@ def settings_fragment(request: Request):
 @router.post("/settings")
 async def save_settings(request: Request):
     """Owner-facing config only: owner_name, the silence threshold, the wallets'
-    weekly limits, 5h windows, reserve and withheld spare, the two price lists with their note, and
-    the work complexities.
+    weekly limits, 5h windows, reserve and withheld spare, and the two price lists with their
+    note.
     """
     conn = get_db(request)
     data = await read_form(request)
@@ -255,10 +250,6 @@ async def save_settings(request: Request):
     core.set_setting(
         conn, core.PRICE_LIST_NOTE_SETTING, data.get(core.PRICE_LIST_NOTE_SETTING, ""),
         actor=owner_name,
-    )
-    complexities = [v.strip() for v in lists.get(COMPLEXITY_FIELD, [])]
-    core.set_setting(
-        conn, core.WORK_COMPLEXITIES_SETTING, "\n".join(complexities), actor=owner_name
     )
     return templates.TemplateResponse(request, "partials/settings_form.html", _context(request, saved=True))
 

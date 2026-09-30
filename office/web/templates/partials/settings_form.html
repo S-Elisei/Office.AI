@@ -50,15 +50,11 @@
   </div>
   {{ m.table_editor(
     price_list_works, "Price list: works a manager assigns",
-    "Shown to the director and the leads as written; the Role column's values are the roles assign accepts, and with no rows the defaults apply."
+    "Shown to the director and the leads as written; its roles, and each role's complexities, are what assign accepts, and with no rows the defaults apply."
   ) }}
   {{ m.table_editor(
     price_list_own, "Price list: what a lead spends on its own",
     "Shown to the director and the leads as written."
-  ) }}
-  {{ m.table_editor(
-    work_complexities, "Work complexities",
-    "The values assign accepts as a work's complexity; with none the defaults apply."
   ) }}
   <div class="form-actions">
     <button type="submit" class="primary" disabled>Save</button>

@@ -291,8 +291,8 @@ CREATE TABLE IF NOT EXISTS price_works (
     position INTEGER PRIMARY KEY,
     role TEXT NOT NULL,
     complexity TEXT NOT NULL,
-    size TEXT NOT NULL,
     model TEXT NOT NULL,
+    effort TEXT NOT NULL,
     price TEXT NOT NULL
 );
 

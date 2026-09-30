@@ -126,12 +126,10 @@ def set_setting(conn, key: str, value: str, actor: str | None = None) -> None:
 
 #: The free text shown above the price list in roster.
 PRICE_LIST_NOTE_SETTING = "price_list_note"
-#: The owner's list of complexities, one per line.
-WORK_COMPLEXITIES_SETTING = "work_complexities"
 DEFAULT_WORK_ROLES = ("coding", "review", "consultation", "design")
 DEFAULT_WORK_COMPLEXITIES = ("fully specified", "medium", "high")
 
-PRICE_WORKS_COLUMNS = ("role", "complexity", "size", "model", "price")
+PRICE_WORKS_COLUMNS = ("role", "complexity", "model", "effort", "price")
 PRICE_OWN_COLUMNS = ("what", "size", "price")
 
 
@@ -175,15 +173,17 @@ def work_roles(conn) -> list[str]:
     return roles or list(DEFAULT_WORK_ROLES)
 
 
-def work_complexities(conn) -> list[str]:
-    """The complexities a work may be assigned as, in effect now: the lines of the
-    setting, blank ones dropped; the defaults when it has none."""
-    lines = [
-        line.strip()
-        for line in (get_setting(conn, WORK_COMPLEXITIES_SETTING, "") or "").splitlines()
-        if line.strip()
-    ]
-    return lines or list(DEFAULT_WORK_COMPLEXITIES)
+def work_complexities(conn, role: str) -> list[str]:
+    """The complexities a work of `role` may be assigned as, in effect now: the distinct
+    complexities of that role's rows in the works price list, in order of first
+    appearance; the defaults when the list has no row."""
+    if db.query_one(conn, "SELECT 1 FROM price_works LIMIT 1") is None:
+        return list(DEFAULT_WORK_COMPLEXITIES)
+    return [row["complexity"] for row in db.query(
+        conn,
+        "SELECT complexity FROM price_works WHERE role = ? GROUP BY complexity ORDER BY MIN(position)",
+        (role,),
+    )]
 
 
 def get_owner_name(conn) -> str:

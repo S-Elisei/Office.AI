@@ -324,7 +324,7 @@
       `${reserve}% reserved \u00b7 ${(reserve * week / 100).toFixed(1)} ${row.dataset.currency}`;
   }
 
-  // ---- table and list editors ---------------------------------------------
+  // ---- table editors --------------------------------------------------------
   document.addEventListener("click", (e) => {
     const button = e.target.closest && e.target.closest("[data-editor-act]");
     if (!button) return;

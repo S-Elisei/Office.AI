@@ -1094,8 +1094,10 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
                 f"{_fmt_epoch(h['until'])}; it refused one for quota"
             )
     lines.extend(_price_list_lines(conn))
-    lines.append(f"Roles in effect: {', '.join(core.work_roles(conn))}.")
-    lines.append(f"Complexities in effect: {', '.join(core.work_complexities(conn))}.")
+    lines.append("Roles in effect, each with the complexities it takes:")
+    lines.extend(
+        f"  {r}: {'; '.join(core.work_complexities(conn, r))}" for r in core.work_roles(conn)
+    )
     if snap["blocked_tasks"]:
         lines.append("Blocked (looks ready but its dependency isn't done):")
         for b in snap["blocked_tasks"]:
@@ -1151,25 +1153,25 @@ def _wallet_lines(conn) -> list[str]:
 
 
 def _price_list_lines(conn) -> list[str]:
-    """roster()'s price list: the owner's note, the two lists' rows with the cells
-    joined by ` | `, and the rule about work that is not on them."""
+    """roster()'s price list: the owner's note, the two lists each as its column names
+    and its rows with the cells joined by ` | `, and the rule about work that is not on
+    them."""
     owner = core.get_owner_name(conn)
     note = (core.get_setting(conn, core.PRICE_LIST_NOTE_SETTING, "") or "").splitlines()
-    works = [
-        "    " + " | ".join(row[column] for column in core.PRICE_WORKS_COLUMNS)
-        for row in core.price_works(conn)
-    ]
-    own = [
-        "    " + " | ".join(row[column] for column in core.PRICE_OWN_COLUMNS)
-        for row in core.price_own(conn)
-    ]
+
+    def table(columns, rows) -> list[str]:
+        if not rows:
+            return ["    (empty)"]
+        lines = [" | ".join(columns)] + [" | ".join(row[c] for c in columns) for row in rows]
+        return [f"    {line}" for line in lines]
+
     return [
         "Price list (typical / with margin):",
         *(f"  {line}" for line in note if line.strip()),
         "  Works you assign:",
-        *(works or ["    (empty)"]),
+        *table(core.PRICE_WORKS_COLUMNS, core.price_works(conn)),
         "  What a lead spends on its own:",
-        *(own or ["    (empty)"]),
+        *table(core.PRICE_OWN_COLUMNS, core.price_own(conn)),
         f"Work that is not in the price list is not assigned, unless the list is empty or {owner} "
         "has instructed otherwise.",
     ]
@@ -1388,11 +1390,12 @@ def _ask_for_yourself(conn, me: dict, button: str) -> str:
     return f"Ask {core.get_owner_name(conn)} to use {button}."
 
 
-def _one_of(name: str, value, allowed: list[str]) -> None:
-    """Refuse a value that is not one of `allowed`, naming both."""
+def _one_of(name: str, value, allowed: list[str], sep: str = ", ") -> None:
+    """Refuse a value that is not one of `allowed`, naming both, `allowed` joined by
+    `sep`."""
     if value not in allowed:
         raise ValueError(
-            f"{name} '{value}' is not in effect — assign again with one of: {', '.join(allowed)}"
+            f"{name} '{value}' is not in effect — assign again with one of: {sep.join(allowed)}"
         )
 
 
@@ -1404,7 +1407,10 @@ def _h_assign(conn, config, agent_name, role, args) -> str:
     if target["kind"] == "executor":
         _require(args, "role", "complexity")
         _one_of("role", args["role"], core.work_roles(conn))
-        _one_of("complexity", args["complexity"], core.work_complexities(conn))
+        _one_of(
+            f"for role '{args['role']}', complexity", args["complexity"],
+            core.work_complexities(conn, args["role"]), sep="; ",
+        )
     elif args.get("role") is not None or args.get("complexity") is not None:
         raise ValueError(
             f"'{target['name']}' is a {target['kind']}: a work for a {target['kind']} takes no "
@@ -1996,7 +2002,7 @@ _TOOLS: dict[str, types.Tool] = {
         "to an agent under you. You name the branch. The agent creates it itself. Nothing is "
         "reserved. You are recorded as the work's assigner. A work for an executor takes a role, "
         "one of the roles of the works price list roster() shows (the default roles when that list "
-        "is empty), and a complexity, one of the complexities roster() lists as in effect; a work "
+        "is empty), and a complexity, one of those roster() lists as in effect for its role; a work "
         "for a lead or for the director takes neither. "
         "On another agent's work: its report comes to you, and so does a notice if it fails or "
         "pauses. The brief goes to the agent as your own message, with the branch name, and it "
@@ -2021,7 +2027,7 @@ _TOOLS: dict[str, types.Tool] = {
                 },
                 "complexity": {
                     "type": "string",
-                    "description": "Executors only: one of the complexities roster() lists as in effect.",
+                    "description": "Executors only: one of the complexities roster() lists as in effect for the work's role.",
                 },
             },
             "required": ["agent", "brief", "branch"],

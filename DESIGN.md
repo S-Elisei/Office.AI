@@ -819,12 +819,12 @@ to `running` when its holder's next turn starts; a failed one only by
 `assign(agent, brief, task_id, branch, role, complexity)` — the branch is required, the
 task is not. `role` and `complexity` are required when the assignee is an executor and
 refused when it is a lead or the director: only an executor's work is classified. The
-role is one of the roles of the works price list (section 10), the distinct values of
-its Role column, and the complexity one of the values of the setting `work_complexities`,
-one value per line; a setting with no lines gives the defaults, `fully specified`,
-`medium`, `high`; a price list with no rows gives `coding`, `review`, `consultation`,
-`design`. A value outside the list is refused; the refusal names the value and lists the
-values in effect. Both go to the work's row in `work_log` (section 13), NULL for a lead's
+role is one of the distinct values of the works price list's Role column (section 10),
+and the complexity one of the distinct values of its Complexity column in that role's
+rows. A price list with no rows gives the roles `coding`, `review`, `consultation`,
+`design`, each with the complexities `fully specified`, `medium`, `high`. A value outside
+these is refused; the refusal names the value and lists the values in effect, for a
+complexity those of the role. Both go to the work's row in `work_log` (section 13), NULL for a lead's
 or the director's work. The caller is recorded as the assigner, `works.assigned_by_agent_id`; a manager
 that assigns a work to itself is its own assigner. `work_reassign` records its
 caller as the assigner in the same way, and the work's report and notices go to
@@ -1526,37 +1526,37 @@ box, saved with the rest of the form.
 
 Right after the quota part, `roster()` gives a manager the **price list**: a header naming
 its figures typical / with margin; the lines of the setting `price_list_note`, indented,
-when it has any; "Works you assign:" and the rows of the table `price_works`, indented
-(`(empty)` when it has none), each row `role | complexity | size | model | price`; "What a
-lead spends on its own:" and the rows of `price_own` the same way, each row `what | size |
+when it has any; "Works you assign:" and, indented, the line of its column names
+`role | complexity | model | effort | price` and the rows of the table
+`price_works` with their cells in that order (`(empty)` alone when it has none); "What a
+lead spends on its own:" and `price_own` the same way, its columns `what | size |
 price`; and the line "Work that is not in the price list is not assigned, unless the list
 is empty or <owner> has instructed otherwise." An executor does not see it.
 
-The office reads one thing in these rows: the **roles in effect** are the distinct
-`role` values of `price_works`, in order of first position. With no row, the defaults
-apply. Nothing is decided from `price_own`.
+The office reads two things in these rows: the **roles in effect** are the distinct
+`role` values of `price_works`, in order of first position, and each role's
+**complexities in effect** the distinct `complexity` values of its rows. With no row,
+the defaults apply. Nothing is decided from `price_own`.
 
 The two price lists are stored as the tables `price_works` (position, role, complexity,
-size, model, price) and `price_own` (position, what, size, price), every column but
+model, effort, price) and `price_own` (position, what, size, price), every column but
 `position` text. `position` is the order the owner set; `price` is the owner's own text
 ("0.1 / 0.3 CD", "unknown yet"). The setting `price_list_note` holds the free text shown
-above the price list, and `work_complexities` stays a setting.
+above the price list.
 
-The settings page edits the two price lists as tables and the work complexities as a
-list. Above the works table sits a text box, "Note shown above the price list", for
-`price_list_note`. A table has a header row, one text input per cell, and per row buttons
-that move it up, move it down and delete it, with an "Add row" button under it; the list
-has the same without the header. A row's first cell is required. Every row posts its cells as repeated fields in document
-order: `works_role`, `works_complexity`, `works_size`, `works_model` and `works_price` for
-the works table; `own_what`, `own_size` and `own_price` for the own table; `complexity`
-for the list. Saving zips each table's fields into rows, trims every cell, and replaces
-both tables in one transaction; the note is written as posted, and the complexities as the
-trimmed values, one per line. The wallet fields are written only for the runtimes the page
+The settings page edits the two price lists as tables. Above the works table sits a text box, "Note shown above the price list", for
+`price_list_note`. A table has a header row, one text input per cell as wide as its text,
+scrolling sideways inside its own box, and per row buttons
+that move it up, move it down and delete it, with an "Add row" button under it. A works
+row's role and complexity are required, and an own row's first cell. Every row posts its cells as repeated fields in document
+order: `works_role`, `works_complexity`, `works_model`, `works_effort` and `works_price` for
+the works table; `own_what`, `own_size` and `own_price` for the own table. Saving zips each table's fields into rows, trims every cell, and replaces
+both tables in one transaction; the note is written as posted. The wallet fields are written only for the runtimes the page
 shows. A
 table scrolls inside its own box.
 
-Right after the price list, one line names the roles in effect and one the complexities in
-effect, as `assign` takes them for an executor.
+Right after the price list, one line per role in effect names the role and the
+complexities it takes, as `assign` takes them for an executor.
 
 There is no notion of paid overflow: the vendors' overdraft fields are not read. An
 exhausted window arrives as a turn error and is classified as `quota_exhausted`.
@@ -2144,7 +2144,7 @@ All times are shown local and stored UTC.
    marked process that survived being killed, and open works that nothing moves and
    nobody above their agent has moved.
 10. **Settings** — the owner's name, the director's standing instructions, the
-    silence threshold, the wallets' weekly limits, 5h windows and reserve, the two price lists (a table each) and their note, the work complexities (a list, showing the values in effect), and the director's runtime/model/effort with the cost shown
+    silence threshold, the wallets' weekly limits, 5h windows and reserve, the two price lists (a table each) and their note, and the director's runtime/model/effort with the cost shown
     before confirmation. Also the delivery address, the outcome of the last delivery,
     and — while the owner's repository is missing `receive.denyCurrentBranch` — the
     "Set up delivery" button that writes it back.
@@ -2226,7 +2226,6 @@ wallet_<runtime>_week   the total weekly limit of a runtime's wallet, in units; 
 wallet_<runtime>_window the 5h window of a runtime's wallet, in units; empty means none
 wallet_<runtime>_reserve the percentage of the week the team leaves untouched; empty means 0
 price_list_note         the free text shown above the price list in roster; plain text
-work_complexities       the complexities assign accepts, one per line; empty means the defaults
 delivery_last           the outcome of the last delivery (JSON), for the settings page
 ```
 
