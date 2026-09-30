@@ -1278,6 +1278,8 @@ class Bus:
             "pid": turn.pid,
             "running_for": turn.running_for,
             "quiet_for": turn.quiet_for,
+            "context_used": turn.context_used,
+            "context_limit": turn.context_limit,
         }
 
     def turn_tail(self, agent_name: str) -> list[str] | None:
@@ -1445,7 +1447,9 @@ class Bus:
         if reason == "context_overflow":
             # The session is unusable; the next turn must start a fresh one.
             with db.transaction(self.conn) as conn:
-                conn.execute("UPDATE agents SET session_id = NULL WHERE name = ?", (name,))
+                row = db.query_one(conn, "SELECT id FROM agents WHERE name = ?", (name,))
+                if row is not None:
+                    core.end_session(conn, row["id"])
 
     def _work_ended_text(
         self,

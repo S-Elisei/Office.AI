@@ -24,12 +24,15 @@ def _works(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         """
         SELECT works.*, agents.name AS agent_name, agents.status AS agent_status,
                agents.runtime AS agent_runtime, agents.model AS agent_model,
+               agents.effort AS agent_effort,
                agents.context_used AS context_used, agents.context_limit AS context_limit,
-               assigner.name AS assigner_name, tasks.title AS task_title
+               assigner.name AS assigner_name, tasks.title AS task_title,
+               work_log.role AS log_role, work_log.complexity AS log_complexity
         FROM works
         JOIN agents ON agents.id = works.agent_id
         JOIN agents assigner ON assigner.id = works.assigned_by_agent_id
         LEFT JOIN tasks ON tasks.id = works.task_id
+        LEFT JOIN work_log ON work_log.work_id = works.id
         ORDER BY works.id DESC
         """,
     )

@@ -1095,7 +1095,7 @@ def update_agent_model(
         )
         if runtime_changed:
             # Not portable across vendors. In the same transaction as the runtime column.
-            db.execute(conn, "UPDATE agents SET session_id = NULL WHERE id = ?", (agent_id,))
+            end_session(conn, agent_id)
         _emit(
             conn, "agents", "agent", agent_id,
             {
@@ -1110,6 +1110,18 @@ def update_agent_model(
             "changed": True}
 
 
+def end_session(conn, agent_id: int) -> None:
+    """Forget the agent's conversation: session_id and context_used become NULL.
+
+    context_limit stays. Runs in the caller's transaction and opens none.
+    """
+    db.execute(
+        conn,
+        "UPDATE agents SET session_id = NULL, context_used = NULL WHERE id = ?",
+        (agent_id,),
+    )
+
+
 def start_new_session(conn, agent_id: int) -> dict:
     """agent(op=new_session). Drop the conversation, keep everything physical.
 
@@ -1118,7 +1130,7 @@ def start_new_session(conn, agent_id: int) -> dict:
     starts a fresh session and the bus hands it the full state snapshot.
     """
     with db.transaction(conn):
-        db.execute(conn, "UPDATE agents SET session_id = NULL WHERE id = ?", (agent_id,))
+        end_session(conn, agent_id)
     return _row(conn, "agents", "id", agent_id)
 
 

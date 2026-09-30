@@ -1051,7 +1051,7 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
         if a["id"] == me["id"]:
             line += " (you)"
         elif a["id"] in reach:
-            ctx = f"{a['context_used']}/{a['context_limit']}" if a["context_limit"] else "n/a"
+            ctx = f"{a['context_used']}/{a['context_limit']}" if a["context_used"] is not None and a["context_limit"] else "n/a"
             line += f" status={a['status']} context={ctx}"
         lines.append(line)
     # The caller's own instructions and nobody else's.

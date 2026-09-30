@@ -11,7 +11,7 @@
   <div class="panel work-card">
     <div class="work-head">
       <span class="agent">{{ w.agent_name }}</span>
-      <span class="text-faint work-runtime">&middot; {{ w.agent_runtime }}/{{ w.agent_model }}</span>
+      <span class="text-faint work-runtime">&middot; {{ w.agent_runtime }}/{{ w.agent_model }}{% if w.agent_effort %}/{{ w.agent_effort }}{% endif %}{% if w.log_role %} &middot; {{ w.log_role }} &middot; {{ w.log_complexity }}{% endif %}</span>
       {{ m.status_badge(w.derived_status) }}
       <span class="branch">{{ w.branch }}</span>
       {% if w.task_title %}<span class="text-faint work-task">&middot; {{ w.task_title }}</span>{% endif %}
@@ -37,7 +37,11 @@
     {% endif %}
     <div class="bar-row" style="padding: 0 0 4px;">
       <div class="bar-label">Context fill</div>
-      {{ m.context_bar(w.context_used, w.context_limit) }}
+      {% if turn and turn.context_used is not none %}
+        {{ m.context_bar(turn.context_used, turn.context_limit) }}
+      {% else %}
+        {{ m.context_bar(w.context_used, w.context_limit) }}
+      {% endif %}
     </div>
     {% set brief_preview = (w.brief or '').strip().split('\n')[0].lstrip('#*->+ ') %}
     <details class="work-brief" data-office-details="work-{{ w.id }}-brief">

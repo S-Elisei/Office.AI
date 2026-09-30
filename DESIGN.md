@@ -721,7 +721,7 @@ which `health()` says out loud; an estimate is never substituted.
 ### Post-mortem classification
 
 A turn that dies at or above 85 % of the window is read as `context_overflow` and
-the agent's `session_id` is cleared. This is a diagnosis: nothing consults the
+the agent's `session_id` and `context_used` are cleared. This is a diagnosis: nothing consults the
 figure while a turn is alive.
 
 ### When a session ends
@@ -729,7 +729,7 @@ figure while a turn is alive.
 | Case | Cause |
 |---|---|
 | Quota exhausted | the runtime stopped answering |
-| Runtime change | session ids are not portable between vendors |
+| Runtime change | session ids are not portable between vendors; `session_id` and `context_used` are cleared |
 | Context overflow | the vendor hit its own wall |
 | Stop, crash, hub death | the process is gone |
 | `agent(op=new_session)` | asked for |
@@ -739,7 +739,10 @@ Reasoning that lived only in the conversation is lost.
 
 `agent(op=new_session)` is refused while a turn or a compaction is running on the
 agent's session, the same condition compaction refuses on; the decision and the
-dropping of the session id happen under the lock that starts turns.
+dropping of the session id happen under the lock that starts turns. The same update
+sets the agent's `context_used` to NULL; `context_limit` stays. Every end of a session,
+this one, a `context_overflow` death and a runtime change, clears the two in one
+update (`core.end_session`).
 
 ### Manual compaction
 
@@ -917,7 +920,7 @@ workspace and sandbox paths (section 4).
 
 | Cause | Consequence |
 |---|---|
-| `context_overflow` | `session_id` cleared, new session with a full snapshot |
+| `context_overflow` | `session_id` and `context_used` cleared, new session with a full snapshot |
 | `quota_exhausted` | the work is moved to `paused` with `resume_after` |
 | `tool_error` / `crash` | the output tail is stored on the work record |
 | `killed` | stopped by a manager above the agent or by the owner |
@@ -2148,9 +2151,14 @@ All times are shown local and stored UTC.
    titles and bodies; there is no move control for him. A card with unclosed
    blocking tasks carries the list of them, in any column.
 4. **Works** — who, what, branch, context, a stop button, with the quota bars of the
-   main page beside them. Finished works do not appear. State is stated both ways:
-   either "a turn is running" with `running_for` and `quiet_for`, or "no turn" naming
-   the assignee's status; a reported work names who it waits on to close it. The brief is
+   main page beside them. The card head shows `runtime/model/effort` (`runtime/model`
+   for an agent with no effort) and, for a work with a role in its `work_log` row,
+   `· <role> · <complexity>`. The context fill bar shows the live turn's `context_used`
+   and `context_limit` while the agent has a live turn that has reported a figure
+   (`turn_status` returns both), and the agent's stored figures otherwise. Finished works
+   do not appear. State is stated both ways: either "a turn is running" with `running_for`
+   and `quiet_for`, or "no turn" naming the assignee's status; a reported work names who
+   it waits on to close it. The brief is
    collapsed and rendered as the markdown it is written in. The turn's output is a
    collapsed block, parsed by the same parser the office listens to the turn with:
    speech, tool calls with their start and end, errors. A call with a start and no end
