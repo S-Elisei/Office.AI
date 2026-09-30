@@ -1494,8 +1494,9 @@ The weekly reset is **payday**; the 5-hour window limits what may be spent now.
 The owner sets, on the settings page, per runtime a total weekly limit (the worth of the
 weekly bucket, in units) and a 5h window (the worth of the `5h` bucket; empty when the
 subscription has none), and a reserve: a percentage of the week the team leaves
-untouched, 0 by default. The settings are `wallet_<runtime>_week`,
-`wallet_<runtime>_window` and `wallet_<runtime>_reserve`. A runtime with no weekly limit, or with no weekly bucket
+untouched, 0 by default; and whether the spare is withheld. The settings are
+`wallet_<runtime>_week`, `wallet_<runtime>_window`, `wallet_<runtime>_reserve` and
+`wallet_<runtime>_withhold` ("1" while withheld, empty otherwise). A runtime with no weekly limit, or with no weekly bucket
 stored, shows no wallet. A runtime with no 5h window set, or with no `5h` bucket stored,
 shows its weekly part only. The weekly bucket is `week (all models)` for claude and `week`
 for codex and agy.
@@ -1507,7 +1508,8 @@ for codex and agy.
   the weekly limit, less the reserve times the weekly limit, not below zero;
 - the **spare**: what is left above the line, not below zero. The line is the share times
   1 − e², where e is the part of the week gone since the last payday: the payday less
-  seven days, measured to now, over seven days; e is 0 when no payday is stored;
+  seven days, measured to now, over seven days; e is 0 when no payday is stored. While
+  the spare is withheld it is 0, and it stays so until the owner clears it;
 - where there is a 5h window, what is **left in the current window** out of the 5h
   window: the `5h` bucket's remaining fraction times the 5h window, or what is left of the
   week if that is less; and the time the window resets;
@@ -1519,7 +1521,8 @@ the left, with a slider (0 to 100) over it. The reserve is 100 less the slider's
 a slider at the right edge is a reserve of 0. A label beside it gives the reserve in percent
 and in units of the runtime's currency, and follows the slider and the weekly limit field. A
 runtime with no weekly reading stored has a bar with no fill and a working slider. The
-reserve is saved with the rest of the form.
+reserve is saved with the rest of the form. Beside the 5h window is a "Withhold spare"
+box, saved with the rest of the form.
 
 Right after the quota part, `roster()` gives a manager the **price list**: a header naming
 its figures typical / with margin; the lines of the setting `price_list_note`, indented,

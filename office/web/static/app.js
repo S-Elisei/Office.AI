@@ -65,11 +65,15 @@
   function isDirty(region) {
     if (region.querySelector("[data-editor-changed]")) return true;
     const fields = region.querySelectorAll(
-      'input[type="text"], input[type="time"], input[type="number"], input[type="range"], textarea'
+      'input[type="text"], input[type="time"], input[type="number"], input[type="range"], input[type="checkbox"], textarea'
     );
     for (const field of fields) {
       const details = field.closest("details");
       if (details && !details.open) continue;
+      if (field.type === "checkbox") {
+        if (field.checked !== field.defaultChecked) return true;
+        continue;
+      }
       if (field.value !== field.defaultValue || field.validity.badInput) return true;
     }
     return false;

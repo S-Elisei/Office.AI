@@ -161,6 +161,8 @@ def _context(
                 "week_key": wallets.week_key(runtime),
                 "window_key": wallets.window_key(runtime),
                 "reserve_key": wallets.reserve_key(runtime),
+                "withhold_key": wallets.withhold_key(runtime),
+                "withheld": core.get_setting(conn, wallets.withhold_key(runtime)) == "1",
                 "remaining": wallets.week_remaining(conn, runtime),
             }
             for runtime, currency in wallets.CURRENCY.items()
@@ -223,7 +225,7 @@ def settings_fragment(request: Request):
 @router.post("/settings")
 async def save_settings(request: Request):
     """Owner-facing config only: owner_name, the silence threshold, the wallets'
-    weekly limits, 5h windows and reserve, the two price lists with their note, and
+    weekly limits, 5h windows, reserve and withheld spare, the two price lists with their note, and
     the work complexities.
     """
     conn = get_db(request)
@@ -238,6 +240,11 @@ async def save_settings(request: Request):
     for key in wallets.SETTING_KEYS:
         if key in data:
             core.set_setting(conn, key, data[key].strip(), actor=owner_name)
+    # An unticked box posts nothing, so a drawn row is told by its weekly limit.
+    for runtime in wallets.CURRENCY:
+        if wallets.week_key(runtime) in data:
+            withhold = "1" if wallets.withhold_key(runtime) in data else ""
+            core.set_setting(conn, wallets.withhold_key(runtime), withhold, actor=owner_name)
     core.set_price_lists(
         conn,
         _table_rows(lists, WORKS_FIELDS, core.PRICE_WORKS_COLUMNS),

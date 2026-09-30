@@ -36,6 +36,11 @@ def reserve_key(runtime: str) -> str:
     return f"wallet_{runtime}_reserve"
 
 
+def withhold_key(runtime: str) -> str:
+    """The setting that, when "1", shows a runtime's spare as 0."""
+    return f"wallet_{runtime}_withhold"
+
+
 #: Every setting the owner edits per runtime: weekly limit and 5h window in units,
 #: reserve in percent.
 SETTING_KEYS = tuple(
@@ -67,7 +72,8 @@ def overview(conn) -> list[dict]:
     `window` (what the 5h window lets it spend now, and its limit; None unless the
     5h window is set and its bucket is stored), `spare` (what is left above the line:
     the share times 1 - e², e being the part of the week gone since the last payday; e
-    is 0 when no payday is stored), `payday` and `next_window`.
+    is 0 when no payday is stored; 0 while the owner withholds it), `payday` and
+    `next_window`.
     """
     buckets = {(q["runtime"], q["label"]): q for q in core.quota_buckets(conn)}
     now = time.time()
@@ -84,12 +90,13 @@ def overview(conn) -> list[dict]:
         has_window = window and five_hours is not None
         share = limit * (1 - reserve)
         gone = 1 - min(1, (int(week["reset_time"]) - now) / _WEEK_SECONDS) if week["reset_time"] else 0
+        withheld = core.get_setting(conn, withhold_key(runtime)) == "1"
         wallets.append({
             "runtime": runtime,
             "currency": currency,
             "left": left,
             "share": share,
-            "spare": max(0, left - share * (1 - gone ** 2)),
+            "spare": 0 if withheld else max(0, left - share * (1 - gone ** 2)),
             "window_left": min(five_hours["remaining_fraction"] * window, left) if has_window else None,
             "window": window if has_window else None,
             "payday": week["reset_time"],
