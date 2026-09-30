@@ -132,8 +132,6 @@ class AgyAdapter:
             "--print-timeout",
             PRINT_TIMEOUT,
         ]
-        if effort:
-            cmd += ["--effort", effort]
         if resume and session_id:
             cmd.append(f"--conversation={session_id}")
         cmd.append("-p=")
@@ -472,9 +470,7 @@ def _used(usage: dict | None) -> int | None:
     auto-compaction on `input + cache_creation + cache_read + output`, and
     codex's own `total_tokens` is `input + output`.
 
-    `thinking_tokens` is NOT added. Thinking is not carried into the next
-    round's prompt, so adding it puts tokens in the window that the next request
-    will not send, and the sum overshoots what the window actually holds.
+    `thinking_tokens` is NOT added.
 
     base.window_occupancy owns the rule; this function owns the field names.
     """

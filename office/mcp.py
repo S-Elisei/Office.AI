@@ -1303,6 +1303,22 @@ def _h_agent(conn, config, agent_name, role, args) -> str:
         if target["instructions"] is None:
             return f"'{target['name']}' has no standing instructions"
         return f"'{target['name']}'s standing instructions:\n{target['instructions']}"
+    if op == "set_model":
+        target = _named_agent(conn, args, "agent")
+        core.check_in_subtree(conn, me, target, "agent(op=set_model)")
+        if not args.get("model") and not args.get("effort"):
+            raise ValueError("missing required argument(s): model, effort or both")
+        result = core.update_agent_model(
+            conn, target["id"], model=args.get("model") or None,
+            effort=args.get("effort") or None, actor=agent_name,
+        )
+        if not result["changed"]:
+            return f"'{target['name']}' already runs on that; nothing changed"
+        now = result["agent"]
+        return (
+            f"'{target['name']}' runs on {now['model']}"
+            f"{'/' + now['effort'] if now['effort'] else ''} from its next turn. {result['note']}"
+        )
     if op == "move":
         target = _named_agent(conn, args, "agent")
         manager = _named_agent(conn, args, "manager")
@@ -1377,7 +1393,7 @@ def _h_agent(conn, config, agent_name, role, args) -> str:
         )
     raise ValueError(
         f"agent: unknown op '{op}' — expected hire, fire, stop, compact, new_session, instruct, "
-        "instructions, move, save_profile, hire_from_profile, or list_profiles"
+        "instructions, move, set_model, save_profile, hire_from_profile, or list_profiles"
     )
 
 
@@ -1926,7 +1942,8 @@ _TOOLS: dict[str, types.Tool] = {
     "agent": types.Tool(
         name="agent",
         description="The director's and the leads'. hire | fire | stop | compact | new_session | "
-        "instruct | instructions | move | save_profile | hire_from_profile | list_profiles. "
+        "instruct | instructions | move | set_model | save_profile | hire_from_profile | "
+        "list_profiles. "
         "Every op that names an existing agent takes an agent under you: anyone whose chain of "
         "managers reaches you, not yourself. "
         "hire makes you the new agent's manager. It takes name, title (one line naming the "
@@ -1945,6 +1962,8 @@ _TOOLS: dict[str, types.Tool] = {
         "work in the moved part of the team would be left with an assigner that is neither "
         "its assignee nor above it. The moved agent gets its new manager's name as a quiet "
         "line that gives it no turn. Nobody else is told. "
+        "set_model moves the agent to another model or effort on its own runtime, from its "
+        "next turn. Give model, effort or both. The answer says what the change costs. "
         "stop kills an agent's turn right now. If the agent had a running work, that work "
         "fails as 'killed'. "
         "save_profile saves a composition (runtime, model, effort) under a name, for every "
@@ -1962,7 +1981,7 @@ _TOOLS: dict[str, types.Tool] = {
                     "type": "string",
                     "enum": [
                         "hire", "fire", "stop", "compact", "new_session", "instruct",
-                        "instructions", "move", "save_profile", "hire_from_profile",
+                        "instructions", "move", "set_model", "save_profile", "hire_from_profile",
                         "list_profiles",
                     ],
                 },
@@ -1976,15 +1995,15 @@ _TOOLS: dict[str, types.Tool] = {
                     "description": "Optional for hire, hire_from_profile: true hires a lead. Otherwise the hire is an executor.",
                 },
                 "runtime": {"type": "string", "enum": ["claude", "codex", "agy"], "description": "Required for hire, save_profile."},
-                "model": {"type": "string", "description": "Required for hire, save_profile."},
-                "effort": {"type": "string", "description": "Optional. It depends on the runtime."},
+                "model": {"type": "string", "description": "Required for hire, save_profile. For set_model: the new model."},
+                "effort": {"type": "string", "description": "Optional. It depends on the runtime; agy takes none, its level is part of the model id. For set_model: the new effort."},
                 "adopt_workspace_id": {
                     "type": "string",
                     "description": "Optional for hire/hire_from_profile: take over a workspace that belongs to nobody, as roster() lists them, instead of a new clone.",
                 },
                 "agent": {
                     "type": "string",
-                    "description": "Required for fire, stop, compact, new_session, instruct, instructions, move: the agent acted on.",
+                    "description": "Required for fire, stop, compact, new_session, instruct, instructions, move, set_model: the agent acted on.",
                 },
                 "text": {
                     "type": "string",

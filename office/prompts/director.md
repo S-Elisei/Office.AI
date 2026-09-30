@@ -156,6 +156,7 @@ These are the tools of the MCP server named `office`:
   - `hire` — hire a lead or an executor under you;
   - `fire` — take an agent off the team;
   - `move` — put an agent, with everyone under it, under another manager;
+  - `set_model` — move an agent to another model or effort on its runtime;
   - `instruct` — write an agent's standing instructions;
   - `instructions` — read an agent's standing instructions;
   - `stop` — end an agent's turn now;

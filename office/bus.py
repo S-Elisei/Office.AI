@@ -57,10 +57,9 @@ QUOTA_RUNTIMES = ("claude", "codex", "agy")
 MODEL_POLL_SECONDS = 3600.0
 
 # Seconds after an agent's last process ended at which a keep-alive turn is due
-# (_keep_alive_due), seconds after which none is, and its whole prompt. Documented
-# for claude, measured for codex: the prompt cache lives about one hour.
+# (_keep_alive_due), and its whole prompt. None is due once core.CACHE_SECONDS
+# have passed.
 KEEP_ALIVE_SECONDS = 55 * 60
-CACHE_SECONDS = 60 * 60
 KEEP_ALIVE_PROMPT = "[office] keep-alive"
 
 # How many keep-alive turns in a row each runtime allows an agent; a runtime not
@@ -516,7 +515,7 @@ class Bus:
 
                 It is on a runtime KEEP_ALIVE_CAPS names, idle, with a session, no unread
                 direct message and no quota hold; its last process of any kind ended
-                KEEP_ALIVE_SECONDS ago but not CACHE_SECONDS ago, and it has not had its
+                KEEP_ALIVE_SECONDS ago but not core.CACHE_SECONDS ago, and it has not had its
                 runtime's cap of keep-alives in a row; and it waits on somebody: it has
                 assigned a running work whose holder has a turn that is not itself a
                 keep-alive, or, an executor, it holds a work of its own that is running
@@ -533,7 +532,7 @@ class Bus:
             "SELECT process, ended_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) AS recent, "
             "ended_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) AS cached "
             "FROM usage_turns WHERE agent = ? ORDER BY id DESC LIMIT ?",
-            (f"-{KEEP_ALIVE_SECONDS} seconds", f"-{CACHE_SECONDS} seconds", agent["name"], cap),
+            (f"-{KEEP_ALIVE_SECONDS} seconds", f"-{core.CACHE_SECONDS} seconds", agent["name"], cap),
         )
         if not latest or latest[0]["recent"] or not latest[0]["cached"]:
             return False

@@ -77,7 +77,9 @@ A local service is not a participant. It answers an agent's expectation (section
 control in the interface. Afterwards the owner changes the director's runtime,
 model and effort from the settings page; a runtime change is refused while a turn
 or a compaction runs on the director's session. `agent(op=fire)` refuses a director
-target; no tool lets an agent change anyone's model, its own included.
+target. A manager changes the model and effort of an agent in its subtree with
+`agent(op=set_model, agent, model, effort)`, on the agent's own runtime; nobody changes
+its own.
 
 The owner's interface carries authority (rules, wiki, the director's settings,
 resolving tickets addressed to him), conversation (common chat, direct messages,
@@ -769,10 +771,14 @@ is set and read under the same lock that starts turns.
 
 ### The cost of a model change
 
-Changing model within a runtime keeps the session and drops the cache; changing
-runtime ends the session. `core.update_agent_model` classifies this in one place,
-and the settings page shows the classification before confirmation (`dry_run`). No
-agent tool changes a model; the settings page offers it for the director only.
+Changing runtime ends the session. Changing model or effort within a runtime keeps
+the session. The prompt cache survives an effort change on claude and nothing else;
+a change that drops it costs nothing extra when the cache is gone already: the agent
+is not in a turn and its last process ended `core.CACHE_SECONDS` ago, or it has had
+none. `core.update_agent_model` classifies this in one place and returns the
+classification with its note. The settings page shows it before confirmation
+(`dry_run`) for the director; `agent(op=set_model)` returns it to the manager, and
+the change takes effect from the agent's next turn.
 
 ---
 
@@ -1582,7 +1588,9 @@ a hardcoded list, and `None` ("could not ask") and `[]` ("asked, nothing") stay
 distinct all the way up. `efforts` is `None` where the vendor publishes none, which is
 not the same as "this model takes no effort".
 
-A model and an effort are validated against the catalogue at hire time. No
+A model and an effort are validated against the catalogue at hire time and at a
+model change. agy takes no effort: its level is part of the model id, and an effort
+given for it is refused. No
 catalogue means no validation: a vendor being unreachable must not stop hiring. A
 profile is not validated when saved — a catalogue is a fact about today and a
 profile lives longer. The catalogue is shown under the hire and settings model
@@ -1941,7 +1949,7 @@ Managers only — the director and the leads:
 
 ```
 agent(op, ...)   # hire | fire | stop | compact | new_session | instruct | instructions | move
-                 # save_profile | hire_from_profile | list_profiles
+                 # set_model | save_profile | hire_from_profile | list_profiles
 assign(agent, brief, task_id, branch, role, complexity)
 work_close(work, summary)        # accept a reported work: the row goes, the result lands on the task
 work_dismiss(work)               # write off a failed work together with its tail
@@ -1958,8 +1966,8 @@ stage(op, ...)   # create | reset | delete (section 12)
 
 - `hire` and `hire_from_profile` make the caller the new agent's manager. They
   take `title`, required, and `lead`: true makes a lead, otherwise an executor;
-- `fire`, `stop`, `compact`, `new_session`, `instruct`, `instructions` and `move`
-  take a target in the caller's subtree; `compact` and `new_session` are refused
+- `fire`, `stop`, `compact`, `new_session`, `instruct`, `instructions`, `move` and
+  `set_model` take a target in the caller's subtree; `compact` and `new_session` are refused
   while a turn or a compaction is running on the target's session;
 - `instruct(agent, text)` replaces the target's standing instructions; empty text
   clears them. `instructions(agent)` returns them;
@@ -2236,7 +2244,7 @@ delivery_last           the outcome of the last delivery (JSON), for the setting
 There are five; everything else is observation and conversation.
 
 **Hiring the director and setting its composition.** The first run is impossible
-without it, and no agent may change anyone's model.
+without it, and no agent may change the director's model.
 
 **The stop button** — in the monitor and beside the director's chat. There is no limit
 on a turn's length, and the managers, which decide about stopping through

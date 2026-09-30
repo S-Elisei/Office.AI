@@ -994,6 +994,24 @@ def set_agent_status(conn, agent_id: int, status: str, actor: str | None = None)
         _emit(conn, "agents", "agent", agent_id, {"status": status}, actor=actor)
 
 
+#: Seconds after an agent's last process ended after which its prompt cache is gone.
+CACHE_SECONDS = 60 * 60
+
+
+def prompt_cache_cold(conn, agent: dict) -> bool:
+    """Whether an agent's prompt cache is gone: it is not in a turn, and its last
+    process ended CACHE_SECONDS ago or it has had none."""
+    if agent["status"] == "running":
+        return False
+    row = db.query_one(
+        conn,
+        "SELECT ended_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) AS cached "
+        "FROM usage_turns WHERE agent = ? ORDER BY id DESC LIMIT 1",
+        (f"-{CACHE_SECONDS} seconds", agent["name"]),
+    )
+    return row is None or not row["cached"]
+
+
 def update_agent_model(
     conn,
     agent_id: int,
@@ -1009,17 +1027,24 @@ def update_agent_model(
     hire() sets these once; this is the only other way they change. Each is
     independently optional - pass only what changed, and None means "leave it".
 
-    The cost of the change is classified here and returned with the result;
-    `dry_run` asks for the classification without writing anything.
+    The cost of the change is classified here and returned with the result, with
+    `changed`, whether anything differs from the agent's row;
+    `dry_run` asks for the classification without writing anything, and a call that
+    changes nothing writes nothing.
     """
     agent = _row(conn, "agents", "id", agent_id)
 
     new_runtime = runtime if runtime is not None else agent["runtime"]
     new_model = model if model is not None else agent["model"]
-    new_effort = effort if effort is not None else agent["effort"]
+    # A runtime change keeps only the effort passed.
+    keeps_effort = new_runtime == agent["runtime"]
+    new_effort = effort if effort is not None else (agent["effort"] if keeps_effort else None)
 
     runtime_changed = new_runtime != agent["runtime"]
     model_changed = new_model != agent["model"] or new_effort != agent["effort"]
+    change = (
+        f"{agent['model']}/{agent['effort'] or '-'} -> {new_model}/{new_effort or '-'}"
+    )
 
     if runtime_changed:
         cost = "fresh_session"
@@ -1027,24 +1052,34 @@ def update_agent_model(
             f"runtime change ({agent['runtime']} -> {new_runtime}): the session cannot continue — "
             "context is lost. The next turn starts a fresh session from the full state snapshot."
         )
-    elif model_changed:
-        cost = "full_reread"
-        note = (
-            f"model change ({agent['model']} -> {new_model}): the session continues and context "
-            "survives, but the prompt cache is tied to the model — the next turn pays a full re-read."
-        )
-    else:
+    elif not model_changed:
         cost = "none"
         note = "no change"
+    elif new_model == agent["model"] and new_runtime == "claude":
+        cost = "none"
+        note = f"effort change ({change}): the session and its prompt cache continue."
+    elif prompt_cache_cold(conn, agent):
+        cost = "none"
+        note = (
+            f"change ({change}): the session continues and context survives. Its prompt "
+            "cache is gone already, so the change costs nothing extra."
+        )
+    else:
+        cost = "full_reread"
+        note = (
+            f"change ({change}): the session continues and context survives, but the "
+            "prompt cache does not: the next turn reads the whole context again."
+        )
 
     # Validated on the RESULTING triple, not on the arguments: each of the three
     # is independently optional. Skipped when nothing changed; a call that DOES
     # change something is refused. Checked before the dry_run return as well.
-    if cost != "none":
+    if runtime_changed or model_changed:
         _check_model_choice(conn, new_runtime, new_model, new_effort)
 
-    if dry_run:
-        return {"agent": agent, "cost": cost, "note": note}
+    if dry_run or not (runtime_changed or model_changed):
+        return {"agent": agent, "cost": cost, "note": note,
+                "changed": runtime_changed or model_changed}
 
     with db.transaction(conn):
         db.execute(
@@ -1065,7 +1100,8 @@ def update_agent_model(
             },
             actor=actor,
         )
-    return {"agent": _row(conn, "agents", "id", agent_id), "cost": cost, "note": note}
+    return {"agent": _row(conn, "agents", "id", agent_id), "cost": cost, "note": note,
+            "changed": True}
 
 
 def start_new_session(conn, agent_id: int) -> dict:
@@ -1312,6 +1348,11 @@ def _check_model_choice(conn, runtime: str, model: str, effort: str | None) -> N
     Two holes: with no catalogue for a runtime nothing on it is checked, and a
     full claude model id passes unchecked.
     """
+    if runtime == "agy" and effort:
+        raise ValueError(
+            "agy takes no effort: its level is part of the model id, such as "
+            "gemini-3.8-flash-medium. Give the model alone."
+        )
     catalogue = list_models(conn, runtime)
     if not catalogue:
         return  # hole 1
