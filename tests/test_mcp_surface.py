@@ -509,3 +509,23 @@ def test_a_work_log_row_follows_the_work_and_outlives_it(conn, config):
     assert (row["pr_id"], row["files_changed"], row["lines_changed"]) == (pr_id, 2, 3)
     assert row["merge_commit"]
     assert row["ended_at"] and row["ended_as"] == "closed"
+
+    # A review of the merged PR is logged against the work that carried it. Invented counts.
+    add_agent(conn, "eye", "executor", manager="boss")
+    failed, text = answer_to(
+        conn, config, "boss", "assign",
+        {"agent": "eye", "brief": "read", "branch": "main", "role": "review", "complexity": "high"},
+    )
+    assert not failed, text
+    failed, text = answer_to(conn, config, "eye", "work", {"op": "finish", "summary": "read"})
+    assert failed and "review" in text, text
+    review = {"pr": pr_id, "verdict": "fix", "bugs": 1, "missed": 2, "approach": 3, "minor": 4,
+              "suggestions": 5}
+    failed, text = answer_to(
+        conn, config, "eye", "work", {"op": "finish", "summary": "read", "review": review}
+    )
+    assert not failed, text
+    logged = dict(db.query_one(conn, "SELECT * FROM review_log"))
+    assert (logged["reviewed_work_id"], logged["pr_id"], logged["report"]) == (work_id, pr_id, 1)
+    counts = tuple(logged[key] for key in ("bugs", "missed", "approach", "minor", "suggestions"))
+    assert (logged["verdict"], counts) == ("fix", (1, 2, 3, 4, 5))

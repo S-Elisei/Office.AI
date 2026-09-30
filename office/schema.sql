@@ -371,6 +371,8 @@ CREATE TABLE IF NOT EXISTS work_log (
     agent TEXT NOT NULL,
     runtime TEXT NOT NULL,
     model TEXT NOT NULL,
+    -- The holder's effort; NULL where its runtime takes none.
+    effort TEXT,
     -- The agent that assigned the work first.
     assigned_by TEXT NOT NULL,
     branch TEXT NOT NULL,
@@ -393,6 +395,27 @@ CREATE TABLE IF NOT EXISTS work_log (
     -- is open again.
     ended_at TEXT,
     ended_as TEXT
+);
+
+-- One row per report of a review work, written by work(op=finish): what the
+-- review found. Numbers only; the owner reads it with SQL next to work_log.
+CREATE TABLE IF NOT EXISTS review_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- The review work, and which of its reports this is: 1 for the first.
+    work_id INTEGER NOT NULL,
+    report INTEGER NOT NULL,
+    -- The PR reviewed, and the work that carried its branch; the PR is NULL for
+    -- a review of something that is not a PR, the work where none is logged.
+    pr_id INTEGER,
+    reviewed_work_id INTEGER,
+    verdict TEXT NOT NULL CHECK (verdict IN ('merge', 'fix', 'redo')),
+    -- Must-changes by kind, and the could-be-better items.
+    bugs INTEGER NOT NULL,
+    missed INTEGER NOT NULL,
+    approach INTEGER NOT NULL,
+    minor INTEGER NOT NULL,
+    suggestions INTEGER NOT NULL,
+    at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 -- One vendor process an agent ran: a turn, a compaction the office asked for,

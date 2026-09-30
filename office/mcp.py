@@ -317,6 +317,49 @@ def _h_task(conn, config, agent_name, role, args) -> str:
     raise ValueError(f"task: unknown op '{op}' — expected list, read, create, update, move, or link")
 
 
+#: What each count of work(op=finish)'s `review` counts, by core.REVIEW_COUNTS name.
+_REVIEW_COUNT_TEXTS = {
+    "bugs": "Must-changes where the work does the wrong thing.",
+    "missed": "Must-changes where a requirement of the brief or the spec is not met.",
+    "approach": "Must-changes that need the solution built differently.",
+    "minor": "Every other must-change.",
+    "suggestions": "Could-be-better items: not must-changes.",
+}
+
+
+def _review_report(conn, work_id: int, review) -> dict | None:
+    """work(op=finish)'s `review`, checked: required for a work assigned as a review,
+    refused for any other."""
+    logged = db.query_one(conn, "SELECT role FROM work_log WHERE work_id = ?", (work_id,))
+    if logged is None or logged["role"] != "review":
+        if review is not None:
+            raise ValueError(
+                f"work {work_id} is not a review; finish it again without review"
+            )
+        return None
+    if not isinstance(review, dict):
+        raise ValueError(
+            f"work {work_id} is a review: finish it again with review — the verdict, the "
+            "must-changes by kind, the suggestions, and the PR you reviewed"
+        )
+    if review.get("verdict") not in core.REVIEW_VERDICTS:
+        raise ValueError(
+            f"review.verdict is one of {', '.join(core.REVIEW_VERDICTS)} — finish again with one of them"
+        )
+    for key in core.REVIEW_COUNTS:
+        value = review.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"review.{key} is a count, 0 or more — finish again with it")
+    pr = review.get("pr")
+    if pr is not None and (not isinstance(pr, int) or isinstance(pr, bool)):
+        raise ValueError("review.pr is a PR number — finish again with it, or without it")
+    return {
+        "verdict": review["verdict"], "pr": pr,
+        "reviewed_work": core.reviewed_work(conn, pr) if pr is not None else None,
+        **{k: review[k] for k in core.REVIEW_COUNTS},
+    }
+
+
 def _h_work(conn, config, agent_name, role, args) -> str:
     """Your own current work: look at it, or finish it."""
     op = args.get("op")
@@ -364,6 +407,7 @@ def _h_work(conn, config, agent_name, role, args) -> str:
     work = core.current_work(conn, me["id"])
     if work is None:
         raise ValueError("you have no work to finish — a work starts when assign() names you")
+    review = _review_report(conn, work["id"], args.get("review"))
 
     pr_info = args.get("pr")
     note = ""
@@ -391,7 +435,7 @@ def _h_work(conn, config, agent_name, role, args) -> str:
             # the assignee's text.
             args["summary"] = args["summary"] + "\n\n[office] " + left
 
-    core.finish_work(conn, work["id"], summary=args["summary"], actor=agent_name)
+    core.finish_work(conn, work["id"], summary=args["summary"], actor=agent_name, review=review)
     if work["assigned_by_agent_id"] == me["id"]:
         return (
             f"work {work['id']} reported to nobody: you assigned it yourself, and it stays on "
@@ -1701,7 +1745,9 @@ _TOOLS: dict[str, types.Tool] = {
         "your own message, and wakes them. Do not write to them separately. "
         "You do not close your own work. Whoever assigned it closes it. If they send it back, "
         "it is open again: carry on and finish it again. A work you assigned yourself is "
-        "reported to nobody. Close it yourself with work_close.",
+        "reported to nobody. Close it yourself with work_close. "
+        "A work assigned to you as a review is finished with review as well: what the review "
+        "found, counted. Count each must-change once, under the kind that fits it best.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1726,6 +1772,26 @@ _TOOLS: dict[str, types.Tool] = {
                         "target_branch": {"type": "string"},
                     },
                     "required": ["title", "target_branch"],
+                },
+                "review": {
+                    "type": "object",
+                    "description": "Required for finish of a work assigned as a review, and refused "
+                    "for any other: what the review found.",
+                    "properties": {
+                        "verdict": {
+                            "type": "string",
+                            "enum": list(core.REVIEW_VERDICTS),
+                            "description": "merge: nothing must change. fix: the work stands once "
+                            "its must-changes are made. redo: the work is better done again than "
+                            "fixed.",
+                        },
+                        **{
+                            key: {"type": "integer", "description": _REVIEW_COUNT_TEXTS[key]}
+                            for key in core.REVIEW_COUNTS
+                        },
+                        "pr": {"type": "integer", "description": "The PR you reviewed. Leave it out for a review of something that is not a PR."},
+                    },
+                    "required": ["verdict", *core.REVIEW_COUNTS],
                 },
             },
             "required": ["op"],

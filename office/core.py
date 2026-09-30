@@ -1087,6 +1087,12 @@ def update_agent_model(
             "UPDATE agents SET runtime = ?, model = ?, effort = ? WHERE id = ?",
             (new_runtime, new_model, new_effort, agent_id),
         )
+        db.execute(
+            conn,
+            "UPDATE work_log SET runtime = ?, model = ?, effort = ? WHERE ended_at IS NULL "
+            "AND work_id IN (SELECT id FROM works WHERE agent_id = ?)",
+            (new_runtime, new_model, new_effort, agent_id),
+        )
         if runtime_changed:
             # Not portable across vendors. In the same transaction as the runtime column.
             db.execute(conn, "UPDATE agents SET session_id = NULL WHERE id = ?", (agent_id,))
@@ -1808,9 +1814,9 @@ def _log_holder(conn, work_id: int, agent_id: int) -> None:
     agent = _row(conn, "agents", "id", agent_id)
     db.execute(
         conn,
-        "UPDATE work_log SET agent = ?, runtime = ?, model = ?, ended_at = NULL, ended_as = NULL "
-        "WHERE work_id = ?",
-        (agent["name"], agent["runtime"], agent["model"], work_id),
+        "UPDATE work_log SET agent = ?, runtime = ?, model = ?, effort = ?, ended_at = NULL, "
+        "ended_as = NULL WHERE work_id = ?",
+        (agent["name"], agent["runtime"], agent["model"], agent["effort"], work_id),
     )
 
 
@@ -1870,11 +1876,11 @@ def assign_work(
         work_id = cur.lastrowid
         db.execute(
             conn,
-            "INSERT INTO work_log (work_id, task_id, agent, runtime, model, assigned_by, branch, "
-            "role, complexity, assigned_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT started_at FROM works WHERE id = ?))",
-            (work_id, task_id, agent["name"], agent["runtime"], agent["model"], caller["name"],
-             branch, role, complexity, work_id),
+            "INSERT INTO work_log (work_id, task_id, agent, runtime, model, effort, assigned_by, "
+            "branch, role, complexity, assigned_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT started_at FROM works WHERE id = ?))",
+            (work_id, task_id, agent["name"], agent["runtime"], agent["model"], agent["effort"],
+             caller["name"], branch, role, complexity, work_id),
         )
         _emit(
             conn, "works", "work", work_id,
@@ -1936,12 +1942,45 @@ def current_work(conn, agent_id: int) -> dict | None:
     return dict(row) if row is not None else None
 
 
-def finish_work(conn, work_id: int, summary: str | None = None, actor: str | None = None) -> dict:
+#: A review's verdicts, and the numbers it reports besides, as review_log names them.
+REVIEW_VERDICTS = ("merge", "fix", "redo")
+REVIEW_COUNTS = ("bugs", "missed", "approach", "minor", "suggestions")
+
+
+def reviewed_work(conn, pr_id: int) -> int | None:
+    """The work a review of PR `pr_id` reviewed: for an open PR, the work that carries
+    its branch (_work_of_pr); for a merged one, the work whose log row names it. None
+    for an open PR whose branch no logged work carries. Raises ValueError when there
+    is no such PR, open or merged."""
+    pr = db.query_one(conn, "SELECT * FROM prs WHERE id = ?", (pr_id,))
+    if pr is not None:
+        work = _work_of_pr(conn, dict(pr))
+        return work["id"] if work is not None else None
+    work = db.query_one(
+        conn, "SELECT work_id AS id FROM work_log WHERE pr_id = ? ORDER BY work_id DESC", (pr_id,)
+    )
+    if work is None:
+        raise ValueError(
+            f"PR {pr_id} is neither open nor merged — give the number of the PR you reviewed, "
+            "or leave pr out"
+        )
+    return work["id"]
+
+
+def finish_work(
+    conn, work_id: int, summary: str | None = None, actor: str | None = None,
+    review: dict | None = None,
+) -> dict:
     """work(op=finish). Any PR creation is the caller's job.
 
     The summary reaches the work's assigner as a direct message from the agent
     that finished, and nobody when the assignee is its own assigner. The row is
     marked before the message is sent.
+
+    `review`, for a review work, is what the review found: `verdict`, the counts
+    REVIEW_COUNTS names, `pr`, the PR reviewed or None, and `reviewed_work`
+    (reviewed_work()'s answer, None without a PR). It becomes one review_log row,
+    written in the same transaction as the report.
 
     The row is marked `done`, not deleted, and nothing is written to the task:
     close_work() does both.
@@ -1960,6 +1999,16 @@ def finish_work(conn, work_id: int, summary: str | None = None, actor: str | Non
             (work_id,),
         )
         db.execute(conn, "UPDATE work_log SET reports = reports + 1 WHERE work_id = ?", (work_id,))
+        if review is not None:
+            db.execute(
+                conn,
+                "INSERT INTO review_log (work_id, report, pr_id, reviewed_work_id, verdict, "
+                + ", ".join(REVIEW_COUNTS)
+                + ") VALUES (?, (SELECT reports FROM work_log WHERE work_id = ?), ?, ?, ?"
+                + ", ?" * len(REVIEW_COUNTS) + ")",
+                (work_id, work_id, review["pr"], review["reviewed_work"], review["verdict"],
+                 *(review[k] for k in REVIEW_COUNTS)),
+            )
         _emit(conn, "works", "work", work_id, {"status": "done", "agent": agent_name}, actor=actor)
     # Outside the transaction: send_message opens its own. The sender is the
     # agent the work belonged to rather than `actor`.
@@ -2623,17 +2672,22 @@ def _record_delivery(conn, delivery: git.Delivery) -> dict:
     return payload
 
 
-def _log_merge(conn, pr: dict, commit: str, size: tuple[int, int] | None) -> None:
-    """Record a merge on the log row of the work that carried the PR's branch: the
-    newest logged work of the PR's author on that branch, closed or not. The PR and the
-    commit are the latest merge's;
-    `size` is added to what the row holds, and a merge whose size is None leaves the
-    sizes as they are."""
-    work = db.query_one(
+def _work_of_pr(conn, pr: dict):
+    """The work that carried a PR's branch: the newest logged work of the PR's author
+    on that branch, closed or not; None when there is none."""
+    return db.query_one(
         conn,
         "SELECT work_id AS id FROM work_log WHERE branch = ? AND agent = ? ORDER BY work_id DESC",
         (pr["source_branch"], _agent_name(conn, pr["author_agent_id"])),
     )
+
+
+def _log_merge(conn, pr: dict, commit: str, size: tuple[int, int] | None) -> None:
+    """Record a merge on the log row of the work that carried the PR's branch
+    (_work_of_pr). The PR and the commit are the latest merge's;
+    `size` is added to what the row holds, and a merge whose size is None leaves the
+    sizes as they are."""
+    work = _work_of_pr(conn, pr)
     if work is None:
         return
     files, lines = size if size is not None else (None, None)

@@ -1877,8 +1877,8 @@ Nothing deletes a row and no foreign key reaches it. It holds names and numbers 
 brief, no summary. The owner reads it with SQL, together with `usage_turns` and
 `usage_requests`, which carry `work_id` and `task_id`.
 
-Columns: `work_id`, `task_id`, `agent`, `runtime` and `model` (the work's holder),
-`assigned_by`, `branch`, `role`, `complexity`, `assigned_at`, `reports`, `pr_id`,
+Columns: `work_id`, `task_id`, `agent`, `runtime`, `model` and `effort` (the work's
+holder; `effort` NULL where its runtime takes none), `assigned_by`, `branch`, `role`, `complexity`, `assigned_at`, `reports`, `pr_id`,
 `merge_commit`, `files_changed`, `lines_changed`, `ended_at`, `ended_as`.
 
 Each column is written by the function that changes the fact:
@@ -1886,7 +1886,9 @@ Each column is written by the function that changes the fact:
 - `assign_work` inserts the row with everything known at that moment; `assigned_by` is
   the first assigner;
 - `finish_work` adds one to `reports`;
-- `reassign_work` sets `agent`, `runtime` and `model` to the new holder's and clears
+- `update_agent_model` sets `runtime`, `model` and `effort` of its agent's open work to the
+  new ones;
+- `reassign_work` sets `agent`, `runtime`, `model` and `effort` to the new holder's and clears
   `ended_at` and `ended_as`;
 - `merge_pr`, on a merge, finds the newest logged work, closed or not, whose `branch` is
   the PR's source branch and whose holder is the PR's author, and sets its `pr_id` and `merge_commit`. It adds
@@ -1899,6 +1901,22 @@ Each column is written by the function that changes the fact:
 - `close_work` sets `ended_at` and `ended_as` = `closed`; `dismiss_work`, `dismissed`;
   `fail_work`, `failed`; moving the task to `done` with the work still on it,
   `task_closed`.
+
+`review_log` holds one row per report of a work assigned as a review, numbers only. A
+review work's `work(op=finish)` takes `review` and any other work's refuses it: the
+`verdict` (`merge`, nothing must change; `fix`, the work stands once its must-changes
+are made; `redo`, the work is better done again than fixed), the must-changes counted
+by kind (`bugs`, the work does the wrong thing; `missed`, a requirement of the brief or
+the spec is not met; `approach`, the solution needs building differently; `minor`,
+every other), the `suggestions`, and the `pr` reviewed, left out for a review of
+something that is not a PR. The row carries the review work's `work_id`, which of its
+reports this is (`report`, 1 for the first), the `pr_id`, and `reviewed_work_id`: for an
+open PR the newest logged work of its author on its source branch, as a merge finds it,
+for a merged one the work whose `pr_id` names it; NULL where an open PR's branch has no
+logged work. A PR that is neither open nor merged is refused before anything is written.
+The row is written in `finish_work`'s transaction. Joined to `work_log` on
+`reviewed_work_id`, it gives what reviews found in each model's and effort's work, by
+complexity.
 
 ### Schema
 
@@ -1935,7 +1953,8 @@ task(op, ...)                    # list | read | create | update | move | link (
                                  # list(parent?, status?, query?) — one level, or a search under parent or over the board
 work(op, ...)                    # show — your brief, branch and assigner
                                  # show(work) — one work in full, its stored output tail included
-                                 # finish — your report to whoever assigned the work, with a PR if you like
+                                 # finish — your report to whoever assigned the work, with a PR if you like;
+                                 #   for a review work it also takes review, what the review found
 pr(op, ...)                      # create | comment | list | read
                                  # merge | close  (managers only)
 note(op, kind, ...)              # wiki: list | read | comment | write | undo | delete; pages are files in the sandbox
