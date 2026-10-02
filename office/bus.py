@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from office import commands, core, db, git, marks, wiki_files
+from office import commands, core, db, git, marks, stages, wiki_files
 from office.adapters import RUNTIMES, adapter_for, shared
 from office.adapters import agy, codex
 from office.adapters.base import name_quota_windows
@@ -43,8 +43,13 @@ SILENCE_NOTICE_SETTING = "silence_notice_minutes"
 SILENCE_NOTICE_DEFAULT_MINUTES = 20.0
 
 # Quota is a property of the vendor account, not of a turn: the office polls
-# it on its own schedule and no agent spends a turn to learn it.
+# it on its own schedule, takes it from a turn's own stream where the vendor
+# reports it there, and no agent spends a turn to learn it.
 QUOTA_POLL_SECONDS = 60.0
+
+# The least time between two polls of a runtime, and between a turn's reading
+# and the next poll. A runtime not named here is polled whenever asked.
+QUOTA_POLL_SPACING_SECONDS = {"claude": 300.0}
 
 # How often the progress check (_check_progress) runs.
 PROGRESS_CHECK_SECONDS = 60.0
@@ -65,6 +70,10 @@ KEEP_ALIVE_PROMPT = "[office] keep-alive"
 # How many keep-alive turns in a row each runtime allows an agent; a runtime not
 # named gets none.
 KEEP_ALIVE_CAPS = {"claude": 8, "codex": 5}
+
+# Seconds to wait before the turn that retries a vendor_error or crash death, after
+# the 1st, 2nd and 3rd such death in a row (_plan_retry); the 4th is not retried.
+RETRY_DELAYS = (120, 600, 1800)
 
 # The office's one-shot timer for its run/pause switch: a settings row holding the
 # state to switch to, "run" or "pause", and the epoch second, separated by a space.
@@ -98,6 +107,11 @@ class _AgentState:
     compacting: bool = False
     # Whether the turn now running is a keep-alive turn.
     pinging: bool = False
+    # The deaths in a row _plan_retry has scheduled a retry for, and the
+    # time.monotonic() at which the last retry is due; None while none is waiting.
+    # The next turn that starts clears it.
+    retry_deaths: int = 0
+    retry_at: float | None = None
 
 
 class Bus:
@@ -121,6 +135,9 @@ class Bus:
         self._wakeup = threading.Event()
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+        # time.monotonic() of each runtime's last poll and last reading from a
+        # turn, by runtime (QUOTA_POLL_SPACING_SECONDS). In memory.
+        self._quota_read_at: dict[str, float] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -170,7 +187,14 @@ class Bus:
 
     def _poll_runtime(self, runtime: str) -> None:
         """Poll one runtime's quota: in each round, and as soon as a turn or a
-                compaction on it ends. Never raises."""
+        compaction on it ends without its stream having reported quota. Skipped
+        inside the runtime's QUOTA_POLL_SPACING_SECONDS. Never raises."""
+        spacing = QUOTA_POLL_SPACING_SECONDS.get(runtime)
+        if spacing is not None:
+            last = self._quota_read_at.get(runtime)
+            if last is not None and time.monotonic() - last < spacing:
+                return
+            self._quota_read_at[runtime] = time.monotonic()
         try:
             adapter = adapter_for(runtime, self.config)
         except Exception:
@@ -183,6 +207,15 @@ class Bus:
                 core.record_quota(self.conn, name_quota_windows(polled))
         except Exception:
             _log.exception("quota poll failed for %s", runtime)
+
+    def _quota_after(self, runtime: str, turn: AgentTurn) -> None:
+        """Store the quota a finished turn or compaction reported in its own stream,
+        or poll the runtime when it reported none."""
+        if not turn.quota:
+            self._poll_runtime(runtime)
+            return
+        self._quota_read_at[runtime] = time.monotonic()
+        core.record_quota(self.conn, list(turn.quota), partial=True)
 
     def _office_session_ids(self, runtime: str) -> list[str]:
         """The vendor session ids the office itself started on this runtime.
@@ -236,7 +269,7 @@ class Bus:
         # own people.
         for name, detail, since in self._tick_failures():
             warnings.append(
-                f"the office's own tick over {name} failed at {_fmt_epoch(since)} with {detail}, "
+                f"the office's own tick over {name} failed at {core.fmt_epoch(since)} with {detail}, "
                 f"and {name} has started no turn since. This is not the vendor refusing and not "
                 "quota: the office cannot get as far as spawning that agent, and it will keep "
                 "failing the same way until whatever it names is fixed. The hub log holds the "
@@ -487,6 +520,13 @@ class Bus:
                 # Skipped while a turn is owed: that queue must not be marked seen
                 # before it is delivered.
                 self._advance(agent, pending)
+
+            if state.retry_at is not None and now >= state.retry_at:
+                # The retry of a death (_plan_retry) is a turn owed like a direct
+                # message's: it delivers the quiet line the death left.
+                state.retry_at = None
+                state.owes_turn = True
+                state.drain_at = now
 
             if (
                 state.owes_turn and state.drain_at is not None and now >= state.drain_at
@@ -806,8 +846,8 @@ class Bus:
 
     def _report_silent_turn(self, agent: dict, state: "_AgentState") -> None:
         """A running agent that has said nothing for the owner's silence threshold,
-                told to its manager as a message from `office` with the last few things
-                it was seen doing.
+                told to its manager as a message from `office` with the tool calls and
+                runs open on the agent's side and the last few things it was seen doing.
 
                 It has no power over the agent: no stop, no flag, nothing written
                 anywhere but a message.
@@ -833,10 +873,12 @@ class Bus:
             # transaction, never inside one: no writing transaction is held
             # across anything slower than it has to be.
             actions = _last_actions(turn)
+            calls = turn.open_calls()
+            runs = [_run_line(run) for run in commands.list_for(name) if run.running]
             _log.info("%s has been quiet for %.0fs; telling %s", name, turn.quiet_for, manager)
             core.send_message(
                 self.conn, core.OFFICE_SENDER, manager,
-                _silent_turn_notice(name, turn.quiet_for, turn.running_for, actions),
+                _silent_turn_notice(name, turn.quiet_for, turn.running_for, calls, runs, actions),
             )
         except Exception:
             _log.exception("could not report that %s has gone quiet", name)
@@ -905,7 +947,8 @@ class Bus:
             session_id, resume = self._session_for(agent)
             system = self._system_prompt(agent)
             if adapter.takes_system_prompt:
-                # Written every turn and read only at the start of a session.
+                # Written every turn; claude reads it when a session is created and
+                # on the first turn after a compaction.
                 shared.system_prompt_path(ws).write_text(system, encoding="utf-8")
                 system = ""
 
@@ -943,6 +986,7 @@ class Bus:
             )
             state.turn = turn
             state.pinging = ping
+            state.retry_at = None
             # Cleared here, under the same lock that installs the turn.
             state.silence_reported = False
             # A turn exists, so whatever the office last failed to do for this agent
@@ -1026,8 +1070,12 @@ class Bus:
             if agent:
                 self._record_context(agent["id"], turn.context_used, turn.context_limit)
                 self._set_status(agent["id"], "idle")
+            retry_delay = None
             if reason is not None and not state.pinging:
-                self._record_death(name, turn, resume_after)
+                retry_delay = self._plan_retry(state, reason)
+                self._record_death(name, turn, resume_after, retrying=retry_delay is not None)
+            elif reason is None:
+                state.retry_deaths = 0
             # Before the turn is let go: _keep_alive_due reads the row.
             self._record_usage(usage, turn)
         finally:
@@ -1037,10 +1085,24 @@ class Bus:
         # Whatever became of this turn, the owner's journal gets one line about
         # it; a keep-alive's only line is a quota wall.
         if not state.pinging or reason == "quota_exhausted":
-            self._journal_turn_end(name, reason, runtime, model, resume_after)
-        self._poll_runtime(runtime)
+            self._journal_turn_end(name, reason, runtime, model, resume_after, retry_delay)
+        self._quota_after(runtime, turn)
         # Anything that arrived while the turn ran is now deliverable.
         self._schedule()
+
+    def _plan_retry(self, state: _AgentState, reason: str) -> int | None:
+        """Schedule the retry of a turn that died of `reason`: due RETRY_DELAYS' next
+                delay on, which is returned. None for a death that is not retried: a
+                reason other than vendor_error and crash, or the one after the last
+                delay. Either ends the row of retried deaths.
+        """
+        if reason not in ("vendor_error", "crash") or state.retry_deaths == len(RETRY_DELAYS):
+            state.retry_deaths = 0
+            return None
+        delay = RETRY_DELAYS[state.retry_deaths]
+        state.retry_deaths += 1
+        state.retry_at = time.monotonic() + delay
+        return delay
 
     def _set_status(self, agent_id: int, status: str) -> None:
         try:
@@ -1181,7 +1243,7 @@ class Bus:
         if held is not None:
             return (
                 f"{agent['runtime']} · {agent['model']} refused a turn for quota, and nothing "
-                f"runs on it before {_fmt_epoch(held)}"
+                f"runs on it before {core.fmt_epoch(held)}"
             )
         if self._workspace_of(agent_name) is None:
             return "no workspace"
@@ -1242,7 +1304,7 @@ class Bus:
         # other, and no watcher follows it.
         marks.sweep(marks.agent_scope(agent_name), f"{agent_name}'s compaction")
         self._record_usage(usage, turn)
-        self._poll_runtime(agent["runtime"])
+        self._quota_after(agent["runtime"], turn)
         if turn.death is not None:
             return {"ok": False, "reason": (
                 f"the compaction died: {turn.death.reason}. Nothing changed.")}
@@ -1392,7 +1454,9 @@ class Bus:
                 (session_id, name, session_id),
             )
 
-    def _record_death(self, name: str, turn, resume_after: int | None) -> None:
+    def _record_death(
+        self, name: str, turn, resume_after: int | None, retrying: bool
+    ) -> None:
         """Record a classified death, through core like every other mutation, and
                 tell whoever has to hear of it.
 
@@ -1402,6 +1466,9 @@ class Bus:
 
                 A lead's death for any reason but a stop is told to its manager, in the
                 same message as the work's notice when that goes to the same manager.
+
+                A death that `retrying` names fails no work and is told to nobody but
+                the agent.
         """
         reason = turn.death.reason
         # recipient -> the notices for it, in order
@@ -1417,7 +1484,7 @@ class Bus:
                 "SELECT id FROM works WHERE status = 'running' AND agent_id = ? ORDER BY id DESC",
                 (agent["id"],),
             )
-            if work is not None:
+            if work is not None and not retrying:
                 # actor stays None throughout: the supervisor observed this, no
                 # participant caused it, and core reads None as "the system".
                 if reason == "quota_exhausted":
@@ -1436,12 +1503,13 @@ class Bus:
                 )
                 if told is not None:
                     notices.setdefault(told[0], []).append(told[1])
-            if agent["kind"] == "lead" and reason != "killed":
+            if agent["kind"] == "lead" and reason != "killed" and not retrying:
                 notices.setdefault(core.manager_name(self.conn, agent["id"]), []).append(
                     _lead_turn_died_notice(name, reason, resume_after)
                 )
             for recipient, texts in notices.items():
                 core.send_message(self.conn, core.OFFICE_SENDER, recipient, "\n\n".join(texts))
+            core.tell_quietly(self.conn, name, _own_turn_died_notice(reason, turn.death.error))
         except Exception:
             _log.exception("could not record %s's death (%s)", name, reason)
         if reason == "context_overflow":
@@ -1551,22 +1619,27 @@ class Bus:
             return ids[told]
         return None if work["fail_reason"] == "killed" else director_id
 
+    def _turn_due(self, name: str) -> bool:
+        """Whether `name` has a turn running, owed, or a retry of a dead one pending."""
+        state = self._state(name)
+        return state.turn is not None or state.owes_turn or state.retry_at is not None
+
     def _has_path(self, agent: dict, works: list[dict], agents: dict[int, dict]) -> bool:
         """Whether something will move `agent`'s works: a turn of its own, or of the
-                other side of one of them; a direct message it has not read; a
+                other side of one of them, running or due (_turn_due); a direct message it has not read; a
                 deferred message it set or will get, or an expectation it holds open;
                 a running work it assigned to somebody else; or a direct message of
                 its own that its addressee has not taken yet — for the owner, one he
                 has not written back after.
         """
         name = agent["name"]
-        if self._state(name).turn is not None:
+        if self._turn_due(name):
             return True
         if agent["kind"] == "director" and self._director_stopped:
             return True
         for work in works:
             for other in (work["agent_id"], work["assigned_by_agent_id"]):
-                if other != agent["id"] and self._state(agents[other]["name"]).turn is not None:
+                if other != agent["id"] and self._turn_due(agents[other]["name"]):
                     return True
         if db.query_one(
             self.conn,
@@ -1727,10 +1800,12 @@ class Bus:
     # -- the owner's journal ----------------------------------------------
 
     def _journal_turn_end(
-        self, name: str, reason: str | None, runtime: str, model: str, resume_after: int | None
+        self, name: str, reason: str | None, runtime: str, model: str, resume_after: int | None,
+        retry_delay: int | None,
     ) -> None:
         """One line in the owner's journal about a turn that has died, its severity
-                depending on whose turn it was.
+                depending on whose turn it was. `retry_delay` is the seconds until the
+                turn that retries it, when there is one.
         """
         try:
             agent = db.query_one(self.conn, "SELECT kind FROM agents WHERE name = ?", (name,))
@@ -1743,7 +1818,7 @@ class Bus:
                 core.record_notice(self.conn, severity, text)
                 return
             if reason is not None:
-                severity, text = _turn_death_notice(name, agent["kind"], reason)
+                severity, text = _turn_death_notice(name, agent["kind"], reason, retry_delay)
                 core.record_notice(self.conn, severity, text)
         except Exception:
             _log.exception("could not journal the end of %s's turn", name)
@@ -1885,14 +1960,15 @@ class Bus:
         template = _template(agent["kind"])
         fields = {
             "name": agent["name"],
-            # A system prompt is fixed when the session is created (_start_turn).
+            # Read when a session is created, and by claude after a compaction (_start_turn).
             # The team, the quota and the model catalogue are roster()'s.
-            "rules": _rules(self.conn, agent["kind"]),
+            "rules": _rules(self.conn, agent),
             "workspace": str(self._workspace_of(agent["name"]) or "(none yet)"),
             "sandbox": str(self._sandbox_of(agent["name"]) or "(none yet)"),
             # Through core, like every other reader of the owner's name.
             "owner": core.get_owner_name(self.conn),
             "instructions": agent["instructions"] or "(none)",
+            "price_note": core.get_setting(self.conn, core.PRICE_LIST_NOTE_SETTING, "") or "(none)",
         }
         # format_map with a full dict ignores the fields a template does not
         # mention.
@@ -2023,6 +2099,9 @@ class _Pending:
         pending = cls()
         name = agent["name"]
         chat_lines: list[tuple[int, int]] = []  # (index in lines, message id)
+        # rule id -> index in lines of the latest announcement of that rule
+        rule_lines: dict[int, int] = {}
+        superseded: set[int] = set()
         for row in messages:
             # The id first, the decision after: a row this agent is not
             # shown still has to be passed.
@@ -2055,6 +2134,13 @@ class _Pending:
                 # line (core.tell_quietly). Shown to nobody else.
                 if row["recipient"] != name:
                     continue
+                # Of several announcements of one rule, only the latest is shown.
+                rule_id = core.announced_rule(row["body"])
+                if rule_id is not None:
+                    if rule_id in rule_lines:
+                        superseded.add(rule_lines[rule_id])
+                        pending.quiet_count -= 1
+                    rule_lines[rule_id] = len(pending.lines)
                 pending.quiet_count += 1
                 pending.lines.append(row["body"])
             else:
@@ -2063,13 +2149,17 @@ class _Pending:
                 pending.lines.append(f"[common chat, from {row['sender']}] {row['body']}")
 
         left_out = len(chat_lines) - COMMON_CHAT_DELIVERED
+        dropped = set(superseded)
+        head = []
         if left_out > 0:
-            dropped = {index for index, _ in chat_lines[:left_out]}
-            pending.lines = [
+            dropped |= {index for index, _ in chat_lines[:left_out]}
+            head = [
                 f"[common chat] {left_out} earlier lines are not shown here; "
-                f"chat(before_id={chat_lines[left_out][1]}) can read them.",
-                *(line for index, line in enumerate(pending.lines) if index not in dropped),
+                f"chat(before_id={chat_lines[left_out][1]}) can read them."
             ]
+        pending.lines = head + [
+            line for index, line in enumerate(pending.lines) if index not in dropped
+        ]
         return pending
 
 
@@ -2078,33 +2168,21 @@ _PROMPT_DIR = Path(__file__).parent / "prompts"
 
 def _template(kind: str) -> str:
     """The system prompt template for an agent of `kind`: director, lead or
-    executor. Its placeholders are {name}, {owner}, {rules}, {workspace},
-    {sandbox} and {instructions}."""
+    executor. Its placeholders are {name}, {owner}, {rules}, {workspace} and
+    {sandbox}, and in the director's and a lead's also {instructions}."""
     return (_PROMPT_DIR / f"{kind}.md").read_text(encoding="utf-8")
 
 
-def _rules(conn: sqlite3.Connection, kind: str) -> str:
+def _rules(conn: sqlite3.Connection, agent: dict) -> str:
     """The standing conventions, substituted into every template on every turn
-        of every agent, as core.render_rules() prints them. The director's also
-        says that the number is the address note(op=update|delete, kind=rule)
-        takes.
+        of every agent, as core.render_rules() prints them for that agent. The
+        director's also says that the number is the address
+        note(op=update|delete, kind=rule) takes.
     """
-    rules = core.render_rules(conn)
-    if kind == "director" and rules != core.NO_RULES:
+    rules = core.render_rules(conn, agent)
+    if agent["kind"] == "director" and rules != core.NO_RULES:
         rules += "\n([n] is the rule_id note(op=update|delete, kind=rule) takes.)"
     return rules
-
-
-def _fmt_epoch(value) -> str:
-    """A stored epoch reset time in the machine's own zone. Never a guess: the
-    adapters store NULL when a vendor's answer could not be turned into one,
-    and callers check for that before asking. Local rather than UTC, with the
-    zone named, for the reason office/mcp.py's _fmt_epoch gives."""
-    try:
-        local = datetime.fromtimestamp(int(value), tz=timezone.utc).astimezone()
-        return local.strftime("%Y-%m-%d %H:%M") + " local"
-    except (TypeError, ValueError, OSError, OverflowError):
-        return str(value)
 
 
 def _work_ended_notice(
@@ -2115,7 +2193,7 @@ def _work_ended_notice(
     """
     head = f"[office] work {work_id} ({agent_name}): {_excerpt(brief)}".rstrip(": ")
     if paused:
-        when = _fmt_epoch(resume_after) if resume_after else None
+        when = core.fmt_epoch(resume_after) if resume_after else None
         return (
             f"{head}\nPaused: {reason}" + (f", earliest resume {when}" if when else "") + ". "
             f"{agent_name}'s next turn resumes it: write to {agent_name} after the time of "
@@ -2134,7 +2212,7 @@ def _work_ended_journal(
     failed or paused."""
     head = f"Work {work_id} ({agent_name}): {_excerpt(brief)}".rstrip(": ")
     if paused:
-        when = _fmt_epoch(resume_after) if resume_after else None
+        when = core.fmt_epoch(resume_after) if resume_after else None
         return f"{head} — paused: {reason}" + (f", earliest resume {when}." if when else ".")
     return f"{head} — failed: {reason}. The output tail is on the work record."
 
@@ -2142,13 +2220,38 @@ def _work_ended_journal(
 def _lead_turn_died_notice(name: str, reason: str, resume_after) -> str:
     """What the office says to a lead's manager when the lead's turn died."""
     if reason == "quota_exhausted":
-        when = _fmt_epoch(resume_after) if resume_after else None
+        when = core.fmt_epoch(resume_after) if resume_after else None
         cause = "its runtime is out of quota" + (f", earliest return {when}" if when else "")
     elif reason == "context_overflow":
         cause = "its context overflowed, and its next turn starts a fresh session"
     else:
         cause = reason
     return f"[office] {name}'s turn died: {cause}. What it was in the middle of stopped there."
+
+
+def _own_turn_died_notice(reason: str, error: str | None) -> str:
+    """What the office tells an agent, in its next turn, about its turn that died."""
+    if reason == "quota_exhausted":
+        cause = "your runtime ran out of quota"
+    elif reason == "context_overflow":
+        cause = "your context overflowed"
+    elif reason == "killed":
+        cause = "it was stopped"
+    else:
+        first = (error or "").strip().splitlines()
+        cause = (
+            f'the vendor\'s process failed with "{first[0][:300]}"' if first
+            else "the vendor's process ended without a result"
+        )
+    after = (
+        "This turn starts a fresh session."
+        if reason == "context_overflow"
+        else "Your conversation goes on from where that turn ended."
+    )
+    return (
+        f"[office] Your previous turn died: {cause}. Everything it started stopped with it: "
+        f"none of its commands or stage runs is still running, and its run handles are gone. {after}"
+    )
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -2200,23 +2303,57 @@ def _last_actions(turn, limit: int = 5) -> list[str]:
     return [f"- {phase}: {_excerpt(text)}" for phase, text in rows[-limit:]]
 
 
-def _silent_turn_notice(agent_name: str, quiet_for: float, running_for: float, actions: list[str]) -> str:
+def _run_line(run) -> str:
+    """One running command of an agent: its handle, the stage it is on, how long it
+    has run and the start of its command."""
+    on_stage = isinstance(run, stages.StageRun)
+    where = f" on stage '{run.stage}'" if on_stage else ""
+    state = "waiting for the stage" if on_stage and run.waiting() else "running"
+    return f"{run.handle}{where} ({state}, {_fmt_duration(run.elapsed)}): {_excerpt(run.command)}"
+
+
+def _open_lines(calls: list[tuple[str | None, float]], runs: list[str]) -> list[str]:
+    """What is open on a quiet agent's side: its tool calls, each with the seconds
+    since it started, and its running commands. With neither, the model is the one
+    that is silent."""
+    if not calls and not runs:
+        return ["No tool call is open and none of its runs is in progress: the model itself is silent."]
+    lines = []
+    if calls:
+        lines.append("Tool calls open:")
+        lines.extend(
+            f"- {_excerpt(summary or 'tool call')} (open {_fmt_duration(seconds)})"
+            for summary, seconds in calls
+        )
+    if runs:
+        lines.append("Runs in progress:")
+        lines.extend(f"- {run}" for run in runs)
+    return lines
+
+
+def _silent_turn_notice(
+    agent_name: str, quiet_for: float, running_for: float,
+    calls: list[tuple[str | None, float]], runs: list[str], actions: list[str],
+) -> str:
     """What the office says to an agent's manager when the agent has gone quiet
-        (_report_silent_turn).
+        (_report_silent_turn): the tool calls and runs open on its side, then the
+        last things it was seen doing.
     """
     head = (
         f"[office] {agent_name} has produced no output for {_fmt_duration(quiet_for)} "
         f"(its turn has been running {_fmt_duration(running_for)})."
     )
-    body = (
-        "Nothing has been done to the agent; a long test or a slow build looks the same from "
-        "outside."
-    )
     if actions:
         evidence = "The last things it was seen doing:\n" + "\n".join(actions)
     else:
         evidence = "Nothing in the last 200 lines of its output is a tool call."
-    return f"{head}\n{body}\n{evidence}\nNothing else will look."
+    return "\n".join([
+        head,
+        "Nothing has been done to the agent.",
+        *_open_lines(calls, runs),
+        evidence,
+        "Nothing else will look.",
+    ])
 
 
 _WORK_STATUS_WORDS = {"running": "open", "done": "reported"}
@@ -2249,25 +2386,36 @@ def _stall_journal(name: str, works: list[dict], holders: dict[int, str]) -> str
     ])
 
 
+# Per runtime, the death reasons after which _undelivered_notice tells a sender that
+# the messages are in the recipient's conversation and are not to be sent again.
 def _undelivered_notice(recipient: str, reason: str, resume_after, bodies: list[str]) -> str:
-    """The office's answer to a sender whose messages died with a turn.
+    """The office's answer to a sender whose messages were handed to a turn that died.
 
-        One notice per sender, not per message.
+        One notice per sender, not per message. The messages are in the recipient's
+        conversation, which its next turn resumes, except after context_overflow, whose
+        next turn starts a new one.
     """
-    again = "send it again if it still matters"
     if reason == "quota_exhausted":
         cause = "its runtime is out of quota"
-        if resume_after:
-            again += f"; {recipient} is back at {_fmt_epoch(resume_after)}"
     elif reason == "hub_restart":
         cause = "the hub restarted and the turn died with it"
     else:
         cause = f"the turn died: {reason}"
-    what = "message was" if len(bodies) == 1 else f"{len(bodies)} messages were"
-    lines = [
-        f"[office] Your {what} not processed by {recipient} — {cause}. "
-        f"Nothing is re-delivered automatically; {again}."
-    ]
+    many = len(bodies) > 1
+    what = f"{len(bodies)} messages were" if many else "message was"
+    it, matters = ("them", "they still matter") if many else ("it", "it still matters")
+    if reason == "context_overflow":
+        action = (
+            f"{recipient}'s next turn starts a new conversation that does not hold {it}; "
+            f"send {it} again if {matters}."
+        )
+    else:
+        when = f", no earlier than {core.fmt_epoch(resume_after)}" if resume_after else ""
+        action = (
+            f"{'They are' if many else 'It is'} in {recipient}'s conversation, and {recipient} "
+            f"reads {it} when its next turn starts{when}; do not send {it} again."
+        )
+    lines = [f"[office] Your {what} not processed by {recipient} — {cause}. {action}"]
     lines.extend(f"  - {_excerpt(body)}" for body in bodies)
     return "\n".join(lines)
 
@@ -2308,13 +2456,18 @@ def _excerpt(body: str, limit: int = 160) -> str:
     return first
 
 
-def _turn_death_notice(name: str, kind: str, reason: str) -> tuple[str, str]:
+def _turn_death_notice(
+    name: str, kind: str, reason: str, retry_delay: int | None
+) -> tuple[str, str]:
     """Severity and text for the owner's journal, for a turn that died of
-        something other than quota.
+        something other than quota. A turn that is retried is never critical.
     """
     who = "The director" if kind == "director" else name
     if reason == "killed":
         return "info", f"{who}'s turn was stopped on request."
+    if retry_delay is not None:
+        retry_at = core.fmt_epoch(time.time() + retry_delay)
+        return "info", f"{who}'s turn failed: {reason}. It is retried no earlier than {retry_at}."
     if kind == "director":
         return "critical", f"The director's turn failed: {reason}."
     return "info", f"{who}'s turn failed: {reason}."
@@ -2365,7 +2518,7 @@ def _quota_wall_notice(
     """Severity and text for a turn the vendor refused for quota.
     """
     held = (
-        f"no turn starts on {runtime} · {model} before {_fmt_epoch(resume_after)}"
+        f"no turn starts on {runtime} · {model} before {core.fmt_epoch(resume_after)}"
         if resume_after else f"{runtime} gave no return time"
     )
     if kind == "director":
@@ -2399,8 +2552,8 @@ def _restart_killed_director(interrupted: list) -> str:
     """The owner's plate when the restart took the director's turn down with it.
     """
     lines = [
-        "The hub restarted and the director's turn died with it. Nothing that turn was "
-        "handed is re-delivered — if you had written to it, send it again."
+        "The hub restarted and the director's turn died with it. What that turn was handed "
+        "is in the director's conversation, and its next turn reads it; do not send it again."
     ]
     if interrupted:
         lines.append(

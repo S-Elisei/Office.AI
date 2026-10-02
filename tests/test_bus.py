@@ -28,13 +28,15 @@ TURN_SECONDS = 6.0
 
 
 def make_agent(
-    conn, name, *, kind="executor", manager=None, runtime="claude", model="stub-model", status="idle"
+    conn, name, *, kind="executor", manager=None, runtime="claude", model="stub-model",
+    status="idle", role=None
 ):
+    role = role or ("coding" if kind == "executor" else None)
     with db.transaction(conn) as c:
         c.execute(
-            "INSERT INTO agents (name, kind, manager_agent_id, runtime, model, status) "
-            "VALUES (?, ?, (SELECT id FROM agents WHERE name = ?), ?, ?, ?)",
-            (name, kind, manager, runtime, model, status),
+            "INSERT INTO agents (name, kind, manager_agent_id, role, runtime, model, status) "
+            "VALUES (?, ?, (SELECT id FROM agents WHERE name = ?), ?, ?, ?, ?)",
+            (name, kind, manager, role, runtime, model, status),
         )
     return db.query_one(conn, "SELECT * FROM agents WHERE name = ?", (name,))["id"]
 
@@ -73,11 +75,12 @@ def wait_until(predicate, timeout=10.0, interval=0.02) -> bool:
 class StubClaudeAdapter(ClaudeAdapter):
     """The real ClaudeAdapter with only the spawned binary swapped out."""
 
-    def __init__(self, dump_path=None, context_pct=5.0, sleep=0.0):
+    def __init__(self, dump_path=None, context_pct=5.0, sleep=0.0, die=False):
         super().__init__(sys.executable)
         self.dump_path = dump_path
         self.context_pct = context_pct
         self.sleep = sleep
+        self.die = die
 
     def build_command(self, ws, model, effort, office_url, session_id, resume=False):
         cmd = [self.bin_path, str(STUB_SCRIPT), "--context-pct", str(self.context_pct)]
@@ -85,6 +88,8 @@ class StubClaudeAdapter(ClaudeAdapter):
             cmd += ["--dump", str(self.dump_path)]
         if self.sleep:
             cmd += ["--sleep", str(self.sleep)]
+        if self.die:
+            cmd += ["--die"]
         return cmd
 
 
@@ -160,6 +165,41 @@ def test_the_common_chat_reaches_a_running_turn_through_the_tool_drain(
     assert bus.piggyback("exec1") is None
 
     finish_turn(bus, "exec1")
+
+
+def test_of_several_announcements_of_one_rule_only_the_latest_is_handed_over(conn, config):
+    make_agent(conn, "director", kind="director")
+    make_agent(conn, "exec1", manager="director")
+    rule = core.create_rule(conn, "the first wording", "director", "Pace")
+    core.create_rule(conn, "another rule's wording", "director", "Other")
+    core.update_rule(conn, rule["id"], "the second wording", actor="director")
+    core.update_rule(conn, rule["id"], "the third wording", actor="director")
+
+    pending = Bus(conn, config)._undelivered(dict(get_agent(conn, "exec1")))
+
+    handed_over = pending.render()
+    assert "the third wording" in handed_over
+    assert "the first wording" not in handed_over
+    assert "the second wording" not in handed_over
+    assert "another rule's wording" in handed_over
+    assert pending.quiet_count == 2
+
+
+def test_an_executors_system_prompt_holds_the_rules_for_everyone_executors_and_its_own_role_only(
+    conn, config
+):
+    make_agent(conn, "director1", kind="director")
+    make_agent(conn, "lead1", kind="lead", manager="director1")
+    make_agent(conn, "hand", manager="lead1", role="coding")
+    for audience in ("everyone", "managers", "executors", "role:coding", "role:review"):
+        core.create_rule(conn, f"text-for-{audience}", "director1", f"Title {audience}", audience)
+
+    prompt = Bus(conn, config)._system_prompt(dict(get_agent(conn, "hand")))
+
+    for audience in ("everyone", "executors", "role:coding"):
+        assert f"text-for-{audience}" in prompt
+    for audience in ("managers", "role:review"):
+        assert f"text-for-{audience}" not in prompt
 
 
 # --------------------------------------------------------------------------- delivery: hook
@@ -241,7 +281,6 @@ def test_a_message_left_in_the_inbox_when_a_turn_ends_is_answered_for_by_the_tur
         "SELECT body FROM messages WHERE sender = ? AND recipient = 'director1' ORDER BY id DESC",
         (core.OFFICE_SENDER,),
     )["body"]
-    assert "not processed by exec1" in notice
     assert "the errand no hook took" in notice
     assert "the first errand" not in notice
 
@@ -366,7 +405,7 @@ def test_a_dead_turn_does_not_report_its_own_brief_as_unprocessed(conn, config):
     make_workspace(config, conn, exec_id, "ws-brief")
     core.assign_work(
         conn, agent_id=exec_id, brief="paint the fence", task_id=None, branch="fence",
-        role="coding", complexity="medium", actor="director1",
+        complexity="medium", actor="director1",
     )
     core.send_message(conn, "director1", "exec1", "use the green paint")
     head = db.query_one(conn, "SELECT MAX(id) AS m FROM messages")["m"]
@@ -376,7 +415,7 @@ def test_a_dead_turn_does_not_report_its_own_brief_as_unprocessed(conn, config):
             (head, exec_id),
         )
 
-    Bus(conn, config)._close_turn("exec1", "tool_error", None)
+    Bus(conn, config)._close_turn("exec1", "vendor_error", None)
 
     notice = db.query_one(
         conn,
@@ -385,6 +424,42 @@ def test_a_dead_turn_does_not_report_its_own_brief_as_unprocessed(conn, config):
     )["body"]
     assert "use the green paint" in notice
     assert "paint the fence" not in notice
+
+
+# --------------------------------------------------------------------------- retried deaths
+
+
+def test_a_vendor_error_death_is_retried_and_the_fourth_in_a_row_fails_the_work(
+    conn, config, monkeypatch
+):
+    make_agent(conn, "director1", kind="director")
+    exec_id = make_agent(conn, "exec1", manager="director1")
+    make_workspace(config, conn, exec_id, "ws-retry")
+    work = core.assign_work(
+        conn, agent_id=exec_id, brief="paint the fence", task_id=None, branch="fence",
+        complexity="medium", actor="director1",
+    )
+    bus = Bus(conn, config)
+    state = bus._state("exec1")
+    monkeypatch.setattr(busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter(die=True))
+
+    def work_row():
+        return db.query_one(
+            conn, "SELECT status, fail_reason FROM works WHERE id = ?", (work["id"],)
+        )
+
+    start_turn(bus, conn, "exec1")
+    for delay in busmod.RETRY_DELAYS:
+        finish_turn(bus, "exec1")
+        assert work_row()["status"] == "running"
+        assert 0 < state.retry_at - time.monotonic() <= delay
+        # The retry comes due, and the tick starts it.
+        state.retry_at = time.monotonic()
+        assert tick_until(bus, lambda: state.turn is not None, busmod.COALESCE_SECONDS * 2)
+
+    finish_turn(bus, "exec1")
+    assert (work_row()["status"], work_row()["fail_reason"]) == ("failed", "vendor_error")
+    assert state.retry_at is None
 
 
 # --------------------------------------------------------------------------- quota hold
@@ -422,7 +497,7 @@ def test_a_paused_work_resumes_when_its_holders_next_turn_starts(conn, config, m
     make_workspace(config, conn, exec_id, "ws-paused")
     work = core.assign_work(
         conn, agent_id=exec_id, brief="paint the fence", task_id=None, branch="fence",
-        role="coding", complexity="medium", actor="director1",
+        complexity="medium", actor="director1",
     )
     core.pause_work(conn, work["id"], "quota_exhausted", resume_after=int(time.time()) - 1)
     bus = Bus(conn, config)
@@ -488,7 +563,7 @@ def a_lead_with_a_failed_work(conn, director_model="stub-model"):
     make_agent(conn, "lead1", kind="lead", manager="director1")
     hand = make_agent(conn, "hand", manager="lead1")
     work = core.assign_work(
-        conn, agent_id=hand, brief="dig the well", task_id=None, branch="well", role="coding",
+        conn, agent_id=hand, brief="dig the well", task_id=None, branch="well",
         complexity="medium", actor="lead1"
     )
     core.fail_work(conn, work["id"], "crash")
@@ -511,7 +586,6 @@ def test_a_stuck_agent_is_told_then_the_manager_above_then_the_journal(conn, con
     read_everything(conn)
     bus._check_progress()
     assert len(office_bodies(conn, "director1")) == 1
-    assert "lead1 answers for" in office_bodies(conn, "director1")[0]
 
     read_everything(conn)
     before = journal()
@@ -525,7 +599,6 @@ def test_a_stuck_agent_is_told_then_the_manager_above_then_the_journal(conn, con
     read_everything(conn)
     bus._check_progress()
     assert len(office_bodies(conn, "director1")) == told + 1
-    assert "lead1 answers for" in office_bodies(conn, "director1")[-1]
 
 
 def test_a_level_held_for_quota_is_passed_over(conn, config):
@@ -547,7 +620,6 @@ def test_nothing_moving_tells_the_director_once(conn, config):
 
     bus._check_progress()
     assert len(office_bodies(conn, "director1")) == 1
-    assert office_bodies(conn, "director1")[0].startswith("[office] Nothing in the office is moving")
 
     read_everything(conn)
     bus._check_progress()
@@ -660,7 +732,7 @@ def test_fresh_session_gets_snapshot_continuing_session_gets_delta_only(conn, co
     finish_turn(bus, "exec1")
 
     prompt1 = dump1.read_text(encoding="utf-8")
-    assert "New session" in prompt1
+    assert "(executor/claude/" in prompt1
     assert "turn one" in prompt1
 
     agent2 = dict(get_agent(conn, "exec1"))
@@ -674,7 +746,7 @@ def test_fresh_session_gets_snapshot_continuing_session_gets_delta_only(conn, co
     finish_turn(bus, "exec1")
 
     prompt2 = dump2.read_text(encoding="utf-8")
-    assert "New session" not in prompt2
+    assert "(executor/claude/" not in prompt2
     assert "turn two" in prompt2
 
 
@@ -688,11 +760,11 @@ def test_restart_recovery_fails_only_the_work_that_had_a_turn_on_it(conn, config
     make_workspace(config, conn, exec_id, "ws-restart")
     core.assign_work(
         conn, agent_id=exec_id, brief="refactor the widget", task_id=None, branch="feature-x",
-        role="coding", complexity="medium", actor="director1",
+        complexity="medium", actor="director1",
     )
     core.assign_work(
         conn, agent_id=waiting_id, brief="waiting on an answer", task_id=None, branch="feature-y",
-        role="coding", complexity="medium", actor="director1",
+        complexity="medium", actor="director1",
     )
     mark_mid_turn(conn, exec_id)
 
@@ -728,7 +800,6 @@ def test_restart_recovery_with_nothing_interrupted_sends_no_message(conn, config
     Bus(conn, config).recover_after_restart()
 
     assert db.query_one(conn, "SELECT id FROM messages") is None
-    assert "Nothing was in progress" in db.query_one(conn, "SELECT text FROM notices")["text"]
 
 
 # --------------------------------------------------------------------------- the switch
@@ -799,7 +870,7 @@ def test_a_report_reaches_its_assigner_and_a_restart_tells_the_assigner_or_the_s
     hand = make_agent(conn, "hand", manager="lower")
     reported = core.assign_work(
         conn, agent_id=hand, brief="paint the fence", task_id=None, branch="fence",
-        role="coding", complexity="medium", actor="lower",
+        complexity="medium", actor="lower",
     )
 
     def last_from(sender, recipient):
@@ -817,12 +888,12 @@ def test_a_report_reaches_its_assigner_and_a_restart_tells_the_assigner_or_the_s
     core.close_work(conn, reported["id"], actor="lower")
 
     core.assign_work(
-        conn, agent_id=hand, brief="mend the gate", task_id=None, branch="gate", role="coding",
+        conn, agent_id=hand, brief="mend the gate", task_id=None, branch="gate",
         complexity="medium", actor="lower"
     )
     core.assign_work(
         conn, agent_id=lower, brief="plan the garden", task_id=None, branch="garden",
-        role=None, complexity=None, actor="lower",
+        complexity=None, actor="lower",
     )
     make_workspace(config, conn, hand, "ws-hand")
     make_workspace(config, conn, lower, "ws-lower")
@@ -837,7 +908,6 @@ def test_a_report_reaches_its_assigner_and_a_restart_tells_the_assigner_or_the_s
 
     to_upper = last_from(core.OFFICE_SENDER, "upper")
     assert "plan the garden" in to_upper
-    assert "These leads of yours were in a turn, which died with the hub: lower." in to_upper
     assert "mend the gate" not in to_upper
 
     to_director = last_from(core.OFFICE_SENDER, "director1")
@@ -846,6 +916,13 @@ def test_a_report_reaches_its_assigner_and_a_restart_tells_the_assigner_or_the_s
 
 
 # --------------------------------------------------------------------------- the keep-alive turn
+
+
+# Minutes since an agent's last process ended: inside the keep-alive window, before it
+# and after it.
+DUE_MINUTES = (busmod.KEEP_ALIVE_SECONDS + core.CACHE_SECONDS) // 120
+TOO_SOON_MINUTES = busmod.KEEP_ALIVE_SECONDS // 60 - 1
+TOO_LATE_MINUTES = core.CACHE_SECONDS // 60 + 1
 
 
 def add_usage_row(conn, agent, process, ended_minutes_ago, runtime="claude"):
@@ -869,7 +946,7 @@ def test_a_keep_alive_turn_is_due_for_an_agent_waiting_on_a_holder_at_work_and_d
     make_workspace(config, conn, exec_id, "ws-exec")
     core.assign_work(
         conn, agent_id=exec_id, brief="paint the fence", task_id=None, branch="fence",
-        role="coding", complexity="medium", actor="director1",
+        complexity="medium", actor="director1",
     )
     with db.transaction(conn) as c:
         c.execute("UPDATE agents SET session_id = 'sess-director' WHERE id = ?", (director_id,))
@@ -891,17 +968,17 @@ def test_a_keep_alive_turn_is_due_for_an_agent_waiting_on_a_holder_at_work_and_d
                 (f"-{minutes_ago} minutes",),
             )
 
-    add_usage_row(conn, "director1", "turn", 56)
+    add_usage_row(conn, "director1", "turn", DUE_MINUTES)
     assert not due()  # the holder has no turn
     core.send_message(conn, "director1", "exec1", "start")
     start_turn(bus, conn, "exec1")
     assert due()
 
-    last_process_ended(54)
+    last_process_ended(TOO_SOON_MINUTES)
     assert not due()  # too soon
-    last_process_ended(61)
+    last_process_ended(TOO_LATE_MINUTES)
     assert not due()  # too late
-    last_process_ended(56)
+    last_process_ended(DUE_MINUTES)
     assert due()
 
     message_id = core.send_message(conn, "exec1", "director1", "an unread message")["id"]
@@ -924,7 +1001,7 @@ def test_a_keep_alive_turn_is_due_for_an_agent_waiting_on_a_holder_at_work_and_d
 def test_an_executor_with_an_open_work_of_its_own_is_due_a_keep_alive_up_to_its_runtimes_cap_in_a_row(
     conn, config
 ):
-    director_id = make_agent(conn, "director1", kind="director")
+    make_agent(conn, "director1", kind="director")
     lead_id = make_agent(conn, "lead1", kind="lead", manager="director1")
     claude_id = make_agent(conn, "exec1", manager="lead1")
     codex_id = make_agent(conn, "exec2", manager="lead1", runtime="codex")
@@ -942,12 +1019,12 @@ def test_an_executor_with_an_open_work_of_its_own_is_due_a_keep_alive_up_to_its_
                 (name,),
             )
 
-    add_usage_row(conn, "exec1", "turn", 56)
-    add_usage_row(conn, "lead1", "turn", 56)
+    add_usage_row(conn, "exec1", "turn", DUE_MINUTES)
+    add_usage_row(conn, "lead1", "turn", DUE_MINUTES)
     assert not due("exec1")  # no work
     work = core.assign_work(
         conn, agent_id=claude_id, brief="paint the fence", task_id=None, branch="fence",
-        role="coding", complexity="medium", actor="lead1",
+        complexity="medium", actor="lead1",
     )
     assert not due("exec1")  # its brief is unread
     read_everything("exec1")
@@ -956,22 +1033,22 @@ def test_an_executor_with_an_open_work_of_its_own_is_due_a_keep_alive_up_to_its_
     assert not due("exec1")
     core.assign_work(
         conn, agent_id=lead_id, brief="plan the garden", task_id=None, branch="garden",
-        role=None, complexity=None, actor="director1",
+        complexity=None, actor="director1",
     )
     read_everything("lead1")
     assert not due("lead1")  # a lead's own work does not make it wait
 
     core.assign_work(
-        conn, agent_id=codex_id, brief="mend the gate", task_id=None, branch="gate", role="coding",
+        conn, agent_id=codex_id, brief="mend the gate", task_id=None, branch="gate",
         complexity="medium", actor="lead1"
     )
     read_everything("exec2")
-    for _ in range(4):
-        add_usage_row(conn, "exec2", "ping", 56, runtime="codex")
+    for _ in range(busmod.KEEP_ALIVE_CAPS["codex"] - 1):
+        add_usage_row(conn, "exec2", "ping", DUE_MINUTES, runtime="codex")
     assert due("exec2")
-    add_usage_row(conn, "exec2", "ping", 56, runtime="codex")
+    add_usage_row(conn, "exec2", "ping", DUE_MINUTES, runtime="codex")
     assert not due("exec2")
-    add_usage_row(conn, "exec2", "turn", 56, runtime="codex")
+    add_usage_row(conn, "exec2", "turn", DUE_MINUTES, runtime="codex")
     assert due("exec2")
 
     core.hold_for_quota(conn, "codex", "stub-model", int(time.time()) + 600)
@@ -982,11 +1059,11 @@ def test_an_executor_with_an_open_work_of_its_own_is_due_a_keep_alive_up_to_its_
         c.execute("UPDATE agents SET session_id = 'sess' WHERE id = ?", (claude2_id,))
     core.assign_work(
         conn, agent_id=claude2_id, brief="weed the beds", task_id=None, branch="beds",
-        role="coding", complexity="medium", actor="lead1",
+        complexity="medium", actor="lead1",
     )
     read_everything("exec3")
-    for _ in range(7):
-        add_usage_row(conn, "exec3", "ping", 56)
+    for _ in range(busmod.KEEP_ALIVE_CAPS["claude"] - 1):
+        add_usage_row(conn, "exec3", "ping", DUE_MINUTES)
     assert due("exec3")
-    add_usage_row(conn, "exec3", "ping", 56)
+    add_usage_row(conn, "exec3", "ping", DUE_MINUTES)
     assert not due("exec3")

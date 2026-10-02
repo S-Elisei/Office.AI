@@ -568,7 +568,7 @@ def _item_event(msg: dict, phase: str) -> Event | None:
             if detail:
                 outcome = f"{outcome}: {detail}"
         summary = with_outcome(summary, outcome)
-    return Event(kind="tool", phase=phase, text=summary)
+    return Event(kind="tool", phase=phase, calls=((item.get("id"), summary),), text=summary)
 
 
 def _failure_reason(item: dict) -> str | None:

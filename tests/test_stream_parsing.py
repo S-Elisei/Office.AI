@@ -9,7 +9,7 @@ from office.adapters import shared
 from office.adapters.agy import AgyAdapter, reset_seconds
 from office.adapters.claude import AUTOCOMPACT, ClaudeAdapter, parse_usage_payload
 from office.adapters.codex import CodexAdapter, rollout_requests
-from office.process import _QUOTA_SIGNS
+from office.process import _QUOTA_SIGNS, AgentTurn
 
 STREAMS = Path(__file__).parent / "fixtures" / "streams"
 
@@ -47,6 +47,19 @@ def test_claude_capture_yields_its_requests_and_its_totals():
     totals = next(event.totals for event in events if event.kind == "turn_end")
     assert totals == {"input": 18, "cache_read": 47466, "cache_write": 478,
                       "cache_write_1h": 478, "output": 361, "thinking": 201}
+
+
+def test_a_claude_turn_keeps_the_quota_its_stream_reports():
+    adapter = ClaudeAdapter(bin_path="claude")
+    turn = AgentTurn(adapter, [], ".", "", "exec1")
+    for line in (STREAMS / "claude_capture.jsonl").read_text(encoding="utf-8").splitlines():
+        event = adapter.parse_line(line)
+        if event is not None:
+            turn._absorb(event)
+
+    assert [(q.label, round(q.remaining_fraction, 2), q.reset_time) for q in turn.quota] == [
+        ("5h", 0.69, 1789144800), ("week (all models)", 0.32, 1789293600)
+    ]
 
 
 def test_agy_turn_totals_are_the_sums_of_its_requests_and_not_the_results_usage():
@@ -108,6 +121,7 @@ def test_a_compaction_carries_every_flag_of_a_resumed_turn_but_its_input(tmp_pat
         at = turn.index(flag)
         assert turn[at + 1] == value
         del turn[at:at + 2]
+    turn.remove("--disable-slash-commands")
     compaction.remove("/compact")
     assert sorted(turn) == sorted(compaction)
 
@@ -141,3 +155,38 @@ def test_each_vendors_quota_refusal_names_its_time_of_return():
     back = codex.quota_reset(refusal.replace("Sep 10th, 2026 1:43 AM", "3:20 PM"))
     assert now < back <= now + 86400 + 60
     assert (datetime.fromtimestamp(back - 60).hour, datetime.fromtimestamp(back - 60).minute) == (15, 20)
+
+
+def test_a_turn_keeps_the_tool_calls_the_vendor_started_and_has_not_ended():
+    # claude: constructed from field names on record. Two calls in one message, their
+    # results in two.
+    claude = [
+        '{"type":"assistant","message":{"content":['
+        '{"type":"tool_use","id":"toolu_a","name":"Bash","input":{"command":"ls"}},'
+        '{"type":"tool_use","id":"toolu_b","name":"Read","input":{"file_path":"x"}}]}}',
+        '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a"}]}}',
+        '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b"}]}}',
+    ]
+    captures = [
+        (ClaudeAdapter(bin_path="claude"), claude, 2),
+        (
+            CodexAdapter(bin_path="codex"),
+            (STREAMS / "codex_failed_mcp_tool_capture.jsonl").read_text(encoding="utf-8").splitlines(),
+            1,
+        ),
+        (
+            AgyAdapter(bin_path="agy"),
+            (STREAMS / "agy_failing_command_capture.jsonl").read_text(encoding="utf-8").splitlines(),
+            1,
+        ),
+    ]
+    for adapter, lines, peak in captures:
+        turn = AgentTurn(adapter, [], ".", "", "exec1")
+        counts = []
+        for line in lines:
+            event = adapter.parse_line(line)
+            if event is not None:
+                turn._absorb(event)
+                counts.append(len(turn.open_calls()))
+        assert max(counts) == peak
+        assert counts[-1] == 0

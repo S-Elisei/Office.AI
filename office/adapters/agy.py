@@ -27,7 +27,7 @@ from office.adapters.base import (
 
 _log = logging.getLogger(__name__)
 
-_GEMINI_GROUP = "gemini"
+_GEMINI = "gemini"
 
 HOOKS_DIR = ".agents"
 HOOKS_FILE = "hooks.json"
@@ -245,7 +245,7 @@ def parse_models_output(text: str) -> list[ModelInfo] | None:
             continue
         model_id, _, display = line.partition("\t")
         model_id = model_id.strip()
-        if not model_id:
+        if not model_id.lower().startswith(_GEMINI):
             continue
         models.append(
             ModelInfo(runtime="agy", model_id=model_id, display_name=display.strip() or None)
@@ -258,7 +258,7 @@ def parse_usage_payload(payload: dict) -> list[QuotaSnapshot] | None:
     snapshots = []
     for group in groups:
         name = str(group.get("name") or group.get("id") or "")
-        if _GEMINI_GROUP not in str(group.get("id", "") or name).lower():
+        if _GEMINI not in str(group.get("id", "") or name).lower():
             continue
         for bucket in group.get("buckets") or []:
             bucket_name = str(bucket.get("name") or bucket.get("id") or "").strip()
@@ -310,6 +310,7 @@ def _step_event(body: dict, session_id: str | None) -> Event | None:
     return Event(
         kind="tool",
         phase=phase,
+        calls=((str(body.get("step_index")), text),),
         text=text,
         session_id=session_id,
         context_used=used,

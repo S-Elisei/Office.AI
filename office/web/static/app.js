@@ -20,10 +20,26 @@
     }
   });
 
+  // One line in the office log about this page's connection.
+  function report(what) {
+    navigator.sendBeacon("/events/report", new URLSearchParams({ page: location.pathname, what: what }));
+  }
+
+  function secondsSince(time) {
+    return Math.round((Date.now() - time) / 1000);
+  }
+
+  function pageState() {
+    return `${document.visibilityState}, ${navigator.onLine ? "online" : "offline"}`;
+  }
+
   let streamWasDown = false;
+  let openedAt = 0;
+  let downSince = 0;
 
   function connect() {
     const source = new EventSource("/events/stream");
+    openedAt = Date.now();
 
     for (const kind of KINDS) {
       source.addEventListener(kind, (evt) => {
@@ -38,14 +54,79 @@
 
     source.addEventListener("open", () => {
       setConnIndicator(true);
-      if (streamWasDown) refreshCleanRegions();
+      if (streamWasDown) {
+        report(`stream back after ${secondsSince(downSince)}s down`);
+        refreshCleanRegions();
+      }
       streamWasDown = false;
+      openedAt = Date.now();
     });
     source.addEventListener("error", () => {
       setConnIndicator(false);
+      const state = source.readyState === EventSource.CLOSED ? "closed for good" : "retrying";
+      if (streamWasDown) {
+        report(`stream reconnect failed after ${secondsSince(downSince)}s down: ${state}, ${pageState()}`);
+      } else {
+        downSince = Date.now();
+        report(`stream lost after ${secondsSince(openedAt)}s open: ${state}, ${pageState()}`);
+      }
       streamWasDown = true;
+      // The browser does not retry a stream it closed; a new one takes its place.
+      if (source.readyState === EventSource.CLOSED) setTimeout(connect, REOPEN_MS);
     });
   }
+
+  const REOPEN_MS = 3000;
+
+  document.addEventListener("htmx:sendError", (e) => {
+    report(`${e.detail.requestConfig.verb.toUpperCase()} ${e.detail.pathInfo.requestPath} failed to send, ${pageState()}`);
+  });
+  document.addEventListener("htmx:responseError", (e) => {
+    report(`${e.detail.requestConfig.verb.toUpperCase()} ${e.detail.pathInfo.requestPath} answered ${e.detail.xhr.status}`);
+  });
+
+  // A visible page whose one-second timer fires this much late was blocked or throttled.
+  const STALL_MS = 3000;
+  // Swaps slower than this are named in the stall report.
+  const SLOW_SWAP_MS = 100;
+  // The latest swaps: when each ended, its target and how long htmx's swap and the
+  // afterSwap handlers registered before the one below took.
+  const recentSwaps = [];
+  let swapStart = 0;
+
+  document.addEventListener("htmx:beforeSwap", () => {
+    swapStart = performance.now();
+  });
+
+  function swapsDuring(ms) {
+    const since = Date.now() - ms;
+    return recentSwaps
+      .filter((s) => s.at >= since && s.ms >= SLOW_SWAP_MS)
+      .map((s) => `${s.target} ${Math.round(s.ms)}ms`);
+  }
+
+  function tailChars() {
+    let chars = 0;
+    for (const tail of document.querySelectorAll(".tail-view")) chars += tail.textContent.length;
+    return chars;
+  }
+
+  let tickAt = Date.now();
+  setInterval(() => {
+    const late = Date.now() - tickAt - 1000;
+    tickAt = Date.now();
+    if (late > STALL_MS && document.visibilityState === "visible") {
+      const slow = swapsDuring(late + 2000);
+      report(
+        `page stalled for ${Math.round(late / 1000)}s, ${document.hasFocus() ? "focused" : "unfocused"}; ` +
+        `slow swaps: ${slow.length ? slow.join(", ") : "none"}; ` +
+        `${document.getElementsByTagName("*").length} elements, ${tailChars()} chars in tails`
+      );
+    }
+  }, 1000);
+  document.addEventListener("visibilitychange", () => {
+    tickAt = Date.now();
+  });
 
   function setConnIndicator(live) {
     const dot = document.querySelector("[data-conn-dot]");
@@ -347,7 +428,44 @@
         break;
     }
     editor.dataset.editorChanged = "1";
+    validatePriceLists(editor.closest("form"));
   });
+
+  // A works or own row priced above the 5h window of its model's runtime, and an own
+  // row whose role, model and effort another own row has, cannot be saved. The form's
+  // data-price-runtimes maps a model to its runtime and to the name of the field holding
+  // that runtime's window.
+  function validatePriceLists(form) {
+    if (!form || !form.dataset.priceRuntimes) return;
+    const runtimes = JSON.parse(form.dataset.priceRuntimes);
+    for (const list of ["works", "own"]) {
+      for (const price of form.querySelectorAll(`input[name="${list}_price"]`)) {
+        const model = price.closest("tr").querySelector(`input[name="${list}_model"]`).value.trim();
+        const entry = runtimes[model];
+        const window = entry && form.elements[entry.window];
+        const size = window ? Number(window.value) : 0;
+        price.setCustomValidity(
+          size && Number(price.value) > size
+            ? `A price on ${model} cannot be more than the ${size} of the 5h window of ${entry.runtime}.`
+            : ""
+        );
+      }
+    }
+    const coordinated = new Set();
+    for (const input of form.querySelectorAll('input[name="own_role"]')) {
+      const row = input.closest("tr");
+      const role = input.value.trim();
+      const model = row.querySelector('input[name="own_model"]').value.trim();
+      const effort = row.querySelector('input[name="own_effort"]').value.trim();
+      const key = JSON.stringify([role, model, effort]);
+      input.setCustomValidity(
+        role && coordinated.has(key)
+          ? `Another row already has the role ${role} on ${model}${effort ? "/" + effort : ""}.`
+          : ""
+      );
+      coordinated.add(key);
+    }
+  }
 
   document.addEventListener("input", (e) => {
     const row = e.target.closest && e.target.closest("[data-wallet]");
@@ -355,7 +473,87 @@
   });
 
   document.addEventListener("input", (e) => syncRequired(e.target.form));
-  document.addEventListener("htmx:afterSwap", () => syncAllRequired(document));
+  document.addEventListener("input", (e) => validatePriceLists(e.target.form));
+  document.addEventListener("htmx:afterSwap", () => {
+    syncAllRequired(document);
+    for (const form of document.querySelectorAll("form[data-price-runtimes]")) validatePriceLists(form);
+  });
+
+  // ---- audio and 3D previews of files -----------------------------------------
+  const MODEL_VIEWER_SRC = "/static/vendor/model-viewer-umd.min.js";
+  let modelViewerLoading = null;
+
+  // Resolves once <model-viewer> is defined; the script is fetched on the first call.
+  function loadModelViewer() {
+    if (customElements.get("model-viewer")) return Promise.resolve();
+    if (!modelViewerLoading) {
+      modelViewerLoading = new Promise((resolve) => {
+        const script = document.createElement("script");
+        script.src = MODEL_VIEWER_SRC;
+        script.addEventListener("load", resolve);
+        document.head.append(script);
+      });
+    }
+    return modelViewerLoading;
+  }
+
+  // Shows `player` under `name` in the page's one file dialog, replacing what it held.
+  function openFileDialog(name, player) {
+    const dialog = document.getElementById("file-dialog");
+    dialog.querySelector("[data-file-title]").textContent = name;
+    dialog.querySelector("[data-file-body]").replaceChildren(player);
+    if (!dialog.open) dialog.showModal();
+  }
+
+  // "View 3D" and "Listen" buttons open their file in the dialog.
+  document.addEventListener("click", (e) => {
+    const button = e.target.closest && e.target.closest("button.view-3d, button.listen");
+    if (!button) return;
+    const src = button.dataset.src;
+    const name = button.dataset.name;
+    if (button.classList.contains("listen")) {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.autoplay = true;
+      audio.src = src;
+      openFileDialog(name, audio);
+      return;
+    }
+    loadModelViewer().then(() => {
+      const viewer = document.createElement("model-viewer");
+      viewer.setAttribute("src", src);
+      viewer.setAttribute("camera-controls", "");
+      viewer.setAttribute("auto-rotate", "");
+      viewer.setAttribute("shadow-intensity", "0.6");
+      openFileDialog(name, viewer);
+    });
+  });
+
+  // A click on the backdrop closes the file dialog.
+  document.addEventListener("click", (e) => {
+    const dialog = e.target;
+    if (dialog.id !== "file-dialog") return;
+    const box = dialog.getBoundingClientRect();
+    const inside = e.clientX >= box.left && e.clientX <= box.right &&
+      e.clientY >= box.top && e.clientY <= box.bottom;
+    if (!inside) dialog.close();
+  });
+
+  // Closing the file dialog, by any means, empties it.
+  document.getElementById("file-dialog").addEventListener("close", (e) => {
+    e.target.querySelector("[data-file-body]").replaceChildren();
+  });
+
+  // Registered after every other afterSwap handler, so its time includes theirs.
+  document.addEventListener("htmx:afterSwap", (e) => {
+    const target = e.target;
+    recentSwaps.push({
+      at: Date.now(),
+      target: (target && (target.id || target.className)) || "?",
+      ms: performance.now() - swapStart,
+    });
+    if (recentSwaps.length > 50) recentSwaps.shift();
+  });
 
   if (document.body) {
     connect();

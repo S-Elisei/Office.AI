@@ -17,7 +17,7 @@ from pathlib import Path
 
 from office import git, marks
 from office.adapters import shared
-from office.adapters.base import Event, context_limit_for
+from office.adapters.base import Event, QuotaSnapshot, context_limit_for
 
 _log = logging.getLogger("office.process")
 
@@ -99,7 +99,7 @@ class ProcessGone(RuntimeError):
 
 @dataclass
 class Death:
-    reason: str  # context_overflow | quota_exhausted | tool_error | crash | killed
+    reason: str  # context_overflow | quota_exhausted | vendor_error | crash | killed
     tail: list[str] = field(default_factory=list)
     # The text the reason was read from.
     error: str | None = None
@@ -175,6 +175,8 @@ class AgentTurn:
         # declared finished, its own words for one it declared failed. Kept apart
         # from `_last_error`, which any stderr line can overwrite afterwards.
         self.turn_end_error: str | None = None
+        # The latest quota the turn's own stream reported; empty when it reported none.
+        self.quota: tuple[QuotaSnapshot, ...] = ()
         self.finished = threading.Event()
 
         # time.monotonic() of the last byte from either stream.
@@ -205,6 +207,11 @@ class AgentTurn:
         # reports a real window mid-stream.
         self._context_limit: int | None = context_limit or context_limit_for(adapter.runtime)
         self._last_error: str | None = None
+        # Tool calls started and not yet ended: call id -> (summary, time.monotonic()
+        # at its start), oldest first. Written by the stdout reader, read through
+        # open_calls().
+        self._open_calls: dict[str, tuple[str | None, float]] = {}
+        self._calls_lock = threading.Lock()
         # An adapter whose occupancy does not ride its own stream. Absent on the
         # other two, and this stays None for them.
         self._context_poller = getattr(adapter, "poll_context", None)
@@ -325,6 +332,13 @@ class AgentTurn:
         """Seconds since the process started."""
         return max(0.0, time.monotonic() - self.started_at)
 
+    def open_calls(self) -> list[tuple[str | None, float]]:
+        """The tool calls the vendor has started and not ended, oldest first, each
+        as (summary, seconds since it started)."""
+        now = time.monotonic()
+        with self._calls_lock:
+            return [(summary, now - since) for summary, since in self._open_calls.values()]
+
     def tail(self) -> list[str]:
         # Same lock the two reader threads append under and _flush_tail() reads
         # under: the deque alone is not the shared state, the pair
@@ -413,6 +427,15 @@ class AgentTurn:
             self._context_limit = event.context_limit  # the CLI always beats the floor
         if event.error:
             self._last_error = event.error
+        if event.quota:
+            self.quota = event.quota
+        if event.kind == "tool":
+            with self._calls_lock:
+                for call_id, summary in event.calls:
+                    if event.phase == "started":
+                        self._open_calls.setdefault(call_id, (summary, time.monotonic()))
+                    elif event.phase == "finished":
+                        self._open_calls.pop(call_id, None)
         if event.kind == "turn_end":
             self.turn_ended = True
             self.turn_end_error = event.error or None
@@ -510,7 +533,7 @@ class AgentTurn:
             # This branch runs only once the process is already gone.
             return "context_overflow"
         if text:
-            return "tool_error"
+            return "vendor_error"
         return "crash"
 
 

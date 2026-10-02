@@ -2,7 +2,7 @@
 {% include "partials/notice.html" %}
 
 <form method="post" action="/settings" hx-post="/settings" hx-target="#settings-form" hx-swap="innerHTML"
-      data-office-required="owner_name">
+      data-office-required="owner_name" data-price-runtimes='{{ price_runtimes | tojson }}'>
   <div class="form-row mb-0">
     <label for="s-owner-name">Owner name</label>
     <input id="s-owner-name" name="owner_name" type="text" value="{{ owner_name }}" required pattern="[^:]*">
@@ -45,17 +45,18 @@
     {% endfor %}
   </div>
   <div class="form-row mb-0" style="margin-top: 16px;">
-    <label for="s-price-list-note">Note shown above the price list</label>
+    <label for="s-price-list-note">Note on the price list, in the director's and the leads' system prompts</label>
     <textarea id="s-price-list-note" name="price_list_note">{{ price_list_note }}</textarea>
   </div>
   {{ m.table_editor(
     price_list_works, "Price list: works a manager assigns",
-    "Shown to the director and the leads as written; its roles, and each role's complexities, are what assign accepts, and with no rows the defaults apply."
+    "Shown to the director and the leads; the price is the average of a work from brief to close, in the currency of the model's runtime, and cannot exceed that runtime's 5h window; its roles are what a hire accepts as an executor's role, and each role's complexities are what assign accepts, and with no rows the defaults apply and nothing is committed; leave Effort empty for agy."
   ) }}
   {{ m.table_editor(
     price_list_own, "Price list: what a lead spends on its own",
-    "Shown to the director and the leads as written."
+    "Shown to the director and the leads; a row with a role is what an assigner running on its model and effort commits for coordinating a work of that role, in the currency of the model's runtime, and cannot exceed that runtime's 5h window; no two rows share a role, model and effort; leave Effort empty for agy."
   ) }}
+  <datalist id="s-works-roles">{% for role in work_roles %}<option value="{{ role }}">{% endfor %}</datalist>
   <div class="form-actions">
     <button type="submit" class="primary" disabled>Save</button>
   </div>

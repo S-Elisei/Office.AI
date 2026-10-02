@@ -7,18 +7,21 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import anyio
 from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from office import core, db, git, marks, mcp, stages
 from office.bus import Bus
 from office.config import load_config
+from office.web.deps import read_form
 from office.web.routes import router as web_router
 
 _OFFICE_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -32,9 +35,11 @@ if not _office_log.handlers:
 
 
 def _log_to_file(config) -> None:
-    """Append the office's log to <data root>/office.log for the rest of this run.
+    """Append the office's log, and uvicorn's errors, to <data root>/office.log for the
+    rest of this run.
 
-    Called once the hub holds a config and has made the layout.
+    Called once the hub holds a config and has made the layout, after uvicorn has
+    configured its own loggers.
     """
     if any(isinstance(h, logging.FileHandler) for h in _office_log.handlers):
         return
@@ -43,8 +48,32 @@ def _log_to_file(config) -> None:
         handler = logging.FileHandler(config.root / "office.log", mode="a", encoding="utf-8")
         handler.setFormatter(logging.Formatter(_OFFICE_LOG_FORMAT))
         _office_log.addHandler(handler)
+        logging.getLogger("uvicorn.error").addHandler(handler)
     except Exception:  # noqa: BLE001
         _office_log.exception("could not open the office log file; logging to stderr only")
+
+
+#: A stall of the event loop longer than this many seconds is logged.
+_STALL_SECONDS = 2.0
+
+
+async def _watch_loop() -> None:
+    """Log every stall of the event loop, and the thread pool filling up and emptying."""
+    loop = asyncio.get_running_loop()
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    full = False
+    while True:
+        began = loop.time()
+        await asyncio.sleep(1)
+        late = loop.time() - began - 1
+        if late > _STALL_SECONDS:
+            _office_log.warning("the hub's event loop stalled for %.1fs", late)
+        if (limiter.borrowed_tokens >= limiter.total_tokens) != full:
+            full = not full
+            _office_log.warning(
+                "the thread pool is %s: %d of %d threads busy",
+                "full" if full else "free again", limiter.borrowed_tokens, limiter.total_tokens,
+            )
 
 
 class Broadcaster:
@@ -63,6 +92,9 @@ class Broadcaster:
 
     def unsubscribe(self, queue: asyncio.Queue[str]) -> None:
         self._subscribers.discard(queue)
+
+    def __len__(self) -> int:
+        return len(self._subscribers)
 
     async def publish(self, kind: str, payload: dict[str, Any]) -> None:
         message = f"event: {kind}\ndata: {json.dumps(payload)}\n\n"
@@ -106,6 +138,8 @@ async def lifespan(app: FastAPI):
     mcp.set_new_session_hook(bus.new_session)
     mcp.set_fire_hook(bus.fire_agent)
 
+    watcher = asyncio.create_task(_watch_loop())
+
     async with mcp.session_manager.run():
         bus.recover_after_restart()
         bus.start()
@@ -113,6 +147,7 @@ async def lifespan(app: FastAPI):
         yield
 
         bus.stop()
+        watcher.cancel()
         await asyncio.to_thread(stages.shutdown)
 
     core.set_notifier(None)
@@ -197,8 +232,12 @@ async def health(request: Request) -> dict[str, Any]:
 async def events_stream(request: Request) -> StreamingResponse:
     broadcaster: Broadcaster = request.app.state.broadcaster
     queue = broadcaster.subscribe()
+    port = request.client.port
+    _office_log.info("live stream %s opened; %d open", port, len(broadcaster))
 
     async def event_source():
+        opened = time.monotonic()
+        ended = "the page went away"
         try:
             yield ": connected\n\n"
             while True:
@@ -210,10 +249,25 @@ async def events_stream(request: Request) -> StreamingResponse:
                     yield ": ping\n\n"
                     continue
                 yield message
+        except BaseException as exc:
+            ended = repr(exc)
+            raise
         finally:
             broadcaster.unsubscribe(queue)
+            _office_log.info(
+                "live stream %s closed after %.0fs: %s; %d open",
+                port, time.monotonic() - opened, ended, len(broadcaster),
+            )
 
     return StreamingResponse(event_source(), media_type="text/event-stream")
+
+
+@app.post("/events/report")
+async def events_report(request: Request) -> Response:
+    """Writes one page's account of its connection to the office log."""
+    data = await read_form(request)
+    _office_log.info("page %s: %s", data["page"], data["what"])
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":

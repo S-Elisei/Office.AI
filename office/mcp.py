@@ -189,13 +189,37 @@ def _h_remind(conn, config, agent_name, role, args) -> str:
 
 def _h_expect(conn, config, agent_name, role, args) -> str:
     """An answer awaited from a local service, and the address it is posted to."""
-    _require(args, "about", "within_seconds")
-    expectation = core.open_expectation(conn, agent_name, args["about"], args["within_seconds"])
+    _require(args, "about")
+    expectation = core.open_expectation(
+        conn, agent_name, args["about"], args.get("within_seconds", core.MAX_WAKE_SECONDS)
+    )
     return (
         f"expecting '{expectation['about']}' until {_fmt_stamp(expectation['due_at'])}. "
         "Give the service this address to notify: "
         f"http://127.0.0.1:{config.port}/hooks/{expectation['token']}"
     )
+
+
+def _h_resource(conn, config, agent_name, role, args) -> str:
+    """A shared resource: held by one agent at a time, taken or released by name."""
+    op = args.get("op")
+    if op not in ("take", "release"):
+        raise ValueError(f"resource: unknown op '{op}' — expected take or release")
+    _require(args, "name")
+    name = args["name"]
+    me = _agent_row(conn, agent_name)
+    if op == "take":
+        taken = core.take_resource(conn, name, me["id"])
+        if taken["yours"]:
+            return f"you hold '{name}'"
+        return (
+            f"'{name}' is held by {taken['holder']} since {_fmt_stamp(taken['since'])}. You are "
+            "waiting for it: the office tells you when it is free."
+        )
+    waiters = core.release_resource(conn, name, me)
+    if waiters:
+        return f"'{name}' is free. Told: {', '.join(waiters)}."
+    return f"'{name}' is free."
 
 
 _TASK_LIST_LINES = 200
@@ -468,7 +492,7 @@ def _show_work(conn, work_id) -> str:
     elif work["status"] == "paused":
         lines.append(
             f"Paused: {work['pause_reason']}"
-            + (f", earliest resume {_fmt_epoch(work['resume_after'])}" if work["resume_after"] else "")
+            + (f", earliest resume {core.fmt_epoch(work['resume_after'])}" if work["resume_after"] else "")
         )
     lines += ["Brief:", work["brief"]]
     if work["output_tail"]:
@@ -697,7 +721,7 @@ def _h_note(conn, config, agent_name, role, args) -> str:
             f"or delete; the pages are files under {wiki_files.wiki_dir(config, ws)}"
         )
 
-    # Everyone reads the rules; writing them is the director's alone.
+    # Everyone reads every rule with its audience; writing them is the director's alone.
     if op == "list":
         return core.render_rules(conn)
     if op not in ("create", "update", "delete"):
@@ -714,13 +738,19 @@ def _h_note(conn, config, agent_name, role, args) -> str:
     if op == "create":
         # title is REQUIRED here, though the column is nullable.
         _require(args, "title", "text")
-        rule = core.create_rule(conn, args["text"], agent_name, title=args["title"])
+        rule = core.create_rule(
+            conn, args["text"], agent_name, title=args["title"],
+            audience=args.get("audience", "everyone"),
+        )
         return f"rule {rule['id']} created"
     if op == "update":
         # ...and OPTIONAL here, meaning "leave the title as it is" (core's
-        # update_rule COALESCEs it).
+        # update_rule COALESCEs it), as audience is.
         _require(args, "rule_id", "text")
-        rule = core.update_rule(conn, args["rule_id"], args["text"], title=args.get("title"), actor=agent_name)
+        rule = core.update_rule(
+            conn, args["rule_id"], args["text"], title=args.get("title"),
+            audience=args.get("audience"), actor=agent_name,
+        )
         return f"rule {rule['id']} updated"
     # op == "delete"
     _require(args, "rule_id")
@@ -975,25 +1005,6 @@ async def _h_run(conn, config, agent_name, role, args) -> str:
 # -- roster and the managers' tools --------------------------------------------
 
 
-def _fmt_epoch(value) -> str:
-    """A stored reset time in the machine's own zone, or "unknown".
-
-    Adapters normalise every vendor's answer to epoch seconds UTC, and store
-    NULL when it could not be turned into an instant or has already passed --
-    "unknown" is that NULL, not a formatting failure.
-
-    Shown local, not UTC, and the zone is named in the string. The same rule
-    the web pages follow (office/web/templating.py, fmt_time).
-    """
-    if not value:
-        return "unknown"
-    try:
-        local = datetime.fromtimestamp(int(value), tz=timezone.utc).astimezone()
-        return local.strftime("%Y-%m-%d %H:%M") + " local"
-    except (ValueError, OSError, OverflowError):
-        return str(value)
-
-
 def _first_line(body: str | None, limit: int = 100) -> str:
     """Enough of a message to recognise it by, on one line of a listing.
 
@@ -1010,7 +1021,7 @@ def _first_line(body: str | None, limit: int = 100) -> str:
 def _fmt_stamp(value: str | None) -> str:
     """One of the schema's own ISO-8601 UTC timestamps, in the machine's zone.
 
-    _fmt_epoch's counterpart for the other shape a stored instant comes in: quota
+    core.fmt_epoch's counterpart for the other shape a stored instant comes in: quota
     reset times are epoch seconds, and everything written in the schema's
     strftime shape — a wake's due_at among them — is this.
     """
@@ -1035,7 +1046,8 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
 
     A manager's answer carries every work on the books whose assignee is in its
     subtree or which it assigned, the failed ones included, and a REPORTED work
-    stands on it until its assigner closes it.
+    stands on it until its assigner closes it. Below it, the running and paused works
+    that are not on it, by runtime.
     """
     snap = core.roster(conn)
     me = next(a for a in snap["agents"] if a["name"] == agent_name)
@@ -1048,16 +1060,14 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
         if a["title"]:
             line += f" — {a['title']}"
         line += f" ({a['kind']}/{a['runtime']}/{a['model']})"
+        if a["kind"] == "executor":
+            line += f" role={a['role']}"
         if a["id"] == me["id"]:
             line += " (you)"
-        elif a["id"] in reach:
+        elif a["manager_agent_id"] == me["id"]:
             ctx = f"{a['context_used']}/{a['context_limit']}" if a["context_used"] is not None and a["context_limit"] else "n/a"
             line += f" status={a['status']} context={ctx}"
         lines.append(line)
-    # The caller's own instructions and nobody else's.
-    own = _agent_row(conn, agent_name)["instructions"]
-    lines.append(f"Your standing instructions, as they stand now:\n{own}" if own
-                 else "Your standing instructions: (none)")
     ws = core.workspace_of(conn, me["id"])
     lines.append(f"Your workspace: {ws['path']}; your sandbox: {config.scratch_dir / ws['id']}")
     # Everyone sees what it set itself; a manager also what its subtree set.
@@ -1084,6 +1094,13 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
                 f"due {_fmt_stamp(e['due_at'])}"
             )
     lines.extend(_stage_lines(conn, config, role))
+    if snap["resources"]:
+        lines.append("Shared resources:")
+        for r in snap["resources"]:
+            line = f"  {r['name']} — held by {r['holder']} since {_fmt_stamp(r['since'])}"
+            if r["waiting"]:
+                line += f"; waiting: {', '.join(r['waiting'])}"
+            lines.append(line)
     if not manager:
         return "\n".join(lines)
     works = [
@@ -1118,34 +1135,19 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
             elif w["status"] == "paused":
                 line += f" paused: {w['pause_reason']}"
                 if w["resume_after"]:
-                    line += f", earliest resume {_fmt_epoch(w['resume_after'])}"
-            lines.append(line)
-    if snap["quota"] or snap["holds"]:
-        # Bucket names are the vendor's own and are printed untranslated: the
-        # office does not decide which limit means what.
+                    line += f", earliest resume {core.fmt_epoch(w['resume_after'])}"
+            lines.append(line + _committed_suffix(w))
+    lines.extend(_other_work_lines(snap, {w["id"] for w in works}))
+    wallet_lines = _wallet_lines(conn)
+    if wallet_lines or snap["holds"]:
         lines.append("Quota:")
-        for q in snap["quota"]:
-            # The vendor's own two numbers and nothing derived: how much
-            # remains, and when it comes back.
-            lines.append(
-                f"  {q['runtime']} · {q['label']}: {q['remaining_fraction']:.0%} remaining, "
-                f"resets {_fmt_epoch(q['reset_time'])}"
-            )
-        lines.extend(_wallet_lines(conn))
+        lines.extend(wallet_lines)
         for h in snap["holds"]:
             lines.append(
-                f"  held: {h['runtime']} · {h['model']} — no turn starts on it before "
-                f"{_fmt_epoch(h['until'])}; it refused one for quota"
+                f"  out of quota: {h['runtime']} · {h['model']} — no turn starts on it before "
+                f"{core.fmt_epoch(h['until'])}"
             )
     lines.extend(_price_list_lines(conn))
-    lines.append("Roles in effect, each with the complexities it takes:")
-    lines.extend(
-        f"  {r}: {'; '.join(core.work_complexities(conn, r))}" for r in core.work_roles(conn)
-    )
-    if snap["blocked_tasks"]:
-        lines.append("Blocked (looks ready but its dependency isn't done):")
-        for b in snap["blocked_tasks"]:
-            lines.append(f"  task {b['id']} '{b['title']}' [{b['status']}] blocked by task {b['blocking_task_id']} '{b['blocking_title']}'")
     # The same renderer core.hire() refuses with.
     catalogue = core.models_catalogue(conn)
     if catalogue:
@@ -1171,9 +1173,51 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
     return "\n".join(lines)
 
 
-def _units(value: float) -> str:
-    """A wallet figure: whole units from a hundred up, one decimal below."""
-    return f"{value:.0f}" if abs(value) >= 100 else f"{value:.1f}"
+def _other_work_lines(snap, seen: set[int]) -> list[str]:
+    """roster()'s open and paused works that are not in `seen`, grouped by the runtime
+    of their holder, one line each."""
+    by_id = {a["id"]: a for a in snap["agents"]}
+    by_runtime: dict[str, list[str]] = {}
+    for w in snap["works"]:
+        if w["id"] in seen or w["status"] not in ("running", "paused"):
+            continue
+        holder = by_id[w["agent_id"]]
+        model = f"{holder['model']}/{holder['effort']}" if holder["effort"] else holder["model"]
+        kind = f" — {w['role']}, {w['complexity']}" if w["role"] else ""
+        line = f"    work {w['id']}: {w['agent_name']} ({model}){kind}"
+        if w["status"] == "paused":
+            line += " [paused"
+            if w["resume_after"]:
+                line += f", earliest resume {core.fmt_epoch(w['resume_after'])}"
+            line += "]"
+        else:
+            line += " [open]"
+        by_runtime.setdefault(holder["runtime"], []).append(
+            f"{line}, assigned by {w['assigner_name']}{_committed_suffix(w)}"
+        )
+    if not by_runtime:
+        return []
+    lines = ["Running and paused works not listed above, by runtime:"]
+    for runtime, entries in by_runtime.items():
+        lines.append(f"  {runtime}:")
+        lines.extend(entries)
+    return lines
+
+
+def _committed_suffix(work: dict) -> str:
+    """The end of a roster line for a work: what it commits, one amount per currency;
+    empty for a work that commits nothing."""
+    amounts: dict[str, float] = {}
+    for runtime, amount in (
+        (work["price_runtime"], work["price"]), (work["coordination_runtime"], work["coordination"])
+    ):
+        if runtime is not None:
+            amounts[runtime] = amounts.get(runtime, 0) + amount
+    if not amounts:
+        return ""
+    return " — " + " + ".join(
+        f"{wallets.units(amount)} {wallets.CURRENCY[runtime]}" for runtime, amount in amounts.items()
+    ) + " committed"
 
 
 def _wallet_lines(conn) -> list[str]:
@@ -1181,43 +1225,43 @@ def _wallet_lines(conn) -> list[str]:
     owned = wallets.overview(conn)
     if not owned:
         return []
-    lines = ["  Wallets (payday = the weekly reset):"]
+    lines = ["  Wallets:"]
     for w in owned:
-        line = (
-            f"    {w['currency']} ({w['runtime']}): {_units(w['left'])} of {_units(w['share'])} left "
-            f"until payday, {_fmt_epoch(w['payday'])}; spare {_units(w['spare'])}"
+        committed = (
+            f"{wallets.units(w['committed'])} committed to {w['works']} work{'s' * (w['works'] != 1)}"
+            if w["works"] else "nothing committed"
         )
-        if w["window"] is not None:
-            line += (
-                f"; {_units(w['window_left'])} of {_units(w['window'])} left in the current "
-                f"window, until {_fmt_epoch(w['next_window'])}"
-            )
+        line = (
+            f"    {w['currency']} ({w['runtime']}): {wallets.units(w['available'])} available, "
+            f"{committed}, spare {wallets.units(w['spare'])}"
+        )
+        if w["more_at"] is not None:
+            line += f"; more available at {core.fmt_epoch(w['more_at'])}"
         lines.append(line)
     return lines
 
 
 def _price_list_lines(conn) -> list[str]:
-    """roster()'s price list: the owner's note, the two lists each as its column names
-    and its rows with the cells joined by ` | `, and the rule about work that is not on
-    them."""
-    owner = core.get_owner_name(conn)
-    note = (core.get_setting(conn, core.PRICE_LIST_NOTE_SETTING, "") or "").splitlines()
+    """roster()'s price list: the two lists, each as its column names and its rows with
+    the cells joined by ` | `."""
+
+    def cell(value) -> str:
+        return f"{value:g}" if isinstance(value, float) else value or ""
 
     def table(columns, rows) -> list[str]:
         if not rows:
             return ["    (empty)"]
-        lines = [" | ".join(columns)] + [" | ".join(row[c] for c in columns) for row in rows]
+        lines = [" | ".join(columns)] + [" | ".join(cell(row[c]) for c in columns) for row in rows]
         return [f"    {line}" for line in lines]
 
     return [
-        "Price list (typical / with margin):",
-        *(f"  {line}" for line in note if line.strip()),
+        "Price list (the average price of a work, from brief to close, in the currency of its "
+        "model's runtime):",
         "  Works you assign:",
         *table(core.PRICE_WORKS_COLUMNS, core.price_works(conn)),
-        "  What a lead spends on its own:",
+        "  Committed to your own wallet for each work you assign to an executor, by the "
+        "work's role and your model and effort (in the currency of your runtime):",
         *table(core.PRICE_OWN_COLUMNS, core.price_own(conn)),
-        f"Work that is not in the price list is not assigned, unless the list is empty or {owner} "
-        "has instructed otherwise.",
     ]
 
 
@@ -1286,7 +1330,7 @@ def _h_agent(conn, config, agent_name, role, args) -> str:
         hired = core.hire(
             conn, config, name=args["name"], runtime=args["runtime"], model=args["model"],
             effort=args.get("effort"), kind="lead" if args.get("lead") else "executor",
-            title=_hire_title(args), manager_agent_id=me["id"],
+            title=_hire_title(args), role=args.get("role"), manager_agent_id=me["id"],
             adopt_workspace_id=args.get("adopt_workspace_id"), actor=agent_name,
         )
         return f"{hired['kind']} '{hired['name']}' hired under you, status={hired['status']}"
@@ -1317,7 +1361,7 @@ def _h_agent(conn, config, agent_name, role, args) -> str:
         hired = core.hire(
             conn, config, name=args["name"], runtime=profile["runtime"], model=profile["model"],
             effort=profile["effort"], kind="lead" if args.get("lead") else "executor",
-            title=_hire_title(args), manager_agent_id=me["id"],
+            title=_hire_title(args), role=args.get("role"), manager_agent_id=me["id"],
             adopt_workspace_id=args.get("adopt_workspace_id"), actor=agent_name,
         )
         return (
@@ -1450,35 +1494,34 @@ def _ask_for_yourself(conn, me: dict, button: str) -> str:
     return f"Ask {core.get_owner_name(conn)} to use {button}."
 
 
-def _one_of(name: str, value, allowed: list[str], sep: str = ", ") -> None:
-    """Refuse a value that is not one of `allowed`, naming both, `allowed` joined by
-    `sep`."""
-    if value not in allowed:
-        raise ValueError(
-            f"{name} '{value}' is not in effect — assign again with one of: {sep.join(allowed)}"
-        )
-
-
 def _h_assign(conn, config, agent_name, role, args) -> str:
     # task is optional: filing a kanban card is not a precondition for
     # giving someone a job.
     _require(args, "brief", "branch")
     target = _named_agent(conn, args, "agent")
     if target["kind"] == "executor":
-        _require(args, "role", "complexity")
-        _one_of("role", args["role"], core.work_roles(conn))
-        _one_of(
-            f"for role '{args['role']}', complexity", args["complexity"],
-            core.work_complexities(conn, args["role"]), sep="; ",
-        )
-    elif args.get("role") is not None or args.get("complexity") is not None:
+        _require(args, "complexity")
+        roles = core.work_roles(conn)
+        if target["role"] not in roles:
+            raise ValueError(
+                f"{target['name']}'s role '{target['role']}' is no longer in the price list — "
+                f"assign the work to an executor in one of: {', '.join(roles)}"
+            )
+        allowed = core.work_complexities(conn, target["role"])
+        if args["complexity"] not in allowed:
+            raise ValueError(
+                f"for {target['name']}'s role '{target['role']}', complexity "
+                f"'{args['complexity']}' is not in effect — assign again with one of: "
+                f"{'; '.join(allowed)}"
+            )
+    elif args.get("complexity") is not None:
         raise ValueError(
             f"'{target['name']}' is a {target['kind']}: a work for a {target['kind']} takes no "
-            "role or complexity — assign again without them"
+            "complexity — assign again without it"
         )
     work = core.assign_work(
         conn, agent_id=target["id"], brief=args["brief"], task_id=args.get("task_id"), branch=args["branch"],
-        role=args.get("role"), complexity=args.get("complexity"), actor=agent_name,
+        complexity=args.get("complexity"), actor=agent_name,
     )
     pending = " (workspace still provisioning — it attaches once ready)" if work["workspace_id"] is None else ""
     if target["name"] == agent_name:
@@ -1536,7 +1579,8 @@ def _h_work_dismiss(conn, config, agent_name, role, args) -> str:
 
 
 _SHARED_TOOL_NAMES = (
-    "say", "chat", "remind", "expect", "task", "work", "pr", "note", "ticket", "run", "roster",
+    "say", "chat", "remind", "expect", "resource", "task", "work", "pr", "note", "ticket", "run",
+    "roster",
 )
 # roster is shared and answers differently by role (_h_roster). It is the only
 # place any of that is said — none of it is printed into a system prompt.
@@ -1558,6 +1602,7 @@ _HANDLERS = {
     "chat": _h_chat,
     "remind": _h_remind,
     "expect": _h_expect,
+    "resource": _h_resource,
     "task": _h_task,
     "work": _h_work,
     "pr": _h_pr,
@@ -1642,11 +1687,11 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "expect": types.Tool(
         name="expect",
-        description="An address a local service notifies when a long job ends. Use it for a "
-        "job that takes longer than a few minutes. Wait for a shorter job inside your turn. "
-        "Give the service the address and end your turn. What the service sends there reaches "
-        "you as a direct message from hook:<service>, headed with `about`. If nothing arrives "
-        "within within_seconds, the address closes and you are told.",
+        description="An address a local service notifies when a job you hand it ends. Use it "
+        "for every job you hand a service that notifies an address. Give the service the "
+        "address and end your turn. What the service sends there reaches you as a direct "
+        "message from hook:<service>, headed with `about`. If nothing arrives while the address "
+        "is open, it closes and you are told.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1656,10 +1701,33 @@ _TOOLS: dict[str, types.Tool] = {
                 },
                 "within_seconds": {
                     "type": "integer",
-                    "description": f"How long to wait, in seconds: 0 to {core.MAX_WAKE_SECONDS}.",
+                    "description": f"How long the address stays open, in seconds: 0 to "
+                    f"{core.MAX_WAKE_SECONDS}. Without it, {core.MAX_WAKE_SECONDS}.",
                 },
             },
-            "required": ["about", "within_seconds"],
+            "required": ["about"],
+        },
+    ),
+    "resource": types.Tool(
+        name="resource",
+        description="Shared resources: take | release. A shared resource is a name that one "
+        "agent holds at a time. take holds it for you when it is free, and when it is already "
+        "yours. When another agent holds it, take answers with the holder and since when, and "
+        "records you as waiting: the office sends you a message when it is free. release frees "
+        "a resource you hold, or one held by an agent under you. Every agent waiting for it "
+        "gets a message from the office. roster() lists the resources that are held, with "
+        "their holders and the agents waiting.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "op": {"type": "string", "enum": ["take", "release"]},
+                "name": {
+                    "type": "string",
+                    "description": "Required. Lowercase letters, digits and hyphens, 1 to 40 "
+                    "characters.",
+                },
+            },
+            "required": ["op", "name"],
         },
     ),
     "task": types.Tool(
@@ -1861,13 +1929,17 @@ _TOOLS: dict[str, types.Tool] = {
         "step only, and it is itself a write. "
         "delete removes a page. It is refused if the page has changed since your file's "
         "version. "
-        "kind=rule is the flat list of standing statements the whole office works under. A "
-        "rule is a short title plus a paragraph. list gives every rule as it stands now, as "
-        "'- [rule_id] Title: text'. Your system prompt carries the rules as they stood when "
-        "your session began. Every change since then reached you as a line from the office. "
-        "create | update | delete are **the director's alone**. create takes title and text. "
+        "kind=rule is the flat list of standing statements the office works under. A "
+        "rule is a short title plus a paragraph, for an audience: everyone, managers (the "
+        "director and the leads), executors, or role:<role> (the executors of that role). "
+        "list gives every rule as it stands now, as '- [rule_id] (audience) Title: text'. "
+        "Your system prompt carries the rules that are for you, as they stood when your "
+        "session began. Every change since then reached you as a line from the office. "
+        "create | update | delete are **the director's alone**. create takes title and text, "
+        "and audience (everyone when left out). "
         "The title is a name ('No build step', 'Branch naming'), not a summary. update takes "
-        "rule_id and text, and title only to rename the rule.",
+        "rule_id and text, and title only to rename the rule, and audience only to change "
+        "who it is for.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1895,6 +1967,12 @@ _TOOLS: dict[str, types.Tool] = {
                     "update, only to rename the rule.",
                 },
                 "text": {"type": "string", "description": "Rule only: the rule's paragraph."},
+                "audience": {
+                    "type": "string",
+                    "description": "Rule only. Optional for create and update: everyone, "
+                    "managers, executors, or role:<role> with a role roster() lists as in "
+                    "effect.",
+                },
                 "rule_id": {
                     "type": "integer",
                     "description": "Rule only. Required for update and delete: the [n] that "
@@ -1985,20 +2063,25 @@ _TOOLS: dict[str, types.Tool] = {
     "roster": types.Tool(
         name="roster",
         description="The team as it stands now. Everyone gets: the whole team as a tree, each "
-        "agent under its manager, with its title; your own standing instructions as they "
-        "stand now; your workspace and sandbox paths; the stages, each with its state, who is "
-        "running on it and who is waiting; the reminders and open expectations you set. "
-        "The director and a lead also get, for every agent under them: its status, how full "
-        "its context window is, and the reminders and expectations it set. They also get: "
+        "agent under its manager, with its title and, for an executor, its role; your "
+        "workspace and sandbox paths; the "
+        "stages, each with its state, who is running on it and who is waiting; the shared "
+        "resources that are held, each with its holder, since when and the agents waiting; "
+        "the reminders and open expectations you set. "
+        "The director and a lead also get, for every agent directly under them, its status and "
+        "how full its context window is; for every agent under them, the reminders and "
+        "expectations it set. They also get: "
         "every work not finished (running, paused, reported or failed) whose assignee is under "
-        "them or which they assigned, with who assigned it, why it stopped and, for a pause, "
-        "the earliest it can resume; remaining quota per runtime, with its reset time; per "
-        "runtime, its wallet in the runtime's currency (CL claude, CD codex, GM agy): what the team "
-        "has left of its weekly share until payday, its spare (what is left above a line that holds "
-        "more in hand the further payday is) and what is left of the current 5-hour window; the owner's "
-        "price list; the roles and the complexities in effect for assign; each runtime and "
+        "them or which they assigned, with who assigned it, what it commits, why it stopped and, "
+        "for a pause, the earliest it can resume; the running and paused works not listed, by "
+        "runtime, each with its holder's model and effort, its role and complexity, who assigned "
+        "it and what it commits; per "
+        "runtime, its wallet in the runtime's currency (CL claude, CD codex, GM agy): what is "
+        "available now, what is committed to open works, its spare (what may go to work that can "
+        "wait) and when more becomes available; the owner's "
+        "price list; each runtime and "
         "model held for quota, with the time before which no turn starts on it; "
-        "tasks that look ready but whose dependency is not done; the model catalogue; "
+        "the model catalogue; "
         "workspaces that belong to nobody. "
         "The director also gets: how each stage is prepared, why a broken one broke, a reset or "
         "delete waiting on a run, the free space on the office's drive, and directories in the "
@@ -2015,14 +2098,17 @@ _TOOLS: dict[str, types.Tool] = {
         "hire makes you the new agent's manager. It takes name, title (one line naming the "
         "job, e.g. 'Economy architect'), runtime, model and, where the runtime has one, "
         "effort. Nothing has a default. lead=true hires a lead, who can hire, assign and "
-        "manage under itself. Without it, the hire is an executor. "
+        "manage under itself, and takes no role. Without it, the hire is an executor, and "
+        "role is required: one of the roles roster() lists as in effect. Every work "
+        "assigned to the executor is of its role. "
         "fire refuses while the agent still has active work (running, paused, or reported and "
         "not closed), while anybody reports to it, while an open PR names it as author, and "
         "while a turn or a compaction is running on its session. Its failed works, the "
         "reminders it set and its open expectations go with it. "
-        "instruct replaces the agent's standing instructions with text. Empty text clears "
-        "them. The agent gets the change as a quiet line that gives it no turn. Write to it as "
-        "well if it should act on them now. instructions shows them. "
+        "instruct replaces the standing instructions of a lead with text. Empty text clears "
+        "them. The lead gets the change as a quiet line that gives it no turn. Write to it as "
+        "well if it should act on them now. instructions shows them. An executor has none: "
+        "its job goes in the brief of its work. "
         "move puts the agent, with everyone under it, under manager. manager is you or a lead "
         "under you. It cannot be the agent itself or anyone under it. move refuses while a "
         "work in the moved part of the team would be left with an assigner that is neither "
@@ -2034,7 +2120,7 @@ _TOOLS: dict[str, types.Tool] = {
         "fails as 'killed'. "
         "save_profile saves a composition (runtime, model, effort) under a name, for every "
         "manager. list_profiles lists the saved profiles. hire_from_profile hires with a saved "
-        "one, taking name, title and lead as hire does. "
+        "one, taking name, title, role and lead as hire does. "
         "compact has the runtime summarize a session in place. The session and its id stay. "
         "claude only. new_session throws the conversation away and keeps the workspace, branch "
         "and working tree. The agent's next turn starts from a full state snapshot, on every "
@@ -2063,6 +2149,10 @@ _TOOLS: dict[str, types.Tool] = {
                 "runtime": {"type": "string", "enum": ["claude", "codex", "agy"], "description": "Required for hire, save_profile."},
                 "model": {"type": "string", "description": "Required for hire, save_profile. For set_model: the new model."},
                 "effort": {"type": "string", "description": "Optional. It depends on the runtime; agy takes none, its level is part of the model id. For set_model: the new effort."},
+                "role": {
+                    "type": "string",
+                    "description": "Required for hire, hire_from_profile of an executor: one of the roles roster() lists as in effect. A lead takes none.",
+                },
                 "adopt_workspace_id": {
                     "type": "string",
                     "description": "Optional for hire/hire_from_profile: take over a workspace that belongs to nobody, as roster() lists them, instead of a new clone.",
@@ -2084,11 +2174,12 @@ _TOOLS: dict[str, types.Tool] = {
     "assign": types.Tool(
         name="assign",
         description="The director's and the leads'. Assign work, on a named branch, to yourself or "
-        "to an agent under you. You name the branch. The agent creates it itself. Nothing is "
-        "reserved. You are recorded as the work's assigner. A work for an executor takes a role, "
-        "one of the roles of the works price list roster() shows (the default roles when that list "
-        "is empty), and a complexity, one of those roster() lists as in effect for its role; a work "
-        "for a lead or for the director takes neither. "
+        "to an agent under you. You name the branch. The agent creates it itself. No branch is "
+        "reserved. You are recorded as the work's assigner. A work for an executor is of the "
+        "executor's role and takes a complexity, one of those roster() lists as in effect for "
+        "that role; a work for a lead or for the director takes none. "
+        "Assigning a work to an executor commits its price from the price list to the wallets it "
+        "draws; closing it settles it. "
         "On another agent's work: its report comes to you, and so does a notice if it fails or "
         "pauses. The brief goes to the agent as your own message, with the branch name, and it "
         "starts them. Do not write to them separately. "
@@ -2106,13 +2197,9 @@ _TOOLS: dict[str, types.Tool] = {
                 },
                 "task_id": {"type": "integer", "description": "The kanban task this work is for. Only assign can set it."},
                 "branch": {"type": "string"},
-                "role": {
-                    "type": "string",
-                    "description": "Executors only: one of the roles of the works price list roster() shows.",
-                },
                 "complexity": {
                     "type": "string",
-                    "description": "Executors only: one of the complexities roster() lists as in effect for the work's role.",
+                    "description": "Executors only: one of the complexities roster() lists as in effect for the executor's role.",
                 },
             },
             "required": ["agent", "brief", "branch"],
@@ -2124,7 +2211,8 @@ _TOOLS: dict[str, types.Tool] = {
         "assignee is under you. The work record goes. The summary you pass becomes its line on "
         "the task it belonged to. An assignee's work(op=finish) is a report, not a close. The "
         "work stands until you close it. Close it when you accept the result, or when you "
-        "decide the rest of it belongs to a later job. To send it back instead, work_reassign "
+        "decide the rest of it belongs to a later job. Closing settles what the work committed. "
+        "To send it back instead, work_reassign "
         "it to the same agent with workspace=inherit, and write to them what is missing. A "
         "failed work is refused: work_dismiss writes it off; work_reassign hands it on.",
         input_schema={
@@ -2144,7 +2232,7 @@ _TOOLS: dict[str, types.Tool] = {
         name="work_dismiss",
         description="The director's and the leads'. Write off a work that has already failed: "
         "one you assigned, or one whose assignee is under you. The work record and its stored "
-        "output tail are deleted. Its task is untouched. work(op=show, work=<id>) reads the "
+        "output tail are deleted, and what the work committed is settled. Its task is untouched. work(op=show, work=<id>) reads the "
         "tail before it goes. Refused on a work that is open, paused or reported.",
         input_schema={
             "type": "object",
@@ -2159,7 +2247,8 @@ _TOOLS: dict[str, types.Tool] = {
         description="The director's and the leads'. Use it to: send a reported work back to its "
         "assignee; take up a failed work again; pass a work to another agent under you. "
         "Who: the work is one you assigned, or one whose assignee is under you. The recipient is "
-        "an agent under you or the work's own assignee, and has no other open work. "
+        "an agent under you or the work's own assignee, and has no other open work. A work "
+        "with a role goes only to an executor of that role. "
         "workspace=inherit: the recipient gets the work's workspace as it stands, with its "
         "commits, uncommitted changes and branch. The agent that had that workspace gets the "
         "recipient's former workspace in exchange. To the work's own assignee, which already "
@@ -2174,7 +2263,8 @@ _TOOLS: dict[str, types.Tool] = {
         "lies in your workspace is handed on with workspace=fresh once you have published its "
         "branch); when the work's workspace now belongs to a third agent that has an open work "
         "(use workspace=fresh). "
-        "After it: the work is open again and you are its assigner. From then on its report "
+        "After it: the work is open again and you are its assigner; handed to another agent, its "
+        "price is committed anew for that agent. From then on its report "
         "and its failure and pause notices come to you. Every agent whose workspace changed "
         "gets a quiet line with its new workspace and sandbox paths. The line gives it no "
         "turn. Nobody is sent anything else: write to whoever has to act.",

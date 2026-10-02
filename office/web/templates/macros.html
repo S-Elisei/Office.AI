@@ -38,7 +38,7 @@
 {% macro editor_row(spec, cells) %}
 <tr>
   {% for column in spec.columns %}
-  <td><input type="text" name="{{ spec.fields[loop.index0] }}" value="{{ cells[loop.index0] if cells else '' }}" aria-label="{{ column }}"{{ ' required' if loop.index0 < spec.required }}></td>
+  <td><input type="{{ column.type | default('text') }}" name="{{ spec.fields[loop.index0] }}" value="{{ cells[loop.index0] if cells else '' }}" aria-label="{{ column.label }}"{{ ' required' if column.required }}{% if column.type == 'number' %} min="0" step="any"{% endif %}{% if column.list %} list="{{ column.list }}"{% endif %}></td>
   {% endfor %}
   <td class="editor-actions">
     <button type="button" class="small" data-editor-act="up" aria-label="Move up" title="Move up">&uarr;</button>
@@ -56,7 +56,7 @@
   <div class="editor-scroll" id="s-{{ spec.id }}-scroll">
     <table class="editor-table">
       <thead>
-        <tr>{% for column in spec.columns %}<th>{{ column }}</th>{% endfor %}<th></th></tr>
+        <tr>{% for column in spec.columns %}<th>{{ column.label }}</th>{% endfor %}<th></th></tr>
       </thead>
       <tbody>
         {% for cells in spec.rows %}{{ editor_row(spec, cells) }}{% endfor %}

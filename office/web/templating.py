@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import html as _html
 import re
+import xml.etree.ElementTree as _etree
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote as _quote
 
 import markdown as _markdown
 from fastapi.templating import Jinja2Templates
 from markdown.extensions import Extension as _MarkdownExtension
+from markdown.inlinepatterns import InlineProcessor as _InlineProcessor
 from markdown.preprocessors import Preprocessor as _Preprocessor
 from markdown.treeprocessors import Treeprocessor as _Treeprocessor
+from markdown.util import AtomicString as _AtomicString
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -22,6 +26,11 @@ _URL_SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.\-]*):")
 _URL_NOISE_RE = re.compile(r"[\x00-\x20\x7f]")
 
 _LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-*+]|[0-9]{1,9}[.)])[ \t]")
+
+_WINDOWS_PATH_RE = re.compile(r"[A-Za-z]:[\\/]")
+_BARE_PATH_RE = r"(?<!\w)[A-Za-z]:[\\/][^\s<>\"'`*|]*\w"
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_AUDIO_SUFFIXES = {".wav", ".mp3", ".ogg", ".flac"}
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
@@ -107,10 +116,73 @@ class _SafeUrls(_Treeprocessor):
                     del element.attrib[attribute]
 
 
+def _file_nodes(path: str, inner: str | _etree.Element) -> list[_etree.Element]:
+    """The link to an existing file at `path`, wrapping `inner` (the text or the
+    element it is shown as), followed by the preview its extension gets."""
+    url = f"/file?path={_quote(path, safe='')}"
+    link = _etree.Element("a", {"href": url, "target": "_blank"})
+    if isinstance(inner, str):
+        link.text = inner
+    else:
+        link.append(inner)
+    nodes = [link]
+    suffix = Path(path).suffix.lower()
+    if suffix in _IMAGE_SUFFIXES:
+        image_link = _etree.Element("a", {"href": url, "target": "_blank"})
+        _etree.SubElement(
+            image_link, "img",
+            {"class": "file-preview", "src": url, "loading": "lazy", "alt": Path(path).name},
+        )
+        nodes.append(image_link)
+    elif suffix in _AUDIO_SUFFIXES or suffix == ".glb":
+        button = _etree.Element("button", {
+            "type": "button",
+            "class": "file-preview " + ("listen" if suffix in _AUDIO_SUFFIXES else "view-3d"),
+            "data-src": url,
+            "data-name": Path(path).name,
+        })
+        button.text = "Listen" if suffix in _AUDIO_SUFFIXES else "View 3D"
+        nodes.append(button)
+    return nodes
+
+
+class _BarePathPattern(_InlineProcessor):
+    """An absolute Windows path in running text that names an existing file."""
+
+    def handleMatch(self, m, data):  # noqa: N802
+        path = m.group(0)
+        if not Path(path).is_file():
+            return None, None, None
+        wrapper = _etree.Element("span")
+        wrapper.extend(_file_nodes(path, _AtomicString(path)))
+        return wrapper, m.start(0), m.end(0)
+
+
+class _CodeSpanFiles(_Treeprocessor):
+    """Links a code span whose whole text is the path of an existing file."""
+
+    def run(self, root):
+        for parent in list(root.iter()):
+            if parent.tag == "pre":
+                continue
+            for index, child in reversed(list(enumerate(parent))):
+                if child.tag != "code":
+                    continue
+                path = (child.text or "").strip()
+                if not _WINDOWS_PATH_RE.match(path) or not Path(path).is_file():
+                    continue
+                nodes = _file_nodes(path, child)
+                nodes[-1].tail = child.tail
+                child.tail = None
+                parent[index:index + 1] = nodes
+
+
 class _OfficeMarkdown(_MarkdownExtension):
-    """The office's two house rules."""
+    """The office's house rules."""
 
     def extendMarkdown(self, md):  # noqa: N802
+        md.inlinePatterns.register(_BarePathPattern(_BARE_PATH_RE, md), "office_bare_path", 185)
+        md.treeprocessors.register(_CodeSpanFiles(md), "office_code_span_files", 15)
         md.preprocessors.register(
             _ListsInterruptParagraphs(md), "office_list_interrupt", 20
         )

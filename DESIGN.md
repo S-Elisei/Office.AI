@@ -50,14 +50,18 @@ Every agent an agent hires has a title, `agents.title`: one line, such as "Econo
 architect" or "Advisor to the economy lead", required by the hire. The director has
 none.
 
-**Standing instructions.** Every agent has optional standing instructions,
-`agents.instructions`. The owner writes the director's on the settings page;
-anyone else's are written by any manager above it, with
-`agent(op=instruct, agent, text)`, and empty text clears them. A moved agent keeps
+**An executor's role.** An executor is hired with a role, `agents.role`: one of the
+roles in effect (section 10) when it is hired. The director and the leads have
+none. Every work assigned to an executor is of its role.
+
+**Standing instructions.** The director and the leads have optional standing
+instructions, `agents.instructions`. The owner writes the director's on the
+settings page; a lead's are written by any manager above it, with
+`agent(op=instruct, agent, text)`, and empty text clears them. A moved lead keeps
 its instructions, for the managers above it in its new place to rewrite or clear.
 They go into the agent's system prompt (section 4). A manager above the agent reads
-them with `agent(op=instructions, agent)`; `roster()` prints the caller's own as they
-stand now, and nobody else's.
+them with `agent(op=instructions, agent)`. An executor has none: `instruct` refuses
+it, and its job goes in the brief of its work.
 
 Every participant's name lives in one namespace; there are no role constants. The
 owner is a named participant like any other — the setting `owner_name`, default
@@ -177,12 +181,17 @@ Without a date, the moment is the next time the clock shows it.
 Optional methods: `child_env()` (claude), `compact_command(ws, model, effort,
 office_url, session_id)` (claude), `poll_context(session_id)` (codex), `turn_requests(session_id, since)` (codex).
 
-`Event` carries `kind`, `text`, `phase`, `session_id`, `context_used`,
-`context_limit`, `context_before`, `error`, `request` and `totals`.
+`Event` carries `kind`, `text`, `phase`, `calls`, `session_id`, `context_used`,
+`context_limit`, `context_before`, `error`, `request`, `totals` and `quota`.
 `phase` is `started` or `finished` on a tool event: a started call with no finished
-twin is the diagnosis "the agent is sitting inside a command". `request` is one
+twin is the diagnosis "the agent is sitting inside a command". `calls` is, on a tool
+event, the vendor's own id and the summary of each call the event starts or ends; the
+turn keeps the calls started and not yet ended, each with the moment it started
+(`AgentTurn.open_calls()`). `request` is one
 model request's token counts, model and tools, keyed so that the events of one
-request fold into one; `totals` is the process's own sum on `turn_end`.
+request fold into one; `totals` is the process's own sum on `turn_end`. `quota` is,
+on a `quota` event, the buckets the stream reported under the office's window names;
+the turn keeps the latest (`AgentTurn.quota`).
 
 `resume` is required and separate from `session_id`: an id alone cannot tell a
 first turn from a continuation. `office_url` is the address of this agent's
@@ -421,7 +430,8 @@ An agent never receives its own messages. The watermark moves past them anyway.
 
 A single delivery always carries everything accumulated, except that of the
 common chat it carries the newest 50 lines, after a line saying how many earlier
-ones were left out and which `chat(before_id=…)` call can read them. Wakes coalesce over a
+ones were left out and which `chat(before_id=…)` call can read them, and that of
+several announcements of one rule it carries only the latest. Wakes coalesce over a
 3-second window; the bus ticks once a second; the fuse allows at most 6 wakes per
 agent in 300 seconds, with extras collapsing while the queue keeps growing. The
 environment never interrupts a turn that has started. A quota hold (section 10)
@@ -498,7 +508,8 @@ only keep-alive end the owner's journal records.
 `expect(about, within_seconds)` records an open expectation — a random token, the
 agent, `about` and the due time — and returns `http://127.0.0.1:<port>/hooks/<token>`,
 which the agent hands to a local service as the address to notify when its job
-ends. The ceiling on `within_seconds` is `remind`'s.
+ends. The ceiling on `within_seconds` is `remind`'s, and an expectation without it
+lasts that ceiling.
 
 `POST /hooks/<token>` with the JSON `{"from": "<service>", "text": "<message>"}`
 closes the expectation and puts `[about: <about>]` and the text
@@ -517,8 +528,8 @@ agent's turn ends. Nothing goes from the office to a service.
 
 ### What is guaranteed
 
-**A message either arrives, or its sender is told that it did not.** There are no
-automatic retries.
+**A message either arrives, or its sender is told that it did not.** The office never sends a
+message twice.
 
 A turn is ordered because a message that buys one appeared, not because a hook
 failed. If the hook got there first the queue is empty, the prompt is empty and
@@ -529,11 +540,20 @@ turn did not take is given back when it ends (above), so a turn's range never
 holds a message the turn did not receive, and never misses one it did. At turn
 start, the mark as it stood is saved in `agents.turn_start_message_id` — "what
 this turn took". **On an abnormal end, every sender of a direct message in that
-range gets a message from `office` saying it was not processed, with the reason
-and, for quota, the time of return.** The brief of the agent's work is not among
-them. A
-message in the range counts as read and is not repeated; the sender repeats it if
-they think fit — for quota, the notice says it waits for them until the time of return. On a clean end the marker is simply dropped. The marker lives in the
+range gets a message from `office` saying it was not processed, with the reason.**
+The brief of the agent's work is not among them. A message in the range counts as
+read and is not repeated.
+
+The notice says one of two things about the messages. After `context_overflow` the
+recipient's next turn starts a new conversation, which does not hold them, and the
+sender sends them again if they still matter. After any other death the next turn
+resumes the session, which holds what the dead turn was handed: the notice says the
+messages are in the recipient's conversation, that the recipient reads them when its
+next turn starts (for quota, no earlier than the time of return), and that they are
+not to be sent again. The owner's plate line about a director's turn that a hub
+restart took down says the same.
+
+On a clean end the marker is simply dropped. The marker lives in the
 database, because the death of the hub is also an abnormal end.
 
 The notices go out before the marker is dropped, and the marker is dropped either
@@ -560,7 +580,7 @@ participant `office`:
 | Occasion | Told to | Buys a turn |
 |---|---|---|
 | A work failed or was paused (unless whoever would be told caused it with `agent(op=stop)`) | the work's assigner; for a work its assignee assigned itself, the assignee's manager, and for the director the owner's journal | yes; the journal buys nothing |
-| A lead's turn ended abnormally — for any reason but a stop | its manager | yes |
+| A lead's turn ended abnormally — for any reason but a stop, and not retried | its manager | yes |
 | Hub restart that interrupted a work or killed a lead's turn, with the list of interrupted works | the director, with all of them; every other agent the two rows above name for an interrupted work or a killed turn, with those | yes |
 | Your message was not processed | the sender | yes |
 | A deferred message has nowhere to go (the recipient was fired) | the sender | yes |
@@ -580,8 +600,8 @@ reported (the holder, for a work it assigned itself); for a pause or a failure,
 whoever section 4 tells of it, and the director for a work of its own — except one
 of the director's own that the owner stopped, which nobody answers for.
 
-Something **moves** an agent's works when it has a turn running, or the other side
-of one of them does; a direct message it has not read; a deferred message it set
+Something **moves** an agent's works when it has a turn running, owed, or a retry of a
+dead turn pending (section 6), or the other side of one of them does; a direct message it has not read; a deferred message it set
 or will receive, or an expectation it holds open; a running work it assigned to
 somebody else; or a direct message of its own that its addressee has not taken —
 unread, or inside the addressee's running turn — and, for one to the owner, that
@@ -612,7 +632,11 @@ has not stopped the director, the director is told, with the list of open works.
 It is not sent in a pass that already wrote to the director about its own works.
 
 The silence report is about a turn that has not ended and may never. It has no
-power over the agent — no stop, no flag, nothing written but a message. The
+power over the agent — no stop, no flag, nothing written but a message. It names
+what is open on the agent's side at that moment: each tool call the vendor has
+started and not ended, with how long it has been open, and each command the agent
+has running through `run`, with its stage; with neither, it says the model itself is
+silent. It then lists the last things the turn was seen doing. The
 threshold is the owner's, on the settings page: absent, empty or unparseable
 means twenty minutes; zero or less means never. The director's own silence is not
 reported — the director has no manager, and the owner already has `quiet_for` live
@@ -633,16 +657,18 @@ Seven more things the office says buy nobody a turn:
 | Occasion | Told to | Shape |
 |---|---|---|
 | The main branch has moved — work done outside the office has come in; take it in with `git merge origin/<branch>` | everyone | common chat |
-| The project's rules have changed | every agent but the one who changed them | quiet line |
+| The project's rules have changed | every agent but the one who changed them that the rule is for, under its audience before the change and after it | quiet line |
 | Your standing instructions have been rewritten | the agent they belong to | quiet line |
 | Your workspace has changed, with its workspace and sandbox paths | every agent whose workspace a `work_reassign` changed | quiet line |
 | The work you did has been closed | the agent who did it, unless it closed the work itself | quiet line |
 | You have been moved, with the name of your new manager | the moved agent, and nobody else | quiet line |
 | A service's message died with your turn | the agent whose turn it was | quiet line |
+| Your previous turn died, with its cause (the vendor's own error text for a failure) and that everything it started stopped and its run handles are gone | the agent whose turn died, unless it died with the hub | quiet line |
 
-The second, third and fourth exist because a system prompt is fixed when a session
-is created, on every runtime: a rule, an instruction or a workspace path written
-today is invisible to every session already open until that session is replaced.
+The second, third and fourth exist because a system prompt is read only at certain
+moments (below): a rule, an instruction or a workspace path written today is
+invisible to a session already open until that session is replaced, or, on claude,
+compacted.
 The fifth and the sixth exist because a brief and a manager arrive in the snapshot a
 session opened with, the brief also as a message, and neither changes when the work
 ends or the agent is moved.
@@ -653,14 +679,17 @@ ends or the agent is moved.
 - **A new session** → the system prompt (for agy and codex as the first message)
   plus one full state snapshot.
 
-**A system prompt is fixed when its session is created, on every runtime.** claude is
-handed `--append-system-prompt-file` on every turn and applies it only at session
-creation; agy and codex take theirs in the first message. There are three system
+**A system prompt is read when its session is created, and on claude also on the
+first turn after a compaction.** claude is handed `--append-system-prompt-file` on
+every turn and applies it at session creation and on the first turn after each
+compaction; agy and codex take theirs in the first message of a session. There are three system
 prompts, one per role: director, lead and executor. Each carries the agent's own
 name, the owner's name,
-the project's rules, the agent's own standing instructions — the director's under a
-heading naming the owner, anyone else's under one saying they come from its
-managers — and the workspace and sandbox paths; a
+the rules that are for the agent (section 9), the standing instructions of the
+director and of a lead — the director's under a heading naming the owner, a lead's
+under one saying they come from its managers; an executor's prompt has none — the
+owner's note on the price list in the director's and a lead's, and the
+workspace and sandbox paths; a
 change to the rules, to the instructions or to the workspace reaches sessions
 already open as a quiet line. In the director's prompt the block of rules ends with
 a line saying that each rule's number is the `rule_id` its changes take. The team,
@@ -711,7 +740,7 @@ agy's `thinking_tokens` and codex's reasoning tokens are not counted.
 The denominator: claude reports it in `result.modelUsage[].contextWindow`, codex
 in `info.model_context_window`, agy not at all. Until the CLI reports one, a table
 by model is used (claude: haiku 200 000, sonnet, opus and fable 1 000 000; agy: gemini
-1 048 576; codex has no entry). An unknown model gets the smallest window its
+280 000, just above where agy compacts its context, not the model's window; codex has no entry). An unknown model gets the smallest window its
 runtime offers.
 
 Occupancy need not grow monotonically — the vendor may compact by itself and the
@@ -762,8 +791,8 @@ claude declined (it does not produce a boundary on a short conversation). Both
 callers — a manager's command and the owner's button — ask the same predicate.
 
 The compaction runs with every flag and every variable a resumed turn of the same
-session runs with, except the turn's stdin input format and `--autocompact`: the
-prompt `/compact` is the argument.
+session runs with, except the turn's stdin input format, `--autocompact` and
+`--disable-slash-commands`: the prompt `/compact` is the argument.
 
 Success returns `before`, `after` and `freed`, and writes a line to the owner's
 journal. Every compaction, done or declined, leaves a usage row (section 13), and
@@ -825,19 +854,22 @@ session. Statuses: `running` · `paused` · `failed` · `done`. A paused work go
 to `running` when its holder's next turn starts; a failed one only by
 `work_reassign`.
 
-`assign(agent, brief, task_id, branch, role, complexity)` — the branch is required, the
-task is not. `role` and `complexity` are required when the assignee is an executor and
-refused when it is a lead or the director: only an executor's work is classified. The
-role is one of the distinct values of the works price list's Role column (section 10),
-and the complexity one of the distinct values of its Complexity column in that role's
-rows. A price list with no rows gives the roles `coding`, `review`, `consultation`,
-`design`, each with the complexities `fully specified`, `medium`, `high`. A value outside
-these is refused; the refusal names the value and lists the values in effect, for a
-complexity those of the role. Both go to the work's row in `work_log` (section 13), NULL for a lead's
-or the director's work. The caller is recorded as the assigner, `works.assigned_by_agent_id`; a manager
+`assign(agent, brief, task_id, branch, complexity)` — the branch is required, the
+task is not. `complexity` is required when the assignee is an executor and refused
+when it is a lead or the director: only an executor's work is classified. The work's
+role is the executor's own (`agents.role`), and the complexity is one of the distinct
+values of the works price list's Complexity column in that role's rows (section 10).
+A price list with no rows gives the roles `coding`, `review`, `consultation`,
+`design`, each with the complexities `easy`, `medium`, `hard`. A complexity outside
+these is refused; the refusal names it and lists those in effect for the role. The
+role and the complexity go to the work's row in `work_log` (section 13), NULL for a
+lead's or the director's work. An executor's work commits its price from the price list (section 10). The caller is recorded as the assigner, `works.assigned_by_agent_id`; a manager
 that assigns a work to itself is its own assigner. `work_reassign` records its
 caller as the assigner in the same way, and the work's report and notices go to
-that caller from then on. `work_reassign` sends nobody anything; the caller writes
+that caller from then on. Handed to another agent, the work commits its price anew for
+the recipient and that caller; handed back to the agent that holds it, it keeps what it
+commits.
+`work_reassign` sends nobody anything; the caller writes
 to whoever has to act on it. The branch name travels to the assignee in the brief; the
 assignee creates the branch itself.
 
@@ -894,7 +926,9 @@ and the refusal names that agent and points to `workspace=fresh`.
 `work_reassign(workspace=fresh)` clones a new workspace on the default branch:
 "start again" rather than "carry on". The previous agent's tree, uncommitted work
 and all, stays with it, and the recipient's previous workspace becomes ownerless
-rather than deleted. `work_reassign` refuses a recipient that is still provisioning.
+rather than deleted. `work_reassign` refuses a recipient that is still provisioning,
+and an executor whose role is not the work's role (`work_log.role`), naming both
+roles; a work with no role goes to any recipient.
 A session resumes in a workspace other than the one it began in with its context
 intact, on every runtime, so a change of workspace takes effect from each agent's
 next turn and clears no session. **An agent's workspace never changes during its
@@ -922,14 +956,30 @@ workspace and sandbox paths (section 4).
 |---|---|
 | `context_overflow` | `session_id` and `context_used` cleared, new session with a full snapshot |
 | `quota_exhausted` | the work is moved to `paused` with `resume_after` |
-| `tool_error` / `crash` | the output tail is stored on the work record |
+| `vendor_error` / `crash` | the turn is retried, up to three times; after that the output tail is stored on the work record |
 | `killed` | stopped by a manager above the agent or by the owner |
 | `hub_restart` | the turn died with the hub |
 
 The reason is decided in this order: `killed` from the kill flag;
 `quota_exhausted` by a regular expression over the vendor's error text;
-`context_overflow` by window occupancy; `tool_error` when there is error text;
+`context_overflow` by window occupancy; `vendor_error` when there is error text;
 otherwise `crash`.
+
+A turn that is not a keep-alive and dies of `vendor_error` or `crash` is retried. The
+bus counts such deaths in a row for each agent, in memory; a turn that ends without a
+death, or with any other death, ends the row. After the 1st, 2nd and 3rd death in a row
+it starts the agent's next turn 2, 10 and 30 minutes later. The 4th death in a row is
+handled like any other death: the work is failed and its assigner, and for a lead its
+manager, are told.
+
+While a retry waits the work stays `running`, nobody but the agent is told, and the
+retry turn delivers the agent's quiet line about its dead turn (section 4) with
+whatever else is pending for it. The retry starts like a turn owed for a direct message: it waits while the office
+is paused, while a compaction runs, under a quota hold and under the fuse, and a turn
+that starts before it is due takes its place. A retry turn that meets the quota wall
+is a `quota_exhausted` death. A hub restart drops every pending retry. The owner's
+journal line for a death that is retried names the earliest time of the retry and is
+never critical.
 
 The output tail is a 200-line ring buffer in memory, mirrored to
 `<root>/tails/<agent>.log` every 5 seconds and again at process exit. A snapshot of
@@ -940,7 +990,7 @@ it is stored on the work row when a work fails, and lives until that row is dele
 goes to the assigner as a message from the assignee — to nobody when the assignee
 is its own assigner — and nothing is written to the task. `close_work` is a manager
 **accepting**: the row is deleted and the accepted one-line result — the closer's
-own words — is appended to the task. It refuses a `failed` work by name.
+own words — is appended to the task, and what the work committed is settled with the row. It refuses a `failed` work by name.
 
 Moving a task to `done` deletes every work still on it, so it is an act on those
 works: it is refused unless each of them is within the caller's reach for
@@ -951,7 +1001,7 @@ work. An executor can move to `done` only a task with no works.
 `fail_work` keeps the row: it holds the tail, and its assigner and every manager
 above its assignee see it in `roster()` until the work is reassigned, its task is
 closed, or it is written off. `work_dismiss` (a manager's) deletes a failed work
-together with its tail and refuses anything that is not failed. `pause_work` is not
+together with its tail, settling what it committed, and refuses anything that is not failed. `pause_work` is not
 a failure: branch, tree and brief are intact.
 
 The supervisor's copy of the tail in `<root>/tails/<agent>.log` survives a
@@ -1381,8 +1431,9 @@ search submodules for a live push address.
 ## 9. Knowledge base
 
 **Wiki** — categories, markdown, a version per page. **Rules** — a flat list of
-statements, each with a short title and a number. The owner edits both from the
-Knowledge page; agents reach them through `note`.
+statements, each with a short title, a number and an audience. The owner edits the wiki
+on the Knowledge page and the rules on the Rules page; agents reach both through
+`note`.
 
 The source is SQLite. **Every agent reads and edits the wiki as files**: page
 `a/b` is `<sandbox>/wiki/a/b.md` in each workspace's sandbox, holding the page's
@@ -1430,14 +1481,27 @@ A page's `path` is also the path of its file under `wiki/`.
 **Rules are the director's to write and everyone's to read.** `note(kind=rule)` has
 `list` for everyone, and `create`, `update` and `delete`, which it refuses for any
 role but the director; `title` is required on create and optional on update.
-`list` prints every rule as it stands now. All of them also go verbatim into every
-system prompt as they stood when the session was created, which means a change
-takes effect in the prompt from an agent's next session. The office always tells
-the sessions already open with a quiet line (section 4); an urgent change the
-director also sends as a direct message itself.
+`list` prints every rule as it stands now, each with its audience.
+
+**A rule has an audience**, `rules.audience`: `everyone`; `managers`, the director and
+the leads; `executors`, every executor; or `role:<role>`, the executors of that role.
+`create` and `update` take `audience` — `everyone` when `create` leaves it out,
+unchanged when `update` does; a value outside these four forms, or a role not in
+effect, is refused naming the values allowed. The owner's form for a rule carries the
+same field.
+
+Each rule goes verbatim into the system prompts of the agents it is for, as it stood
+when the session was created, which means a change takes effect in the prompt from an
+agent's next session: the director's prompt carries every rule, each line led by its
+audience; a lead's carries the rules for `everyone` and `managers`; an executor's those
+for `everyone`, `executors` and its own role. The office tells the sessions already open
+that a rule is for with a quiet line (section 4) — those the rule was for before the
+change and those it is for after it; an urgent change the director also sends as a
+direct message itself.
 
 Both prints carry each rule's number, which is the address for changing or
-deleting it: `- [id] Title: text`. A rule with no title prints as its own text.
+deleting it: `- [id] (audience) Title: text`; a system prompt other than the
+director's leaves the audience out. A rule with no title prints as its own text.
 
 ---
 
@@ -1471,22 +1535,30 @@ Reading it is free for all three, with no turn, at any moment:
 
 | Runtime | Source |
 |---|---|
-| claude | `claude -p /usage --output-format json`, lines of the form `<label>: N% used` |
+| claude | `claude -p /usage --output-format json`, lines of the form `<label>: N% used`; an answer counts only if `cachedUsageUtilization.fetchedAtMs` in `.claude.json` (under `CLAUDE_CONFIG_DIR`, else the home directory) is no more than 60 seconds older than the call |
 | codex | `rate_limits` from the newest session file of a session the office itself started |
 | agy | `agy --output-format json --print /usage`, `command.data.groups[].buckets[]` |
 
+claude also reports quota in every turn's own stream: a `rate_limit_event` whose
+`unifiedWindows.five_hour` and `seven_day` give the spent fraction and the reset of
+`5h` and `week (all models)`. The latest one in a turn or a compaction is stored when
+it ends, as a partial reading: it deletes nothing, and `week (Fable)` comes from
+`/usage` alone.
+
 Polling is one round at hub startup, run by the bus loop before its first tick, then
 every 60 seconds on a thread of its own, and one round of a runtime as soon as a turn or
-a compaction on it ends. The web app does not wait for the first round. A successful
-poll of a runtime deletes the buckets its answer did not mention. A failed poll
-deletes and changes nothing. A runtime that has never answered has no row, and
-`health()` says so.
+a compaction on it ends without its stream having reported quota. claude is polled no
+sooner than 5 minutes after its last poll or its last reading from a turn. The web app
+does not wait for the first round. A successful poll of a runtime deletes the buckets
+its answer did not mention. A failed poll deletes and changes nothing. A runtime that
+has never answered has no row, and `health()` says so.
 
 **The history** (`quota_polls`) keeps every reading that differs from the one
 before it for its bucket, as the poll gave it.
 
-Only Gemini models are used from agy; the "Claude and GPT" group is dropped
-entirely — the one place where part of a vendor's answer is not shown.
+Only Gemini models are used from agy: its quota keeps the Gemini group alone, and its
+model catalogue (below) the models whose id starts with `gemini` — the one place where
+part of a vendor's answer is not shown.
 
 The buckets carry no derived figure; the wallets below are derived from them.
 
@@ -1498,7 +1570,10 @@ through `roster()`.
 
 Each runtime's subscription is a **wallet** in its own currency — CL for claude, CD
 for codex, GM for agy — where one unit is one dollar at the vendor's API list prices.
-The weekly reset is **payday**; the 5-hour window limits what may be spent now.
+The weekly bucket limits what the team may draw over the week; the 5-hour window limits
+what may be drawn now. A work assigned to an executor **commits** a price to the wallets
+it draws (below). What a work has already spent is not tracked: a running work counts
+both in the vendor's remaining quota and in its commitment.
 
 The owner sets, on the settings page, per runtime a total weekly limit (the worth of the
 weekly bucket, in units) and a 5h window (the worth of the `5h` bucket; empty when the
@@ -1510,19 +1585,39 @@ stored, shows no wallet. A runtime with no 5h window set, or with no `5h` bucket
 shows its weekly part only. The weekly bucket is `week (all models)` for claude and `week`
 for codex and agy.
 
-`roster()` gives a manager, in its quota part, per wallet:
+A wallet (`wallets.overview` for all of them, `wallets.available` for one runtime) is
+computed from the settings, the stored buckets and the works' commitments:
 
-- what is **left** until payday, out of the weekly share. The share is the weekly limit
-  times one less the reserve; what is left is the weekly bucket's remaining fraction times
-  the weekly limit, less the reserve times the weekly limit, not below zero;
-- the **spare**: what is left above the line, not below zero. The line is the share times
-  1 − e², where e is the part of the week gone since the last payday: the payday less
-  seven days, measured to now, over seven days; e is 0 when no payday is stored. While
-  the spare is withheld it is 0, and it stays so until the owner clears it;
-- where there is a 5h window, what is **left in the current window** out of the 5h
-  window: the `5h` bucket's remaining fraction times the 5h window, or what is left of the
-  week if that is less; and the time the window resets;
-- the payday.
+- the **share** is the weekly limit times one less the reserve; what is **left** of the
+  week is the weekly bucket's remaining fraction times the weekly limit, less the reserve
+  times the weekly limit, not below zero;
+- the 5h window limits only where its size is set and its `5h` bucket is stored: it lets
+  through the bucket's remaining fraction times the window's size;
+- the amount of a period counts as available from one hour before its reset: the window
+  adds its whole size when the `5h` reset is no more than an hour away, the week adds the
+  share when the weekly reset is no more than an hour away; the **window cap** is what the
+  window lets through plus its addition (unbounded where it does not limit), the **week
+  cap** what is left of the week plus its addition;
+- what the open works **commit** on a wallet is the sum of `works.price` where
+  `price_runtime` is the runtime and of `works.coordination` where `coordination_runtime`
+  is the runtime; the wallet counts the works that commit anything on it;
+- what is **available** is the lesser of the two caps less what is committed, not below
+  zero;
+- the **spare** is what may go to work that can wait: the lesser of what is available and
+  what is left of the week less what is committed less the line, not below zero. The line
+  is the share times 1 − e², where e is the part of the week gone: the weekly reset less
+  seven days, measured to now, over seven days; e is 0 when no weekly reset is stored.
+  While the spare is withheld it is 0, and it stays so until the owner clears it;
+- **more** becomes available at the time the cap that limits it next lets more through: when
+  the week cap is no greater than the window cap, the weekly reset less an hour, or, when
+  the week already has its addition, a week later; otherwise the `5h` reset less an hour,
+  or, when the window already has its addition, five hours later. It is absent when that
+  reset is not stored.
+
+`roster()` gives a manager, in its quota part, per wallet one line, such as
+`CL (claude): 31 available, 46 committed to 7 works, spare 12; more available at <time>`:
+"nothing committed" stands where no work commits on it, and the last clause is absent where
+more has no time. The quota buckets themselves are not listed; the holds are.
 
 The settings page shows, for each runtime whose CLI this machine has, its total weekly limit, 5h window and reserve; the reserve is a control: a thin bar that is the whole
 weekly bucket, its filled part at the right being the remaining fraction and draining to
@@ -1533,39 +1628,71 @@ runtime with no weekly reading stored has a bar with no fill and a working slide
 reserve is saved with the rest of the form. Beside the 5h window is a "Withhold spare"
 box, saved with the rest of the form.
 
-Right after the quota part, `roster()` gives a manager the **price list**: a header naming
-its figures typical / with margin; the lines of the setting `price_list_note`, indented,
-when it has any; "Works you assign:" and, indented, the line of its column names
+Right after the quota part, `roster()` gives a manager the **price list**: a header
+saying its prices are the average price of a work, from brief to close, in the currency
+of its model's runtime; "Works you assign:" and, indented, the line of its column names
 `role | complexity | model | effort | price` and the rows of the table
-`price_works` with their cells in that order (`(empty)` alone when it has none); "What a
-lead spends on its own:" and `price_own` the same way, its columns `what | size |
-price`; and the line "Work that is not in the price list is not assigned, unless the list
-is empty or <owner> has instructed otherwise." An executor does not see it.
+`price_works` with their cells in that order (`(empty)` alone when it has none); "Committed
+to your own wallet for each work you assign to an executor, by the work's role and your
+model and effort", with a note that its prices are in the currency of the caller's
+runtime, and `price_own` the same way, its columns `what | role | model | effort | price`.
+Prices are shown as numbers. An executor does not see it.
 
-The office reads two things in these rows: the **roles in effect** are the distinct
+The office reads these rows in three ways. The **roles in effect** are the distinct
 `role` values of `price_works`, in order of first position, and each role's
-**complexities in effect** the distinct `complexity` values of its rows. With no row,
-the defaults apply. Nothing is decided from `price_own`.
+**complexities in effect** the distinct `complexity` values of its rows; with no row, the
+defaults apply. A work's **price** is the `price` of the `price_works` row with the work's
+role and complexity whose `model` is the assignee's model and whose `effort` is the
+assignee's effort (an empty `effort` matching an assignee with none). A work's
+**coordination price** is the `price` of the `price_own` row whose `role` is the work's
+role and whose `model` is the assigner's model and `effort` the assigner's effort (an empty
+`effort` matching an assigner with none); with no such row the work has no coordination
+price. A row with no role is spending not tied to a work, and the office decides nothing
+from it.
+
+**Commitment.** When `assign` gives a work to an executor and `price_works` has a row, the
+work's price is committed to the wallet of the assignee's runtime and its coordination
+price, where there is one, to the wallet of the assigner's runtime; both amounts stand
+on the `works` row (`price`, `price_runtime`, `coordination`, `coordination_runtime`, NULL
+where nothing is committed) until the row is deleted, which `work_close` and
+`work_dismiss` do. A work for a lead or the director, and any work while `price_works` has
+no row, commits nothing. `assign` is refused when the price list has no price for the
+work's role and complexity on the assignee's model and effort, naming the models and
+efforts it does price, and when a wallet it draws has less available than the work costs
+(the two amounts of one runtime summed), naming the amount available and, where the wallet
+has one, the time more becomes available. The check and the insert are one transaction; a
+runtime with no wallet is not checked. `work_reassign` prices the work anew for the
+recipient and the caller, the work's own commitment counting as nothing, on the same
+terms, and writes the new amounts; a work with no role commits nothing. Moving an agent to
+another model or runtime leaves the commitment of its open work as written.
 
 The two price lists are stored as the tables `price_works` (position, role, complexity,
-model, effort, price) and `price_own` (position, what, size, price), every column but
-`position` text. `position` is the order the owner set; `price` is the owner's own text
-("0.1 / 0.3 CD", "unknown yet"). The setting `price_list_note` holds the free text shown
-above the price list.
+model, effort, price) and `price_own` (position, what, role, model, effort, price); `price`
+is a number, the average price of a work from brief to close in `price_works`, the
+coordination of a work in `price_own`, in both in the currency of the runtime of the row's
+model; `effort` is an empty string for no effort (agy); `price_own.role` is NULL for
+spending not tied to a work, and no two rows have the same role, model and effort. `position` is the order
+the owner set. The setting `price_list_note` holds the owner's free text on the price
+list, which the director's and the leads' system prompts carry under "Complexity and the
+price list".
 
-The settings page edits the two price lists as tables. Above the works table sits a text box, "Note shown above the price list", for
-`price_list_note`. A table has a header row, one text input per cell as wide as its text,
+The settings page edits the two price lists as tables. Above the works table sits a text box, "Note on the price list, in the director's and the leads' system prompts", for
+`price_list_note`. A table has a header row, one input per cell as wide as its text,
 scrolling sideways inside its own box, and per row buttons
-that move it up, move it down and delete it, with an "Add row" button under it. A works
-row's role and complexity are required, and an own row's first cell. Every row posts its cells as repeated fields in document
+that move it up, move it down and delete it, with an "Add row" button under it. A price
+cell is a number input (not below 0, any step). A works row's role, complexity, model and
+price are required, its effort may be empty; an own row's what, model and price are
+required, its effort may be empty, and its role is optional and offers the works roles in a
+datalist. Every row posts its cells as repeated fields in document
 order: `works_role`, `works_complexity`, `works_model`, `works_effort` and `works_price` for
-the works table; `own_what`, `own_size` and `own_price` for the own table. Saving zips each table's fields into rows, trims every cell, and replaces
-both tables in one transaction; the note is written as posted. The wallet fields are written only for the runtimes the page
+the works table; `own_what`, `own_role`, `own_model`, `own_effort` and `own_price` for the
+own table. The page refuses to save a works row or an own row whose price exceeds the 5h
+window of its model's runtime (the model's runtime is read from the model catalogue, the
+window from the form's own field), naming the window, and two own rows with the same role,
+model and effort. Saving zips each table's fields into rows, trims every cell, and replaces
+both tables in one transaction, prices stored as numbers and an empty own role as NULL; the note is written as posted. The wallet fields are written only for the runtimes the page
 shows. A
 table scrolls inside its own box.
-
-Right after the price list, one line per role in effect names the role and the
-complexities it takes, as `assign` takes them for an executor.
 
 There is no notion of paid overflow: the vendors' overdraft fields are not read. An
 exhausted window arrives as a turn error and is classified as `quota_exhausted`.
@@ -1827,12 +1954,13 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 
 | Stored | Why |
 |---|---|
-| Agents: role, manager, title, standing instructions, composition, runtime/model/effort, workspace path | Not recoverable |
+| Agents: kind, an executor's role, manager, title, standing instructions, composition, runtime/model/effort, workspace path | Not recoverable |
 | Tasks, each with its parent, and their dependencies | This is the plan |
-| Rules and wiki | What the database exists for |
+| Rules, each with its audience, and wiki | What the database exists for |
+| Shared resources that are held, and the agents waiting for each | Live state |
 | Wiki copies: per workspace and page, the version and body last written into its file | The base a publish is merged from |
 | Open PRs and their comments | git holds no metadata |
-| Works that are still on the books: brief, assignee, assigner, session id | Live state |
+| Works that are still on the books: brief, assignee, assigner, session id, what each commits | Live state |
 | Tickets and comments, resolved ones included | The wording of a product decision |
 | **Messages — all of them, forever** | `DELETE FROM messages` exists nowhere |
 | The current quota snapshot | One row per bucket |
@@ -1843,7 +1971,7 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | Each runtime's model catalogue | A snapshot, overwritten hourly |
 | Owner notices | The record of what happened while he was not looking |
 | How far the owner has read each conversation | Not recoverable from anywhere else |
-| The two price lists: rows in the order the owner set, cells as the owner's text | The owner's own words |
+| The two price lists: rows in the order the owner set, prices as numbers | The owner's own words |
 | Settings | |
 | Stages: name, preparation command, state, reason | Not recoverable |
 | Open expectations: token, agent, what is awaited, when opened, due time | A service answers across a hub restart |
@@ -1951,7 +2079,8 @@ say(to, text)                    # to = "all" | a participant's name
 chat(before_id?)                 # the common chat, newest page first, cursor backwards
 remind(op, ...)                  # set(to, text, in_seconds) — the same message, sent later; wakes the addressee
                                  # cancel(reminder_id) — one of your own that has not gone
-expect(about, within_seconds)    # an address a service notifies; its answer or the due time wakes you
+expect(about, within_seconds?)   # an address a service notifies; its answer or the due time wakes you
+resource(op, name)               # take | release — a shared resource, held by one agent at a time
 task(op, ...)                    # list | read | create | update | move | link (link with remove=true drops it)
                                  # list(parent?, status?, query?) — one level, or a search under parent or over the board
 work(op, ...)                    # show — your brief, branch and assigner
@@ -1961,7 +2090,7 @@ work(op, ...)                    # show — your brief, branch and assigner
 pr(op, ...)                      # create | comment | list | read
                                  # merge | close  (managers only)
 note(op, kind, ...)              # wiki: list | read | comment | write | undo | delete; pages are files in the sandbox
-                                 # rule: list; create | update | delete  (director only)
+                                 # rule: list; create | update | delete  (director only); create and update take audience
 ticket(op, ...)                  # create | comment | list | read | resolve | link
 run(op, ...)                     # start | wait | stop | list; start takes stage=
 roster()                         # the team as a tree; for a manager, everything staffing its subtree turns on
@@ -1972,7 +2101,7 @@ Managers only — the director and the leads:
 ```
 agent(op, ...)   # hire | fire | stop | compact | new_session | instruct | instructions | move
                  # set_model | save_profile | hire_from_profile | list_profiles
-assign(agent, brief, task_id, branch, role, complexity)
+assign(agent, brief, task_id, branch, complexity)
 work_close(work, summary)        # accept a reported work: the row goes, the result lands on the task
 work_dismiss(work)               # write off a failed work together with its tail
 work_reassign(work, to_agent, workspace)   # workspace = inherit | fresh
@@ -1987,12 +2116,13 @@ stage(op, ...)   # create | reset | delete (section 12)
 **A manager's reach is its subtree**, checked in code on every call:
 
 - `hire` and `hire_from_profile` make the caller the new agent's manager. They
-  take `title`, required, and `lead`: true makes a lead, otherwise an executor;
+  take `title`, required, and `lead`: true makes a lead, otherwise an executor; and
+  `role`, required for an executor and one of the roles in effect, refused for a lead;
 - `fire`, `stop`, `compact`, `new_session`, `instruct`, `instructions`, `move` and
   `set_model` take a target in the caller's subtree; `compact` and `new_session` are refused
   while a turn or a compaction is running on the target's session;
-- `instruct(agent, text)` replaces the target's standing instructions; empty text
-  clears them. `instructions(agent)` returns them;
+- `instruct(agent, text)` replaces the standing instructions of a lead; empty text
+  clears them, and an executor is refused. `instructions(agent)` returns them;
 - `move(agent, manager)` takes a new manager that is the caller or a lead in the
   caller's subtree, and is neither the target nor inside the target's subtree. It
   refuses while the moved subtree — the target and everyone under it — holds a work
@@ -2025,21 +2155,23 @@ any work is on the task.
 `pr(op=merge)` requires `delete_branch` and will not run without it.
 
 `roster()` answers by role. Everyone gets the whole team as a tree — each agent's
-name, title, kind, runtime and model, indented under its manager — its own standing
-instructions as they stand now, its own workspace and sandbox paths, the stages, as
-section 12 lists, and the deferred
-messages it set itself, each with its number, and the open expectations it set. A
-manager additionally gets, for its subtree, each agent's status and context fill
-and every deferred message and open expectation; every work that is not finished
-(running, paused, reported or failed, with the reason it stopped and, for a pause,
+name, title, kind, runtime and model, and for an executor its role, indented under
+its manager — its own workspace and sandbox paths, the stages, as section 12 lists,
+the shared resources that are held, each with its holder, since when and the agents
+waiting, and the deferred messages it set itself, each with its number, and the open
+expectations it set. A
+manager additionally gets, for each agent directly under it, its status and context
+fill; for its subtree, every deferred message and open expectation; every work that is not finished
+(running, paused, reported or failed, with what it commits, the reason it stopped and, for a pause,
 the earliest it could resume) whose assignee is in its subtree or which it
-assigned; remaining quota per runtime with its reset time, each wallet (section 10), and each runtime and
-model on which no turn starts before its time of return; tasks that look ready
-but whose dependency is not done; the model catalogue; and workspaces that belong
-to nobody. The director alone additionally gets the directories under `ws/` the
-office did not create. Apart from the caller's own instructions and paths, which its
-system prompt carries as they stood when the session was created, none of that is in
-any system prompt.
+assigned; the running and paused works that are not among those, grouped by the runtime of
+their holder, one line each with the holder's model and effort, the work's role and
+complexity, its state, its assigner and what it commits; each wallet (section 10), and each runtime and
+model on which no turn starts before its time of return; the model catalogue; and
+workspaces that belong to nobody. The director alone additionally gets the
+directories under `ws/` the office did not create. Apart from the caller's own paths,
+which its system prompt carries as they stood when the session was created, none of
+that is in any system prompt.
 
 `remind` is the only alarm in the system. Apart from the keep-alive (section 4), a turn
 is bought by a message and by nothing else, so an agent that needs to continue later leaves itself a message and
@@ -2049,10 +2181,23 @@ there it is an ordinary message, with its own turn, its own thread and its own
 report to the sender if the turn died. A due time that passed while the hub was
 down fires on the first tick after startup.
 
+**Shared resources.** A shared resource is a name of 1 to 40 lowercase letters, digits
+and `-` that at most one agent holds at a time (`resources`; the agents waiting for it
+are `resource_waiters`). `resource(op=take, name)` makes the caller the holder when
+the resource is free or already its own; when another agent holds it, the caller is
+recorded as waiting, and the answer names the holder and since when. The decision and
+the write are one transaction. `resource(op=release, name)` takes a resource held by
+the caller or by an agent in its subtree, the director's being every agent; it frees
+the resource and sends every agent waiting for it a direct message from `office`, which
+gives that agent a turn, and clears the waiting list. A release of a resource nobody
+holds, or of one held outside the caller's reach, is refused with the state. Firing an
+agent releases every resource it holds, telling the waiters in the same way, and
+removes it from every waiting list.
+
 `all` is not accepted as a recipient: a post to the common chat wakes nobody, so a
 deferred one would arrive at the appointed moment and do nothing. The ceiling is
 seven days. It takes an offset, not an absolute instant: an agent's notion of "now"
-comes from a system prompt fixed when the session was created. `cancel` takes back
+comes from a system prompt read when the session was created or last compacted. `cancel` takes back
 a deferred message its caller set that has not gone yet; the owner cancels any on
 the works page. Either deletes only a row that has not come due.
 
@@ -2061,7 +2206,8 @@ or reported and not closed — while it has subordinates (they are moved or fire
 first), while an open PR names it as author, and while any vendor process is
 speaking on its session — a turn or a compaction. The decision and the deletion
 happen under the same lock that starts turns. The fired agent's failed works are
-deleted with it, and so are the deferred messages it set and its expectations.
+deleted with it, and so are the deferred messages it set and its expectations; the
+shared resources it held are released.
 
 The managers' tools are hidden from an executor's `tools/list` and rejected by name
 if it calls them; `stage` is hidden from a lead and rejected the same way.
@@ -2105,11 +2251,14 @@ environment.
 Nothing else can be attached: neither an agent nor the owner has such an
 operation.
 
+A claude turn runs with `--disable-slash-commands`, which keeps the skills of the
+owner's own plugins out of the agent's context.
+
 ---
 
 ## 15. The owner's interface
 
-The menu has eleven items with icons; the icons are drawn in the markup, as there is
+The menu has twelve items with icons; the icons are drawn in the markup, as there is
 no icon font and no external source in the system. Five items carry counters and
 only five: open tickets, works on the books, unread direct messages, unread common
 chat, waiting PRs. A zero is not drawn.
@@ -2162,8 +2311,10 @@ All times are shown local and stored UTC.
    collapsed and rendered as the markdown it is written in. The turn's output is a
    collapsed block, parsed by the same parser the office listens to the turn with:
    speech, tool calls with their start and end, errors. A call with a start and no end
-   is marked. The transcript is served from its own endpoint, so it is parsed only when
-   somebody opens it, and it lives exactly as long as the tail file does. Under the
+   is marked. A failed work shows the tail stored when it failed; any other shows the
+   live turn's output, or else the assignee's tail file. The transcript is served from
+   its own endpoint, so it is parsed only when somebody opens it, and it lives exactly
+   as long as the tail file does. Under the
    works are the deferred messages the office is holding, and the owner can cancel
    any of them.
 5. **Common chat** — paginated.
@@ -2172,13 +2323,16 @@ All times are shown local and stored UTC.
    since when and until when; under them the stages: each one's state with its timers while preparing, the run in progress with its timers,
    who is waiting, a pending reset or delete, the preparation command, and the reason
    for a broken one. No hiring or firing here, and no control over stages.
-7. **Knowledge** — wiki and rules.
-8. **Pull requests** — the list and comments. There is no merge button.
-9. **System notices** — the journal: turns that died, quota exhausted with its hold,
+7. **Knowledge** — the wiki.
+8. **Rules** — every rule with its title, text, audience and author, and the owner's
+   form to add, edit and delete a rule, with the audience field; the list refreshes on
+   the `rules` event.
+9. **Pull requests** — the list and comments. There is no merge button.
+10. **System notices** — the journal: turns that died, quota exhausted with its hold,
    compaction results, hub restarts, the office's own tick failing over an agent, a
    marked process that survived being killed, and open works that nothing moves and
    nobody above their agent has moved.
-10. **Settings** — the owner's name, the director's standing instructions, the
+11. **Settings** — the owner's name, the director's standing instructions, the
     silence threshold, the wallets' weekly limits, 5h windows and reserve, the two price lists (a table each) and their note, and the director's runtime/model/effort with the cost shown
     before confirmation. Also the delivery address, the outcome of the last delivery,
     and — while the owner's repository is missing `receive.denyCurrentBranch` — the
@@ -2200,10 +2354,28 @@ reported quota. All but the tick failure are re-derived on every call and stop
 showing themselves the moment the condition clears; that one clears on the agent's
 next started turn.
 
+### Files named in texts
+
+Every agent-written text is rendered by one Markdown renderer (`render_markdown`). An
+absolute Windows path (`D:\dir\file.png` or `D:/dir/file.png`) that names an existing
+file becomes a link to `GET /file?path=<path>` opening in a new tab: a code span whose
+whole text is the path keeps its code styling inside the link, and a path in running text
+is the link text. A path that names nothing, or a directory, and any path in a fenced or
+indented code block, renders as written. After the link, an image (png, jpg, jpeg, webp,
+gif, bmp) shows inline, linked to the file; an audio file (wav, mp3, ogg, flac) gets a
+"Listen" button and a `.glb` a "View 3D" button. Either opens the file, under its name, in
+the one `<dialog>` that `base.html` holds outside every refreshed region: an `<audio>`
+player, or a `<model-viewer>` for which `app.js` loads `static/vendor/model-viewer-umd.min.js`
+the first time. The dialog closes by its button, Esc or a click on the backdrop, and
+closing empties it; opening another file replaces its content.
+
+`/file` serves any absolute path that is a file, and answers 404 otherwise; every
+response carries `Content-Security-Policy: sandbox`.
+
 ### The plate and the journal
 
-Critical things go on a plate under the director's chat, at once: its turn died (with
-the reason), its quota ran out (with the time of return), or open works that nothing
+Critical things go on a plate under the director's chat, at once: its turn died and is
+not retried (with the reason), its quota ran out (with the time of return), or open works that nothing
 moves have come up the chain past the director. The plate carries the three newest undismissed ones and counts the
 rest. There is no "retry" button. Dismissing it stamps every unseen critical notice and
 is the only thing that makes it go away — a turn that failed is an instant, not a
@@ -2260,7 +2432,7 @@ switch_timer            the pending timer of the office's switch: "run" or "paus
 wallet_<runtime>_week   the total weekly limit of a runtime's wallet, in units; empty means no wallet
 wallet_<runtime>_window the 5h window of a runtime's wallet, in units; empty means none
 wallet_<runtime>_reserve the percentage of the week the team leaves untouched; empty means 0
-price_list_note         the free text shown above the price list in roster; plain text
+price_list_note         the owner's note on the price list, in the director's and the leads' system prompts; plain text
 delivery_last           the outcome of the last delivery (JSON), for the settings page
 ```
 
@@ -2319,4 +2491,14 @@ The dependency runs one way: the bus calls `core`, and `core` knows nothing of t
 A live notification of a mutation arrives through a hook the hub installs and carries
 no information anybody acts on; all content is read from the tables.
 
-The office logs under the `office` namespace to stderr and to `<root>/office.log`.
+The office logs under the `office` namespace to stderr and to `<root>/office.log`; uvicorn's
+errors go to that file too. The log records each live stream opening and closing, every
+stall of the hub's event loop over two seconds, and the thread pool filling up and freeing.
+A page reports to `POST /events/report`, one line each, its live stream lost, failing to
+reconnect and back, a request that failed to send or answered with an error, and a timer
+of its own firing over three seconds late while visible, with whether the page had focus,
+the swaps of 100 ms or more in that time, the page's element count and the characters in
+its output tails.
+
+A page whose live stream the browser has closed for good opens a new one three seconds
+later; when a stream opens after a loss, the page refreshes every region the stream drives.

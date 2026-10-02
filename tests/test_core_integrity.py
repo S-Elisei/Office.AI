@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import time
 
-from office import core, db
+import pytest
+
+from office import core, db, wallets
 from office.adapters.base import QuotaSnapshot
 
 
 def hire_row(conn, name, kind="executor", manager_id=None):
     with db.transaction(conn) as c:
         cur = c.execute(
-            "INSERT INTO agents (name, kind, manager_agent_id, runtime, model, status, "
+            "INSERT INTO agents (name, kind, manager_agent_id, role, runtime, model, status, "
             "last_seen_message_id) "
-            "VALUES (?, ?, ?, 'claude', 'm', 'idle', "
+            "VALUES (?, ?, ?, ?, 'claude', 'm', 'idle', "
             "(SELECT COALESCE(MAX(id), 0) FROM messages))",
-            (name, kind, manager_id),
+            (name, kind, manager_id, "coding" if kind == "executor" else None),
         )
         return cur.lastrowid
 
@@ -21,7 +23,7 @@ def hire_row(conn, name, kind="executor", manager_id=None):
 def make_work(conn, agent_id, task_id=None):
     return core.assign_work(
         conn, agent_id=agent_id, brief="do the thing", task_id=task_id, branch="feature-x",
-        role="coding", complexity="medium", actor="dir",
+        complexity="medium", actor="dir",
     )["id"]
 
 
@@ -75,3 +77,37 @@ def test_a_bucket_whose_reset_has_passed_reads_as_unused(conn):
     assert core.expire_passed_quota(conn) == 1
     stored = {r["label"]: (r["remaining_fraction"], r["reset_time"]) for r in core.quota_buckets(conn)}
     assert stored == {"5h": (1.0, None), "week": (1.0, None)}
+
+
+def test_a_work_is_committed_to_its_wallet_and_a_work_the_wallet_cannot_cover_is_refused(conn):
+    # The price list, the wallet's settings and the claude buckets are invented.
+    director_id = hire_row(conn, "dir", kind="director")
+    first = hire_row(conn, "exec1", manager_id=director_id)
+    second = hire_row(conn, "exec2", manager_id=director_id)
+    core.set_price_lists(
+        conn, [{"role": "coding", "complexity": "medium", "model": "m", "effort": "", "price": "6"}], [],
+        actor="dir",
+    )
+    core.set_setting(conn, wallets.week_key("claude"), "100")
+    core.set_setting(conn, wallets.window_key("claude"), "10")
+    now = int(time.time())
+    core.record_quota(conn, [
+        QuotaSnapshot(runtime="claude", label="week (all models)", remaining_fraction=1.0,
+                      reset_time=now + 3 * 24 * 3600),
+        QuotaSnapshot(runtime="claude", label="5h", remaining_fraction=1.0, reset_time=now + 4 * 3600),
+    ])
+
+    committed = db.query_one(conn, "SELECT * FROM works WHERE id = ?", (make_work(conn, first),))
+    assert (committed["price"], committed["price_runtime"]) == (6.0, "claude")
+    assert wallets.available(conn, "claude")["available"] == 4.0
+
+    with pytest.raises(ValueError):
+        make_work(conn, second)
+    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM works")["n"] == 1
+
+    core.record_quota(
+        conn,
+        [QuotaSnapshot(runtime="claude", label="5h", remaining_fraction=1.0, reset_time=now + 1800)],
+        partial=True,
+    )
+    assert db.query_one(conn, "SELECT * FROM works WHERE id = ?", (make_work(conn, second),)) is not None

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Rules — Office.AI{% endblock %}
+{% block content %}
+  <p class="subtitle">The standing rules, each for the agents of its audience.</p>
+
+  <section class="panel">
+    <header>Rules</header>
+    <div class="body" id="rules-list" hx-get="/fragments/rules" hx-trigger="office:rules[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+      {% include "partials/rules_list.html" %}
+    </div>
+  </section>
+{% endblock %}

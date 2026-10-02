@@ -1,10 +1,10 @@
 {# The rules catalogue. #}
 {% include "partials/notice.html" %}
 
-<details class="panel collapse-panel" data-office-details="knowledge-new-rule" style="margin-bottom: 14px;">
+<details class="panel collapse-panel" data-office-details="rules-new-rule" style="margin-bottom: 14px;">
   <summary>New rule</summary>
   <div class="body">
-    <form method="post" action="/knowledge/rules" hx-post="/knowledge/rules" hx-target="#knowledge-rules" hx-swap="innerHTML"
+    <form method="post" action="/rules" hx-post="/rules" hx-target="#rules-list" hx-swap="innerHTML"
           data-office-required="title text">
       <div class="form-row">
         <label for="nr-title">Title</label>
@@ -14,8 +14,17 @@
       <div class="form-row">
         <label for="nr-text">Rule</label>
         <textarea id="nr-text" name="text" style="min-height: 90px;" required></textarea>
-        <span class="hint">Goes into every agent's system prompt on every turn, verbatim. Write it as a standing
+        <span class="hint">Goes into the system prompt of every agent in its audience, on every turn, verbatim. Write it as a standing
           convention, not as an instruction for today.</span>
+      </div>
+      <div class="form-row">
+        <label for="nr-audience">Audience</label>
+        <select id="nr-audience" name="audience">
+          {% for a in audiences %}
+          <option value="{{ a }}">{{ a }}</option>
+          {% endfor %}
+        </select>
+        <span class="hint">everyone; managers (the director and the leads); executors; or the executors of one role.</span>
       </div>
       <div class="form-actions">
         <button type="submit" class="primary" disabled>Add rule</button>
@@ -28,10 +37,12 @@
   {% for r in rules %}
   <details class="panel collapse-panel" data-office-details="rule-{{ r.id }}" style="margin-bottom: 8px;">
     <summary>
-      {% if r.title %}{{ r.title }}{% else %}<span class="badge">untitled</span> {{ r.text | truncate(76, True, '…') }}{% endif %}
+      {% if r.title %}{{ r.title }}{% else %}<span class="badge">untitled</span>{% endif %}
+      <span class="badge">{{ r.audience }}</span>
+      <span class="text-faint">{{ r.text | truncate(76, True, '…') }} &middot; {{ r.created_by }}</span>
     </summary>
     <div class="body">
-      <form method="post" action="/knowledge/rules/{{ r.id }}" hx-post="/knowledge/rules/{{ r.id }}" hx-target="#knowledge-rules" hx-swap="innerHTML"
+      <form method="post" action="/rules/{{ r.id }}" hx-post="/rules/{{ r.id }}" hx-target="#rules-list" hx-swap="innerHTML"
             data-office-required="text">
         <div class="form-row">
           <label for="r{{ r.id }}-title">Title</label>
@@ -43,11 +54,22 @@
           <textarea id="r{{ r.id }}-text" name="text" style="min-height: 110px;" required>{{ r.text }}</textarea>
           <span class="hint">Rule {{ r.id }} &middot; added by {{ r.created_by }} &middot; {{ r.created_at | fmt_time }}</span>
         </div>
+        <div class="form-row">
+          <label for="r{{ r.id }}-audience">Audience</label>
+          <select id="r{{ r.id }}-audience" name="audience">
+            {% for a in audiences %}
+            <option value="{{ a }}" {{ 'selected' if a == r.audience }}>{{ a }}</option>
+            {% endfor %}
+            {% if r.audience not in audiences %}
+            <option value="{{ r.audience }}" selected>{{ r.audience }}</option>
+            {% endif %}
+          </select>
+        </div>
         <div class="form-actions">
           <button type="submit" class="primary" disabled>Save</button>
         </div>
       </form>
-      <form method="post" action="/knowledge/rules/{{ r.id }}/delete" hx-post="/knowledge/rules/{{ r.id }}/delete" hx-target="#knowledge-rules" hx-swap="innerHTML"
+      <form method="post" action="/rules/{{ r.id }}/delete" hx-post="/rules/{{ r.id }}/delete" hx-target="#rules-list" hx-swap="innerHTML"
             onsubmit="return confirm('Delete this rule?');" style="margin-top: 10px;">
         <button type="submit" class="danger">Delete</button>
       </form>

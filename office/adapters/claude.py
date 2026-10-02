@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import time
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +14,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from office.adapters import shared
 from office.adapters.base import (
+    QUOTA_5H,
+    QUOTA_WEEK,
     Event,
     ModelInfo,
     QuotaSnapshot,
@@ -26,6 +30,14 @@ from office.adapters.base import (
 _DAY_MS = str(24 * 60 * 60 * 1000)
 
 USAGE_TIMEOUT = 60.0
+
+#: A `/usage` answer counts only if claude's usage cache was written no earlier
+#: than this many seconds before the call.
+USAGE_CACHE_SLACK = 60.0
+
+#: The office's names for the two windows a `rate_limit_event` reports: the
+#: buckets `/usage` names "Current session" and "Current week (all models)".
+_RATE_LIMIT_WINDOWS = {"five_hour": QUOTA_5H, "seven_day": f"{QUOTA_WEEK} (all models)"}
 
 AUTOCOMPACT = "auto"
 
@@ -125,6 +137,8 @@ class ClaudeAdapter:
             # The whole of the office's context management.
             "--autocompact",
             AUTOCOMPACT,
+            # Turns only: under it, compact_command's `/compact` is plain text.
+            "--disable-slash-commands",
         ]
         if session_id:
             # --session-id assigns an id to a session being created; --resume
@@ -229,6 +243,9 @@ class ClaudeAdapter:
         if kind == "result":
             return _result_event(msg)
 
+        if kind == "rate_limit_event":
+            return _rate_limit_event(msg)
+
         return None
 
     def quota_reset(self, error: str | None) -> int | None:
@@ -242,9 +259,16 @@ class ClaudeAdapter:
         argv prompt.
 
         `session_ids` is unused: `/usage` asks the account, not a session.
+
+        None when claude's usage cache was not written by this call
+        (USAGE_CACHE_SLACK): the answer is then an older reading.
         """
+        called_at = time.time()
         payload = self._json_slash_command("/usage")
         if payload is None:
+            return None
+        fetched_at = _usage_fetched_at()
+        if fetched_at is None or fetched_at < called_at - USAGE_CACHE_SLACK:
             return None
         return parse_usage_payload(payload)
 
@@ -370,6 +394,35 @@ def parse_usage_payload(payload: dict) -> list[QuotaSnapshot] | None:
     return snapshots or None
 
 
+def _usage_fetched_at() -> float | None:
+    """When claude last wrote its usage cache, epoch seconds: `cachedUsageUtilization.fetchedAtMs`
+    in `.claude.json` under CLAUDE_CONFIG_DIR, or in the home directory. None when it holds none."""
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    path = Path(config_dir) if config_dir else Path.home()
+    try:
+        config = json.loads((path / ".claude.json").read_text(encoding="utf-8"))
+        return float(config["cachedUsageUtilization"]["fetchedAtMs"]) / 1000.0
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _rate_limit_event(msg: dict) -> Event | None:
+    """A `rate_limit_event` -> a `quota` event with the windows it reports, or None
+    when it reports none."""
+    windows = (msg.get("rate_limit_info") or {}).get("unifiedWindows") or {}
+    quota = tuple(
+        QuotaSnapshot(
+            runtime="claude",
+            label=label,
+            remaining_fraction=clamp_fraction(1.0 - float(window["utilization"])),
+            reset_time=int(window["resetsAt"]) if window.get("resetsAt") else None,
+        )
+        for key, label in _RATE_LIMIT_WINDOWS.items()
+        if isinstance(window := windows.get(key), dict) and window.get("utilization") is not None
+    )
+    return Event(kind="quota", quota=quota) if quota else None
+
+
 def _reset_epoch(text: str) -> int | None:
     """The matched reset text -> epoch seconds UTC, or None.
 
@@ -427,10 +480,12 @@ def _assistant_event(msg: dict, tool_names: dict[str, str]) -> Event:
     calls = [b for b in blocks if b.get("type") == "tool_use"]
     prose = "".join(texts)
     summaries = []
+    opened = []
     for block in calls:
         summary = tool_summary(block.get("name") or "?", identifying_argument(block.get("input")))
         summaries.append(summary or "?")
         block_id = block.get("id")
+        opened.append((block_id, summary))
         if isinstance(block_id, str) and summary:
             tool_names[block_id] = summary
     if calls:
@@ -442,6 +497,7 @@ def _assistant_event(msg: dict, tool_names: dict[str, str]) -> Event:
     return Event(
         kind="tool" if calls else "text",
         phase="started" if calls else None,
+        calls=tuple(opened),
         text=text,
         session_id=msg.get("session_id"),
         # Mid-turn context reading.
@@ -499,8 +555,10 @@ def _tool_result_event(msg: dict, tool_names: dict[str, str]) -> Event | None:
     if not results:
         return None
     summaries = []
+    ended = []
     for block in results:
         block_id = block.get("tool_use_id")
+        ended.append((block_id, None))
         known = tool_names.pop(block_id, None) if isinstance(block_id, str) else None
         # A missing `is_error` reads as "done" rather than being asserted either way.
         outcome = "error" if block.get("is_error") else "done"
@@ -508,6 +566,7 @@ def _tool_result_event(msg: dict, tool_names: dict[str, str]) -> Event | None:
     return Event(
         kind="tool",
         phase="finished",
+        calls=tuple(ended),
         text=" · ".join(summaries),
         session_id=msg.get("session_id"),
     )

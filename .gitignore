@@ -15,3 +15,7 @@ build/
 
 # Everyone keeps their own QA log
 ISSUES.md
+
+# Kept by the owner and Claude for themselves: the backlog and working notes
+BACKLOG.md
+notes/

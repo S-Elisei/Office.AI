@@ -9,9 +9,10 @@ import re
 import secrets
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from office import db, git
+from office import db, git, wallets
 from office.config import Config
 
 log = logging.getLogger(__name__)
@@ -105,6 +106,15 @@ def _agent_name(conn, agent_id: int) -> str:
     return db.query_one(conn, "SELECT name FROM agents WHERE id = ?", (agent_id,))["name"]
 
 
+def fmt_epoch(value) -> str:
+    """Epoch seconds as a time in the machine's own zone, the zone named; "unknown"
+    for none."""
+    if not value:
+        return "unknown"
+    local = datetime.fromtimestamp(int(value), tz=timezone.utc).astimezone()
+    return local.strftime("%Y-%m-%d %H:%M") + " local"
+
+
 # --------------------------------------------------------------------------- settings
 
 
@@ -124,13 +134,13 @@ def set_setting(conn, key: str, value: str, actor: str | None = None) -> None:
         _emit(conn, "settings", "setting", None, {"key": key}, actor=actor)
 
 
-#: The free text shown above the price list in roster.
+#: The owner's note on the price list, printed into the director's and the leads' system prompts.
 PRICE_LIST_NOTE_SETTING = "price_list_note"
 DEFAULT_WORK_ROLES = ("coding", "review", "consultation", "design")
-DEFAULT_WORK_COMPLEXITIES = ("fully specified", "medium", "high")
+DEFAULT_WORK_COMPLEXITIES = ("easy", "medium", "hard")
 
 PRICE_WORKS_COLUMNS = ("role", "complexity", "model", "effort", "price")
-PRICE_OWN_COLUMNS = ("what", "size", "price")
+PRICE_OWN_COLUMNS = ("what", "role", "model", "effort", "price")
 
 
 def price_works(conn) -> list[dict]:
@@ -147,7 +157,10 @@ def price_own(conn) -> list[dict]:
 
 def set_price_lists(conn, works: list[dict], own: list[dict], actor: str | None = None) -> None:
     """Replace both price lists' rows in one transaction. Each row is a dict of the
-    table's columns; `position` is the row's index in its list."""
+    table's columns, its price a number or the text of one; `position` is the row's
+    index in its list. An own row's empty role is stored as NULL."""
+    works = [{**row, "price": float(row["price"])} for row in works]
+    own = [{**row, "price": float(row["price"]), "role": row["role"] or None} for row in own]
     with db.transaction(conn):
         for table, columns, rows in (
             ("price_works", PRICE_WORKS_COLUMNS, works),
@@ -165,7 +178,7 @@ def set_price_lists(conn, works: list[dict], own: list[dict], actor: str | None 
 
 
 def work_roles(conn) -> list[str]:
-    """The roles a work may be assigned as, in effect now: the distinct roles of the
+    """The roles an executor may be hired with, in effect now: the distinct roles of the
     works price list, in order of first appearance; the defaults when it has no row."""
     roles = [row["role"] for row in db.query(
         conn, "SELECT role FROM price_works GROUP BY role ORDER BY MIN(position)"
@@ -174,7 +187,7 @@ def work_roles(conn) -> list[str]:
 
 
 def work_complexities(conn, role: str) -> list[str]:
-    """The complexities a work of `role` may be assigned as, in effect now: the distinct
+    """The complexities a work of `role` may be assigned with, in effect now: the distinct
     complexities of that role's rows in the works price list, in order of first
     appearance; the defaults when the list has no row."""
     if db.query_one(conn, "SELECT 1 FROM price_works LIMIT 1") is None:
@@ -643,6 +656,7 @@ def hire(
     effort: str | None,
     kind: str = "executor",
     title: str | None = None,
+    role: str | None = None,
     manager_agent_id: int | None = None,
     instructions: str | None = None,
     adopt_workspace_id: str | None = None,
@@ -654,7 +668,8 @@ def hire(
 
     The hire composition is exactly {runtime, model, effort}; there is no toolset
     and no MCP server to choose. A lead or an executor is hired with its title
-    and its manager, the director with neither. `adopt_workspace_id` takes over
+    and its manager, the director with neither. An executor is hired with a `role`,
+    one of work_roles(); the director and a lead take none. `adopt_workspace_id` takes over
     a workspace that belongs to nobody instead of cloning a new one, and leaves it standing
     where the previous owner left it, branch and uncommitted changes alike.
 
@@ -674,6 +689,12 @@ def hire(
             f"'{name}' is not a usable name. Use Latin letters, digits, '.', '_' and '-', "
             "starting and ending with a letter or a digit — for example 'ui-designer'."
         )
+    if kind == "executor":
+        roles = work_roles(conn)
+        if role not in roles:
+            raise ValueError(f"an executor is hired with a role, one of: {', '.join(roles)}")
+    elif role is not None:
+        raise ValueError(f"a {kind} takes no role — hire it without one")
     existing = db.query_one(conn, "SELECT id FROM agents WHERE name = ?", (name,))
     if existing is not None:
         raise ValueError(f"an agent named '{name}' already exists")
@@ -696,12 +717,12 @@ def hire(
         cur = db.execute(
             conn,
             """
-            INSERT INTO agents (name, kind, manager_agent_id, title, instructions, runtime,
+            INSERT INTO agents (name, kind, manager_agent_id, title, role, instructions, runtime,
                                 model, effort, status, last_seen_message_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'provisioning',
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisioning',
                     (SELECT COALESCE(MAX(id), 0) FROM messages))
             """,
-            (name, kind, manager_agent_id, title, _instructions_value(instructions),
+            (name, kind, manager_agent_id, title, role, _instructions_value(instructions),
              runtime, model, effort),
         )
         agent_id = cur.lastrowid
@@ -759,7 +780,8 @@ def fire(conn, agent_id: int, actor: str | None = None) -> None:
 
     Refuses while it still has an active work or a subordinate. Its failed works
     and its expectations go with the row (ON DELETE CASCADE), and the deferred
-    messages it set are deleted here.
+    messages it set are deleted here. The shared resources it holds are released
+    and it leaves every waiting list.
 
     The workspace is never deleted: workspaces.owner_agent_id -> NULL, so it
     sits free for the next hire, standing on whatever branch its last owner left
@@ -804,6 +826,11 @@ def fire(conn, agent_id: int, actor: str | None = None) -> None:
         ).rowcount
         if wakes:
             _emit(conn, "messages", "scheduled_message", None, {"deleted": True}, actor=actor)
+        for held in db.query(
+            conn, "SELECT name FROM resources WHERE holder_agent_id = ?", (agent_id,)
+        ):
+            _free_resource(conn, held["name"])
+        db.execute(conn, "DELETE FROM resource_waiters WHERE agent_id = ?", (agent_id,))
         db.execute(conn, "DELETE FROM agents WHERE id = ?", (agent_id,))
         _emit(conn, "agents", "agent", agent_id, {"name": agent["name"], "status": "fired"}, actor=actor)
 
@@ -880,13 +907,19 @@ def _instructions_value(text: str | None) -> str | None:
 
 
 def set_instructions(conn, agent_id: int, text: str, actor: str | None = None) -> bool:
-    """Replace an agent's standing instructions; empty text clears them.
-    Returns whether anything changed.
+    """Replace the standing instructions of the director or a lead; empty text
+    clears them. Returns whether anything changed. An executor has none and is
+    refused.
 
     A change is sent to the agent as a quiet line. Text equal to what is stored
     writes and sends nothing.
     """
     agent = _row(conn, "agents", "id", agent_id)
+    if agent["kind"] == "executor":
+        raise ValueError(
+            f"'{agent['name']}' is an executor, and executors have no standing instructions — "
+            "put its job in the brief of its work"
+        )
     value = _instructions_value(text)
     if value == agent["instructions"]:
         return False
@@ -1135,7 +1168,7 @@ def start_new_session(conn, agent_id: int) -> dict:
 
 
 
-def record_quota(conn, snapshots) -> int:
+def record_quota(conn, snapshots, *, partial: bool = False) -> int:
     """Store a poll's worth of quota buckets, and tell the page about it.
 
     One row per (runtime, label), shared by every agent of that runtime.
@@ -1148,7 +1181,8 @@ def record_quota(conn, snapshots) -> int:
     for its bucket, exactly as it came.
 
     A successful poll also deletes that runtime's buckets the answer does not
-    mention.
+    mention; a `partial` reading, one that names only some of the buckets,
+    deletes nothing.
     """
     changed = 0
     now = time.time()
@@ -1205,7 +1239,7 @@ def record_quota(conn, snapshots) -> int:
                     (fraction, reset, snap.runtime, snap.label),
                 )
             changed += 1
-        for runtime, labels in live_labels.items():
+        for runtime, labels in ({} if partial else live_labels).items():
             placeholders = ", ".join("?" for _ in labels)
             cur = db.execute(
                 conn,
@@ -1437,7 +1471,7 @@ def team_tree(conn) -> list[dict]:
         dict(r)
         for r in db.query(
             conn,
-            "SELECT id, name, kind, manager_agent_id, title, runtime, model, effort, status, "
+            "SELECT id, name, kind, manager_agent_id, title, role, runtime, model, effort, status, "
             "context_used, context_limit FROM agents ORDER BY name COLLATE NOCASE",
         )
     ]
@@ -1460,11 +1494,13 @@ def roster(conn) -> dict:
 
     `agents` is team_tree(). `works` carries every work that is still on the
     books - a row exists exactly as long as the work is open, so there is no
-    status filter here at all - with its assigner, the reason it stopped and,
-    for a pause, the earliest it could resume.
+    status filter here at all - with its assigner, its role and complexity
+    (None for a work not assigned to an executor), what it commits (price and
+    coordination, each with its runtime; None where it commits nothing), the
+    reason it stopped and, for a pause, the earliest it could resume. `resources`
+    is held_resources().
     """
     agents = team_tree(conn)
-    quota = quota_buckets(conn)
     works = [
         dict(r)
         for r in db.query(
@@ -1472,27 +1508,16 @@ def roster(conn) -> dict:
             "SELECT works.id, works.agent_id, agents.name AS agent_name, "
             "works.assigned_by_agent_id, assigner.name AS assigner_name, works.brief, "
             "works.branch, works.status, works.fail_reason, works.pause_reason, "
-            "works.resume_after "
+            "works.resume_after, works.price, works.price_runtime, works.coordination, "
+            "works.coordination_runtime, work_log.role, work_log.complexity "
             "FROM works JOIN agents ON agents.id = works.agent_id "
-            "JOIN agents assigner ON assigner.id = works.assigned_by_agent_id ORDER BY works.id",
-        )
-    ]
-    # A task marked 'planned'/'in_progress' whose blocker isn't 'done' looks
-    # ready but isn't.
-    blocked_tasks = [
-        dict(r)
-        for r in db.query(
-            conn,
-            "SELECT DISTINCT t.id, t.title, t.status, blocker.id AS blocking_task_id, blocker.title AS blocking_title "
-            "FROM tasks t "
-            "JOIN task_dependencies td ON td.blocked_task_id = t.id "
-            "JOIN tasks blocker ON blocker.id = td.blocking_task_id "
-            "WHERE t.status IN ('planned', 'in_progress') AND blocker.status != 'done'",
+            "JOIN agents assigner ON assigner.id = works.assigned_by_agent_id "
+            "LEFT JOIN work_log ON work_log.work_id = works.id ORDER BY works.id",
         )
     ]
     return {
-        "agents": agents, "quota": quota, "holds": quota_holds(conn), "works": works,
-        "blocked_tasks": blocked_tasks,
+        "agents": agents, "holds": quota_holds(conn), "works": works,
+        "resources": held_resources(conn),
     }
 
 
@@ -1842,11 +1867,83 @@ def _log_ended(conn, ended_as: str, where: str, params: tuple) -> None:
     )
 
 
+def _commitment(
+    conn, caller: dict, agent: dict, role: str | None, complexity: str | None,
+    leaving: int | None = None,
+) -> dict:
+    """The works columns a work for `agent`, assigned by `caller`, commits: the
+    works price list's price for its role and complexity on the agent's model and
+    effort, on the agent's runtime, and the own price list's price for its role and the
+    caller's model and effort, on the caller's runtime; no such row, no coordination.
+    All NULL for a work with no role, for one whose assignee is
+    not an executor, and while the works price list is empty.
+
+    Refuses when the price list has no price for the work, and when a wallet it draws
+    has less available than the work costs, the work `leaving` committing nothing.
+    """
+    nothing = {"price": None, "price_runtime": None, "coordination": None, "coordination_runtime": None}
+    if (
+        agent["kind"] != "executor" or role is None
+        or db.query_one(conn, "SELECT 1 FROM price_works LIMIT 1") is None
+    ):
+        return nothing
+    rows = db.query(
+        conn,
+        "SELECT model, effort, price FROM price_works WHERE role = ? AND complexity = ? ORDER BY position",
+        (role, complexity),
+    )
+
+    def name(model: str, effort: str | None) -> str:
+        return f"{model}/{effort}" if effort else model
+
+    priced = next(
+        (r for r in rows if r["model"] == agent["model"] and r["effort"] == (agent["effort"] or "")), None
+    )
+    if priced is None:
+        what = f"The price list has no price for a {role} work of complexity '{complexity}'"
+        if not rows:
+            raise ValueError(f"{what}.")
+        raise ValueError(
+            f"{what} on {name(agent['model'], agent['effort'])}; it prices it on "
+            f"{', '.join(name(r['model'], r['effort']) for r in rows)}."
+        )
+    # runtime -> what the work draws on its wallet, as (whose spending, amount)
+    draws = {agent["runtime"]: [("the executor", priced["price"])]}
+    coordination = db.query_one(
+        conn,
+        "SELECT price FROM price_own WHERE role = ? AND model = ? AND effort = ?",
+        (role, caller["model"], caller["effort"] or ""),
+    )
+    if coordination is not None:
+        draws.setdefault(caller["runtime"], []).append(("your coordination", coordination["price"]))
+    short = []
+    for runtime, parts in draws.items():
+        cost = sum(amount for _, amount in parts)
+        wallet = wallets.available(conn, runtime, leaving)
+        if wallet is not None and round(cost, 6) > round(wallet["available"], 6):
+            unit = wallet["currency"]
+            split = " and ".join(f"{wallets.units(amount)} for {whose}" for whose, amount in parts)
+            text = (
+                f"{runtime} has {wallets.units(wallet['available'])} {unit} available now; "
+                f"this work costs {wallets.units(cost)} {unit} on it: {split}."
+            )
+            if wallet["more_at"] is not None:
+                text += f" More becomes available at {fmt_epoch(wallet['more_at'])}."
+            short.append(text)
+    if short:
+        raise ValueError(" ".join(short))
+    return {
+        "price": priced["price"], "price_runtime": agent["runtime"],
+        "coordination": coordination["price"] if coordination is not None else None,
+        "coordination_runtime": caller["runtime"] if coordination is not None else None,
+    }
+
+
 def assign_work(
-    conn, *, agent_id: int, brief: str, task_id: int | None, branch: str, role: str | None,
+    conn, *, agent_id: int, brief: str, task_id: int | None, branch: str,
     complexity: str | None, actor: str
 ) -> dict:
-    """assign(agent, brief, task, branch, role, complexity).
+    """assign(agent, brief, task, branch, complexity).
 
     `actor` is the calling manager, recorded as the assigner; the agent is the
     caller itself or one in its subtree.
@@ -1858,8 +1955,12 @@ def assign_work(
     The name lives in works.branch as what the assigner asked for; the agent
     creates the branch itself.
 
-    `role` and `complexity` go to the work's work_log row and nowhere else; None
-    for a work whose assignee is not an executor.
+    The work's role is its assignee's, and its role and `complexity` go to the work's
+    work_log row and, for an executor's work, price it; both None for a work whose
+    assignee is not an executor.
+
+    A work for an executor commits its price (_commitment) on the works row until the
+    row is deleted.
 
     The decision and the write are one transaction.
     """
@@ -1877,13 +1978,15 @@ def assign_work(
         )
         if active is not None:
             raise ValueError(f"agent '{agent['name']}' already has an active work ({active['id']})")
+        committed = _commitment(conn, caller, agent, agent["role"], complexity)
         ws_row = workspace_of(conn, agent_id) if agent["status"] != "provisioning" else None
         workspace_id = ws_row["id"] if ws_row is not None else None
         cur = db.execute(
             conn,
             "INSERT INTO works (task_id, agent_id, assigned_by_agent_id, brief, branch, "
-            "workspace_id, status) VALUES (?, ?, ?, ?, ?, ?, 'running')",
-            (task_id, agent_id, caller["id"], brief, branch, workspace_id),
+            "workspace_id, status, price, price_runtime, coordination, coordination_runtime) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)",
+            (task_id, agent_id, caller["id"], brief, branch, workspace_id, *committed.values()),
         )
         work_id = cur.lastrowid
         db.execute(
@@ -1892,7 +1995,7 @@ def assign_work(
             "branch, role, complexity, assigned_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT started_at FROM works WHERE id = ?))",
             (work_id, task_id, agent["name"], agent["runtime"], agent["model"], agent["effort"],
-             caller["name"], branch, role, complexity, work_id),
+             caller["name"], branch, agent["role"], complexity, work_id),
         )
         _emit(
             conn, "works", "work", work_id,
@@ -2204,7 +2307,11 @@ def reassign_work(
     Every agent whose workspace changes is told its new workspace and sandbox
     paths as a quiet line.
 
-    The work is revived: status 'running', and every reason column cleared.
+    The work is revived: status 'running', and every reason column cleared. Handed to
+    another agent, what it commits is priced anew for the recipient and the caller
+    (_commitment), the work's own current commitment counting as nothing, and
+    refused on the same terms as assign_work(); handed back to its holder, it keeps
+    what it commits.
 
     The decision and the writes are one transaction; with 'fresh' the decision
     is also taken before the clone, so a refusal clones nothing.
@@ -2217,6 +2324,7 @@ def reassign_work(
     if workspace == "fresh":
         _check_reassign(conn, caller, work_id, to_agent)
         _refuse_in_turn(conn, caller, to_agent_id)
+        _reassigned_commitment(conn, caller, work_id, to_agent)
         # The intake is held as it is taken rather than read off the result: a clone
         # that fails must still leave everyone told that the branch moved.
         intake: git.Intake | None = None
@@ -2237,6 +2345,7 @@ def reassign_work(
     handed: list[tuple[int, dict]] = []
     with db.transaction(conn):
         work = _check_reassign(conn, caller, work_id, to_agent)
+        committed = _reassigned_commitment(conn, caller, work_id, to_agent)
         held = workspace_of(conn, to_agent_id)
         if new_ws is None:
             if work["workspace_id"] is None:
@@ -2282,9 +2391,10 @@ def reassign_work(
         db.execute(
             conn,
             "UPDATE works SET agent_id = ?, assigned_by_agent_id = ?, workspace_id = ?, "
-            "status = 'running', fail_reason = NULL, pause_reason = NULL, resume_after = NULL "
+            "status = 'running', fail_reason = NULL, pause_reason = NULL, resume_after = NULL, "
+            "price = ?, price_runtime = ?, coordination = ?, coordination_runtime = ? "
             "WHERE id = ?",
-            (to_agent_id, caller["id"], new_ws["id"], work_id),
+            (to_agent_id, caller["id"], new_ws["id"], *committed.values(), work_id),
         )
         _log_holder(conn, work_id, to_agent_id)
         _emit(conn, "works", "work", work_id, {"agent_id": to_agent_id, "workspace": workspace}, actor=actor)
@@ -2298,6 +2408,17 @@ def reassign_work(
             f"{config.scratch_dir / ws['id']}; the paths in your system prompt no longer hold.",
         )
     return _row(conn, "works", "id", work_id)
+
+
+def _reassigned_commitment(conn, caller: dict, work_id: int, to_agent: dict) -> dict:
+    """_commitment() of work `work_id` as `caller` hands it to `to_agent`, the work's
+    own current commitment counting as nothing; the work's current commitment,
+    unchanged and unchecked, when `to_agent` already holds it."""
+    work = _row(conn, "works", "id", work_id)
+    if work["agent_id"] == to_agent["id"]:
+        return {c: work[c] for c in ("price", "price_runtime", "coordination", "coordination_runtime")}
+    log = db.query_one(conn, "SELECT role, complexity FROM work_log WHERE work_id = ?", (work_id,))
+    return _commitment(conn, caller, to_agent, log["role"], log["complexity"], leaving=work_id)
 
 
 def _refuse_in_turn(conn, caller: dict, to_agent_id: int, holder: int | None = None) -> None:
@@ -2334,8 +2455,8 @@ def _refuse_if_in_turn(conn, agent_id: int, what: str) -> None:
 def _check_reassign(conn, caller: dict, work_id: int, to_agent: dict) -> dict:
     """The work reassign_work() may hand to `to_agent`, read afresh. Refuses a
     work that is gone or out of `caller`'s reach, a recipient outside its
-    subtree, a recipient still provisioning, and a recipient that already has
-    another active work."""
+    subtree, a recipient still provisioning, a recipient that already has
+    another active work, and an executor whose role is not the work's."""
     work = _row(conn, "works", "id", work_id)
     if work is None:
         raise ValueError(f"no such work {work_id}")
@@ -2354,6 +2475,12 @@ def _check_reassign(conn, caller: dict, work_id: int, to_agent: dict) -> dict:
     )
     if active is not None:
         raise ValueError(f"agent '{to_agent['name']}' already has an active work ({active['id']})")
+    work_role = db.query_one(conn, "SELECT role FROM work_log WHERE work_id = ?", (work_id,))["role"]
+    if work_role is not None and to_agent["kind"] == "executor" and to_agent["role"] != work_role:
+        raise ValueError(
+            f"work {work_id} is a {work_role} work, and '{to_agent['name']}' is an executor in "
+            f"role {to_agent['role']} — hand it to an executor in role {work_role}"
+        )
     if work["agent_id"] not in (to_agent["id"], caller["id"]):
         _refuse_if_in_turn(conn, work["agent_id"], f"this would take work {work_id} from {{name}}")
     return work
@@ -2819,6 +2946,111 @@ def close_pr(conn, pr_id: int, actor: str) -> dict:
     return {"status": "closed", "title": pr["title"], "source_branch": pr["source_branch"]}
 
 
+# --------------------------------------------------------------------------- shared resources
+#
+# A shared resource is a name that at most one agent holds at a time. The only
+# write path into `resources` and `resource_waiters`.
+
+RESOURCE_NAME = re.compile(r"[a-z0-9-]{1,40}")
+
+
+def take_resource(conn, name: str, agent_id: int) -> dict:
+    """resource(op=take): the agent holds `name` when it is free or already its own;
+    held by another agent, the agent is recorded as waiting for it. Returns the
+    holder's name, `since` and whether the holder is the agent."""
+    if not RESOURCE_NAME.fullmatch(name):
+        raise ValueError(
+            f"'{name}' is not a resource name: 1 to 40 lower-case letters, digits and '-'"
+        )
+    with db.transaction(conn):
+        db.execute(
+            conn, "INSERT OR IGNORE INTO resources (name, holder_agent_id) VALUES (?, ?)",
+            (name, agent_id),
+        )
+        held = db.query_one(
+            conn,
+            "SELECT r.holder_agent_id, r.since, a.name AS holder FROM resources r "
+            "JOIN agents a ON a.id = r.holder_agent_id WHERE r.name = ?",
+            (name,),
+        )
+        yours = held["holder_agent_id"] == agent_id
+        if not yours:
+            db.execute(
+                conn, "INSERT OR IGNORE INTO resource_waiters (name, agent_id) VALUES (?, ?)",
+                (name, agent_id),
+            )
+    return {"holder": held["holder"], "since": held["since"], "yours": yours}
+
+
+def release_resource(conn, name: str, caller: dict) -> list[str]:
+    """resource(op=release): free `name`, held by `caller` or by an agent in its
+    subtree. Returns the names of the waiting agents, each told it is free."""
+    with db.transaction(conn):
+        held = db.query_one(
+            conn,
+            "SELECT r.holder_agent_id, a.name AS holder FROM resources r "
+            "JOIN agents a ON a.id = r.holder_agent_id WHERE r.name = ?",
+            (name,),
+        )
+        if held is None:
+            raise ValueError(f"nobody holds '{name}' — roster() lists the resources that are held")
+        holder_id = held["holder_agent_id"]
+        if holder_id != caller["id"] and holder_id not in subtree_ids(conn, caller["id"]):
+            raise PermissionError(
+                f"'{name}' is held by {held['holder']}; only its holder, or a manager above "
+                "the holder, releases it"
+            )
+        return _free_resource(conn, name)
+
+
+def _free_resource(conn, name: str) -> list[str]:
+    """Delete the resource and its waiting list, and send each waiting agent a direct
+    message from the office saying it is free. Call inside db.transaction(). Returns
+    the names of the agents told, the longest-waiting first."""
+    waiters = [
+        row["name"]
+        for row in db.query(
+            conn,
+            "SELECT a.name FROM resource_waiters w JOIN agents a ON a.id = w.agent_id "
+            "WHERE w.name = ? ORDER BY w.since, a.id",
+            (name,),
+        )
+    ]
+    db.execute(conn, "DELETE FROM resource_waiters WHERE name = ?", (name,))
+    db.execute(conn, "DELETE FROM resources WHERE name = ?", (name,))
+    for waiter in waiters:
+        _write_message(
+            conn, "dm", OFFICE_SENDER, waiter,
+            f"The shared resource '{name}' is free. resource(op=take, name='{name}') takes it.",
+            OFFICE_SENDER,
+        )
+    return waiters
+
+
+def held_resources(conn) -> list[dict]:
+    """Every held resource by name: `name`, `holder`, `since` and the names of the
+    agents `waiting` for it, the longest-waiting first."""
+    held = [
+        dict(r)
+        for r in db.query(
+            conn,
+            "SELECT r.name, a.name AS holder, r.since FROM resources r "
+            "JOIN agents a ON a.id = r.holder_agent_id ORDER BY r.name",
+        )
+    ]
+    for resource in held:
+        resource["waiting"] = [
+            r["name"]
+            for r in db.query(
+                conn,
+                "SELECT a.name FROM resource_waiters w JOIN agents a ON a.id = w.agent_id "
+                "WHERE w.name = ? ORDER BY w.since, a.id",
+                (resource["name"],),
+            )
+        ]
+    return held
+
+
 # --------------------------------------------------------------------------- wiki & rules
 
 
@@ -2974,68 +3206,135 @@ def delete_wiki_page(conn, path: str, expected_version: int, actor: str | None =
 #: What render_rules() prints when there are none.
 NO_RULES = "(none yet)"
 
+#: The audiences a rule has besides `role:<role>`, the executors of one role.
+RULE_AUDIENCES = ("everyone", "managers", "executors")
 
-def render_rules(conn) -> str:
-    """Every rule, one line each, oldest first: a titled rule reads
-    `- [id] Title: text`, an untitled one `- [id] text`. The system prompts and
-    note(op=list, kind=rule) print this; the knowledge page runs its own query.
+
+def rule_audiences(conn) -> list[str]:
+    """The audiences a rule may have, in effect now: RULE_AUDIENCES, then one
+    `role:<role>` for each role of work_roles()."""
+    return [*RULE_AUDIENCES, *(f"role:{role}" for role in work_roles(conn))]
+
+
+def _check_audience(conn, audience: str) -> None:
+    allowed = rule_audiences(conn)
+    if audience not in allowed:
+        raise ValueError(f"audience '{audience}' is not one of: {', '.join(allowed)}")
+
+
+def rule_applies(audience: str, agent) -> bool:
+    """Whether a rule of `audience` is for `agent`, a row with `kind` and `role`. The
+    director is every audience."""
+    if agent["kind"] == "director" or audience == "everyone":
+        return True
+    if audience == "managers":
+        return agent["kind"] == "lead"
+    return agent["kind"] == "executor" and audience in ("executors", f"role:{agent['role']}")
+
+
+def render_rules(conn, agent: dict | None = None) -> str:
+    """The rules, one line each, oldest first: a titled rule reads
+    `- [id] Title: text`, an untitled one `- [id] text`. For an agent, those that
+    are for it (rule_applies); for the director and for no agent, every rule, each
+    line carrying its audience as `- [id] (audience) Title: text`.
     """
-    rows = db.query(conn, "SELECT id, title, text FROM rules ORDER BY id")
+    everything = agent is None or agent["kind"] == "director"
+    rows = [
+        r for r in db.query(conn, "SELECT id, title, text, audience FROM rules ORDER BY id")
+        if everything or rule_applies(r["audience"], agent)
+    ]
     if not rows:
         return NO_RULES
-    return "\n".join(
-        f"- [{r['id']}] {r['title']}: {r['text']}" if r["title"] else f"- [{r['id']}] {r['text']}"
-        for r in rows
-    )
+
+    def line(r) -> str:
+        tag = f"({r['audience']}) " if everything else ""
+        head = f"{r['title']}: " if r["title"] else ""
+        return f"- [{r['id']}] {tag}{head}{r['text']}"
+
+    return "\n".join(line(r) for r in rows)
 
 
-def _announce_rule(conn, actor: str | None, line: str) -> None:
-    """Tell every agent that the project's rules have changed.
+#: The start of every line _announce_rule writes; group 1 is the rule's id.
+_RULE_ANNOUNCEMENT = re.compile(r"\[office\] A project rule was \w+ by .+? — \[(\d+)\] ")
 
-    A rule reaches an agent through its system prompt, and a system prompt is
-    fixed when the session is created, so a change is invisible to every session
-    already open until this line arrives.
+
+def announced_rule(body: str) -> int | None:
+    """The id of the rule a quiet line from _announce_rule is about, or None for any
+    other line."""
+    match = _RULE_ANNOUNCEMENT.match(body)
+    return int(match.group(1)) if match else None
+
+
+def _announce_rule(
+    conn, actor: str | None, verb: str, rule_id: int, statement: str, audiences: tuple[str, ...]
+) -> None:
+    """Tell the agents a rule of any of `audiences` is for that the project's rules
+    have changed.
+
+    A rule reaches an agent through its system prompt, which a session reads when
+    it is created and, on claude, after a compaction; a session already open sees
+    the change through this line.
 
     Never raises: the rule is written either way.
     """
+    line = f"[office] A project rule was {verb} by {actor or 'the owner'} — [{rule_id}] {statement}"
     try:
-        for row in db.query(conn, "SELECT name FROM agents"):
-            if row["name"] != actor:
-                tell_quietly(conn, row["name"], f"[office] {line}")
+        for row in db.query(conn, "SELECT name, kind, role FROM agents"):
+            if row["name"] != actor and any(rule_applies(a, row) for a in audiences):
+                tell_quietly(conn, row["name"], line)
     except Exception:
         log.exception("could not announce a rule change")
 
 
-def create_rule(conn, text: str, created_by: str, title: str) -> dict:
+def create_rule(
+    conn, text: str, created_by: str, title: str, audience: str = "everyone"
+) -> dict:
     """A rule is a title and a paragraph, and both callers require both. The column
-    is nullable all the same: NULL means "written before titles existed"."""
+    is nullable all the same: NULL means "written before titles existed". The
+    `audience` is one of rule_audiences()."""
+    _check_audience(conn, audience)
     with db.transaction(conn):
         cur = db.execute(
-            conn, "INSERT INTO rules (title, text, created_by) VALUES (?, ?, ?)", (title, text, created_by)
+            conn,
+            "INSERT INTO rules (title, text, audience, created_by) VALUES (?, ?, ?, ?)",
+            (title, text, audience, created_by),
         )
         rule_id = cur.lastrowid
-        _emit(conn, "rules", "rule", rule_id, {"title": title, "text": text}, actor=created_by)
-    _announce_rule(
-        conn, created_by,
-        f"A project rule was added by {created_by} — [{rule_id}] {title}: {text}",
-    )
+        _emit(
+            conn, "rules", "rule", rule_id,
+            {"title": title, "text": text, "audience": audience}, actor=created_by,
+        )
+    _announce_rule(conn, created_by, "added", rule_id, f"{title}: {text}", (audience,))
     return _row(conn, "rules", "id", rule_id)
 
 
-def update_rule(conn, rule_id: int, text: str, title: str | None = None, actor: str | None = None) -> dict:
+def update_rule(
+    conn, rule_id: int, text: str, title: str | None = None, audience: str | None = None,
+    actor: str | None = None,
+) -> dict:
     """title=None means LEAVE THE TITLE ALONE, not "clear it" - COALESCE, not a
-    plain assignment.
+    plain assignment; so does audience=None. A new audience is one of
+    rule_audiences(). The agents told are those the rule was for before and those it
+    is for after.
     """
+    before = _row(conn, "rules", "id", rule_id)["audience"]
+    if audience is not None and audience != before:
+        _check_audience(conn, audience)
     with db.transaction(conn):
         db.execute(
-            conn, "UPDATE rules SET title = COALESCE(?, title), text = ? WHERE id = ?", (title, text, rule_id)
+            conn,
+            "UPDATE rules SET title = COALESCE(?, title), text = ?, "
+            "audience = COALESCE(?, audience) WHERE id = ?",
+            (title, text, audience, rule_id),
         )
-        _emit(conn, "rules", "rule", rule_id, {"title": title, "text": text}, actor=actor)
+        _emit(
+            conn, "rules", "rule", rule_id,
+            {"title": title, "text": text, "audience": audience}, actor=actor,
+        )
     rule = _row(conn, "rules", "id", rule_id)
     _announce_rule(
-        conn, actor,
-        f"A project rule was changed by {actor or 'the owner'} — [{rule_id}] "
-        f"{rule['title'] or 'untitled'}: {rule['text']}",
+        conn, actor, "changed", rule_id, f"{rule['title'] or 'untitled'}: {rule['text']}",
+        (before, rule["audience"]),
     )
     return rule
 
@@ -3047,7 +3346,6 @@ def delete_rule(conn, rule_id: int, actor: str | None = None) -> None:
         _emit(conn, "rules", "rule", rule_id, {"deleted": True}, actor=actor)
     if rule is not None:
         _announce_rule(
-            conn, actor,
-            f"A project rule was withdrawn by {actor or 'the owner'} — "
-            f"[{rule_id}] {rule['title'] or 'untitled'}: {rule['text']}",
+            conn, actor, "withdrawn", rule_id, f"{rule['title'] or 'untitled'}: {rule['text']}",
+            (rule["audience"],),
         )

@@ -27,13 +27,26 @@ RUNTIMES = ["claude", "codex", "agy"]
 # It can never be saved.
 CUSTOM_MODEL = "__custom__"
 
-# The header cells of the two price lists' tables.
-WORKS_COLUMNS = ["Role", "Complexity", "Model", "Effort", "Price (typical / with margin)"]
-OWN_COLUMNS = ["What", "Size", "Price (typical / with margin)"]
+# The columns of the two price lists' tables: the header cell, the input's type, whether
+# the cell is required, and the id of the datalist that offers its values.
+WORKS_COLUMNS = [
+    {"label": "Role", "required": True},
+    {"label": "Complexity", "required": True},
+    {"label": "Model", "required": True},
+    {"label": "Effort"},
+    {"label": "Price", "type": "number", "required": True},
+]
+OWN_COLUMNS = [
+    {"label": "What", "required": True},
+    {"label": "Role", "list": "s-works-roles"},
+    {"label": "Model", "required": True},
+    {"label": "Effort"},
+    {"label": "Price", "type": "number", "required": True},
+]
 
 # The names of the fields a row's cells post, in column order.
 WORKS_FIELDS = ["works_role", "works_complexity", "works_model", "works_effort", "works_price"]
-OWN_FIELDS = ["own_what", "own_size", "own_price"]
+OWN_FIELDS = ["own_what", "own_role", "own_model", "own_effort", "own_price"]
 
 
 def _director(conn: sqlite3.Connection) -> sqlite3.Row | None:
@@ -44,12 +57,15 @@ def _fmt_minutes(minutes: float) -> str:
     return str(int(minutes)) if float(minutes).is_integer() else str(minutes)
 
 
-def _editor(
-    id: str, fields: list[str], columns: list[str], rows: list[list[str]], required: int
-) -> dict:
+def _editor(id: str, fields: list[str], columns: list[dict], rows: list[list]) -> dict:
     """What macros.html's `table_editor` draws: one input per cell, named by the
-    column's entry in `fields`; a row's first `required` cells are required."""
-    return {"id": id, "fields": fields, "columns": columns, "rows": rows, "required": required}
+    column's entry in `fields` and made as the column says."""
+    return {"id": id, "fields": fields, "columns": columns, "rows": rows}
+
+
+def _cells(row: dict, columns: tuple[str, ...]) -> list:
+    """A stored price list row as a table editor's cells: an empty cell for NULL."""
+    return ["" if row[c] is None else row[c] for c in columns]
 
 
 def _table_rows(
@@ -170,14 +186,18 @@ def _context(
         "price_list_note": core.get_setting(conn, core.PRICE_LIST_NOTE_SETTING, "") or "",
         "price_list_works": _editor(
             "works", WORKS_FIELDS, WORKS_COLUMNS,
-            [[row[c] for c in core.PRICE_WORKS_COLUMNS] for row in core.price_works(conn)],
-            required=2,
+            [_cells(row, core.PRICE_WORKS_COLUMNS) for row in core.price_works(conn)],
         ),
         "price_list_own": _editor(
             "own", OWN_FIELDS, OWN_COLUMNS,
-            [[row[c] for c in core.PRICE_OWN_COLUMNS] for row in core.price_own(conn)],
-            required=1,
+            [_cells(row, core.PRICE_OWN_COLUMNS) for row in core.price_own(conn)],
         ),
+        "work_roles": core.work_roles(conn),
+        # Each catalogue model's runtime and the setting that holds its 5h window.
+        "price_runtimes": {
+            row["model_id"]: {"runtime": row["runtime"], "window": wallets.window_key(row["runtime"])}
+            for row in core.list_models(conn)
+        },
         # The stored value of every wallet field, by its setting key.
         "wallet_values": {
             key: core.get_setting(conn, key, "") or "" for key in wallets.SETTING_KEYS

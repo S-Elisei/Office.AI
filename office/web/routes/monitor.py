@@ -114,8 +114,8 @@ def monitor_tail_fragment(request: Request, work_id: int):
     work = db.query_one(
         conn,
         """
-        SELECT works.output_tail AS output_tail, agents.name AS agent_name,
-               agents.runtime AS agent_runtime
+        SELECT works.status AS status, works.output_tail AS output_tail,
+               agents.name AS agent_name, agents.runtime AS agent_runtime
         FROM works JOIN agents ON agents.id = works.agent_id
         WHERE works.id = ?
         """,
@@ -125,7 +125,9 @@ def monitor_tail_fragment(request: Request, work_id: int):
         return _tail(request, note="This work is gone — it was closed or written off.")
 
     live = False
-    if work["output_tail"]:
+    # The stored tail is the failed turn's; a revived work keeps it for show(work),
+    # and here shows its own output instead.
+    if work["status"] == "failed" and work["output_tail"]:
         lines = work["output_tail"].splitlines()
     else:
         lines = get_bus(request).turn_tail(work["agent_name"])

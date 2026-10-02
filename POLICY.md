@@ -98,6 +98,12 @@ An invariant that no single change can violate on its own needs none.
 
 A test that asserts against a mechanism that no longer exists is deleted with the mechanism.
 
+A test checks what the code does with its inputs, never data or constants.
+
+No test pins a constant's value, a default, a setting, configured content, or the wording of a text the code writes.
+
+An assertion on a text checks only a value the code computed from its inputs.
+
 Nothing of our own is mocked.
 
 The only sanctioned stand-in is a vendor CLI.

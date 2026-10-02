@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import threading
 
 import pytest
 
 from office import db
 from office.config import Config
-
-FIXTURES_DIR = os.path.dirname(__file__)
 
 
 @pytest.fixture(autouse=True)

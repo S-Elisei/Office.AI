@@ -15,6 +15,7 @@ def main() -> None:
     parser.add_argument("--sleep", type=float, default=0.0)
     parser.add_argument("--limit", type=int, default=200_000)
     parser.add_argument("--dump", default=None)
+    parser.add_argument("--die", action="store_true")
     args, _ = parser.parse_known_args()
 
     line = sys.stdin.readline()
@@ -50,6 +51,12 @@ def main() -> None:
 
     if args.sleep:
         time.sleep(args.sleep)
+
+    if args.die:
+        # Invented: a vendor's error text, as a dying turn leaves it on stderr.
+        print("Error: Selected model is at capacity. Please try a different model.",
+              file=sys.stderr, flush=True)
+        sys.exit(1)
 
     print(
         json.dumps(

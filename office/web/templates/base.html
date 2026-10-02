@@ -23,6 +23,7 @@
     <a href="/chat" class="{{ 'active' if active == 'chat' }}"><svg class="nav-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.2 3.4h11.6v7.2H6.6L3.4 13.2v-2.6H2.2z"/></svg><span class="nav-label">Common chat</span>{{ nav_count(counts, 'chat') }}</a>
     <a href="/team" class="{{ 'active' if active == 'team' }}"><svg class="nav-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="6" cy="5.6" r="2.2"/><path d="M1.8 13.2c0-2.3 1.9-3.6 4.2-3.6s4.2 1.3 4.2 3.6"/><path d="M10.6 4.1a2.2 2.2 0 0 1 0 4.3"/><path d="M11.4 9.9c1.7.3 2.8 1.4 2.8 3.3"/></svg><span class="nav-label">Team</span></a>
     <a href="/knowledge" class="{{ 'active' if active == 'knowledge' }}"><svg class="nav-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.6h8.4a1.6 1.6 0 0 1 1.6 1.6v9.2H4.6A1.6 1.6 0 0 1 3 11.8z"/><path d="M3 11.8a1.6 1.6 0 0 1 1.6-1.6H13"/></svg><span class="nav-label">Knowledge</span></a>
+    <a href="/rules" class="{{ 'active' if active == 'rules' }}"><svg class="nav-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.4h8v11.2H4z"/><path d="M6.2 5.4h3.6M6.2 8h3.6M6.2 10.6h2.2"/></svg><span class="nav-label">Rules</span></a>
     <a href="/prs" class="{{ 'active' if active == 'prs' }}"><svg class="nav-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.4" cy="3.8" r="1.6"/><circle cx="4.4" cy="12.2" r="1.6"/><circle cx="11.6" cy="5.4" r="1.6"/><path d="M4.4 5.4v5.2M11.6 7v1.4c0 1.6-1.2 2.2-3 2.4"/></svg><span class="nav-label">Pull requests</span>{{ nav_count(counts, 'prs') }}</a>
     <a href="/notices" class="{{ 'active' if active == 'notices' }}"><svg class="nav-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 11.4V7.2a3.8 3.8 0 0 1 7.6 0v4.2z"/><path d="M2.8 11.4h10.4M6.6 13.2a1.6 1.6 0 0 0 2.8 0"/></svg><span class="nav-label">System notices</span></a>
     <a href="/settings" class="{{ 'active' if active == 'settings' }}"><svg class="nav-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.4 4.6h11.2M2.4 11.4h11.2"/><circle cx="6" cy="4.6" r="1.6"/><circle cx="10.4" cy="11.4" r="1.6"/></svg><span class="nav-label">Settings</span></a>
@@ -37,6 +38,13 @@
     {% block content %}{% endblock %}
   </main>
   <div id="office-notices" class="notice-area" aria-live="polite"></div>
+  <dialog id="file-dialog" class="task-dialog file-dialog">
+    <header class="task-dialog-head">
+      <div class="task-dialog-title" data-file-title></div>
+      <form method="dialog"><button type="submit" class="small">Close</button></form>
+    </header>
+    <div data-file-body></div>
+  </dialog>
   <script src="/static/app.js"></script>
 </body>
 </html>

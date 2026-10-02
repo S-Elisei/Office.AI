@@ -113,7 +113,7 @@ class ModelInfo:
 
 @dataclass
 class Event:
-    kind: str  # "text" | "tool" | "usage" | "turn_end" | "error" | "compact"
+    kind: str  # "text" | "tool" | "usage" | "turn_end" | "error" | "compact" | "quota"
     text: str | None = None
     session_id: str | None = None
     context_used: int | None = None
@@ -124,6 +124,10 @@ class Event:
     # "started" | "finished" on a `tool` event, None everywhere else.
     # Every way a call can end is "finished", a failure included.
     phase: str | None = None
+    # On a `tool` event: (id, summary) of each call the event starts (phase
+    # "started") or ends ("finished"). The id is the vendor's own and is the same
+    # on both events of one call.
+    calls: tuple[tuple[str, str | None], ...] = ()
     # One model request as far as this event reports it: `key` (events with the
     # same key are one request, the later one's numbers standing), `at`,
     # `model`, `input` (not read from the cache), `cache_read`, `cache_write`,
@@ -133,6 +137,9 @@ class Event:
     # On `turn_end`: the process's own totals, under the same number keys as
     # `request`. An adapter with a `turn_totals` supplies its own and sets none.
     totals: dict | None = None
+    # On a `quota` event: the buckets the vendor reported, already under the
+    # office's window names; the vendor's other buckets go unmentioned.
+    quota: tuple[QuotaSnapshot, ...] = ()
 
 
 def clamp_fraction(value: float) -> float:
@@ -245,7 +252,7 @@ def window_occupancy(prompt_tokens, output_tokens) -> int | None:
 # Matched as substrings.
 _CONTEXT_LIMITS = {
     "claude": {"haiku": 200_000, "sonnet": 1_000_000, "opus": 1_000_000, "fable": 1_000_000},
-    "agy": {"gemini": 1_048_576},
+    "agy": {"gemini": 280_000},  # just above where agy compacts, not the model's window
 }
 
 

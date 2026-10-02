@@ -10,8 +10,11 @@ CREATE TABLE IF NOT EXISTS agents (
     manager_agent_id INTEGER REFERENCES agents(id),
     -- One line, set by the hire. NULL for the director.
     title TEXT,
-    -- Standing instructions, printed into this agent's system prompt. NULL when
-    -- there are none.
+    -- The role of an executor, one of the roles in effect when it was hired; every
+    -- work it is assigned is of this role. NULL for the director and the leads.
+    role TEXT,
+    -- Standing instructions of the director and the leads, printed into the
+    -- agent's system prompt. NULL when there are none.
     instructions TEXT,
     runtime TEXT NOT NULL CHECK (runtime IN ('claude', 'codex', 'agy')),
     model TEXT NOT NULL,
@@ -88,7 +91,7 @@ CREATE TABLE IF NOT EXISTS works (
     -- hub_restart: the assignee's turn died with the hub.
     fail_reason TEXT
         CHECK (fail_reason IN (
-            'context_overflow', 'quota_exhausted', 'tool_error', 'crash', 'killed', 'hub_restart'
+            'context_overflow', 'quota_exhausted', 'vendor_error', 'crash', 'killed', 'hub_restart'
         )),
     -- Why a work is 'paused', and when it could resume.
     -- resume_after is epoch seconds UTC; NULL when there is no reset time.
@@ -97,7 +100,14 @@ CREATE TABLE IF NOT EXISTS works (
     -- Raw tail of stdout, only ever populated on a crash-like failure;
     -- lives only until the work record itself is deleted.
     output_tail TEXT,
-    started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    -- What the work commits until it is closed: the price list's price of the work
+    -- on the assignee's runtime, and the assigner's coordination price on the
+    -- assigner's runtime. NULL where the work commits nothing.
+    price REAL,
+    price_runtime TEXT,
+    coordination REAL,
+    coordination_runtime TEXT
 );
 
 -- Delivery read tracking lives on agents (last_seen_message_id). The owner's
@@ -224,11 +234,14 @@ CREATE TABLE IF NOT EXISTS wiki_copies (
     PRIMARY KEY (workspace_id, path)
 );
 
--- `title` is one short line naming what the rule is about.
+-- `title` is one short line naming what the rule is about. `audience` is the
+-- agents the rule is for: 'everyone', 'managers' (the director and the leads),
+-- 'executors', or 'role:<role>' (the executors of that role).
 CREATE TABLE IF NOT EXISTS rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT,
     text TEXT NOT NULL,
+    audience TEXT NOT NULL DEFAULT 'everyone',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     created_by TEXT NOT NULL
 );
@@ -276,6 +289,21 @@ CREATE TABLE IF NOT EXISTS stages (
     reason TEXT
 );
 
+-- A shared resource is a name that at most one agent holds at a time. The agents
+-- waiting for a held resource are told when it is released.
+CREATE TABLE IF NOT EXISTS resources (
+    name TEXT PRIMARY KEY,
+    holder_agent_id INTEGER NOT NULL REFERENCES agents(id),
+    since TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS resource_waiters (
+    name TEXT NOT NULL,
+    agent_id INTEGER NOT NULL REFERENCES agents(id),
+    since TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (name, agent_id)
+);
+
 -- The chat and DM views read one page of history at a time, newest-first with a
 -- LIMIT and an `id <` cursor; the bus scans for undelivered rows by id.
 CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel, id);
@@ -285,24 +313,30 @@ CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender, id);
 -- Every ordering and every cursor in this office runs on `id`.
 
 -- The owner's price list of the works a manager assigns, in the order the owner
--- set. `price` is the owner's own text; the distinct roles are the roles assign
--- accepts.
+-- set; the distinct roles are the roles hire accepts. `price` is the average
+-- price of a work, from brief to close, in the currency of the runtime of the
+-- row's model. An empty `effort` means no effort (agy).
 CREATE TABLE IF NOT EXISTS price_works (
     position INTEGER PRIMARY KEY,
     role TEXT NOT NULL,
     complexity TEXT NOT NULL,
     model TEXT NOT NULL,
     effort TEXT NOT NULL,
-    price TEXT NOT NULL
+    price REAL NOT NULL
 );
 
 -- The owner's price list of what a lead spends on its own, in the order the
--- owner set. `price` is the owner's own text.
+-- owner set. A row with a `role` is the coordination of a work of that role by an
+-- assigner running on the row's model and effort, in the currency of the runtime
+-- of that model, and at most one row has a given role, model and effort; a NULL
+-- `role` is spending not tied to a work. An empty `effort` means no effort (agy).
 CREATE TABLE IF NOT EXISTS price_own (
     position INTEGER PRIMARY KEY,
     what TEXT NOT NULL,
-    size TEXT NOT NULL,
-    price TEXT NOT NULL
+    role TEXT,
+    model TEXT NOT NULL,
+    effort TEXT NOT NULL,
+    price REAL NOT NULL
 );
 
 -- One-off key/value config.
