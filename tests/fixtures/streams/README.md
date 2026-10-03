@@ -8,6 +8,7 @@ to `REDACTED`.
 | file | CLI |
 |---|---|
 | `claude_capture.jsonl` | claude 2.1.267 |
+| `claude_session_capture.jsonl` | claude 2.1.284, claude-haiku-4-5: the `assistant` and `user` lines of one turn of a session file, not stdout; its two message ids are `REDACTED-1` and `REDACTED-2` |
 | `codex_capture.jsonl` | codex 0.154.0 |
 | `codex_rollout_capture.jsonl` | codex 0.156.1: `token_count` lines of a session's rollout file, not stdout |
 | `codex_failed_mcp_tool_capture.jsonl` | codex |

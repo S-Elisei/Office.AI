@@ -254,6 +254,15 @@ class ClaudeAdapter:
         at = _reset_epoch(error)
         return at + 60 if at is not None else None
 
+    def turn_requests(self, session_id: str | None, since: str) -> list[dict]:
+        """The model requests of this session from `since` on, read off its session
+        file (session_requests). Empty when there is no such file."""
+        found = next(_projects_dir().glob(f"*/{session_id}.jsonl"), None) if session_id else None
+        if found is None:
+            return []
+        lines = found.read_text(encoding="utf-8", errors="replace").splitlines()
+        return session_requests(lines, since)
+
     def poll_quota(self, session_ids: Sequence[str] = ()) -> list[QuotaSnapshot] | None:
         """`claude -p /usage --output-format json`. Reaches the CLI only as the
         argv prompt.
@@ -394,6 +403,44 @@ def parse_usage_payload(payload: dict) -> list[QuotaSnapshot] | None:
     return snapshots or None
 
 
+def _projects_dir() -> Path:
+    """Where claude keeps its session files: `projects` under CLAUDE_CONFIG_DIR, or under
+    `.claude` in the home directory."""
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(config_dir) if config_dir else Path.home() / ".claude") / "projects"
+
+
+def session_requests(lines: list[str], since: str) -> list[dict]:
+    """One request per assistant message of a session file stamped at or after `since`,
+    in the keys of Event.request, with its output and thinking tokens. The lines of one message are
+    one request: the later numbers stand, the tools add up, the first moment stays."""
+    requests: dict = {}
+    for line in lines:
+        if '"assistant"' not in line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        stamp = msg.get("timestamp")
+        if msg.get("type") != "assistant" or not isinstance(stamp, str) or stamp < since:
+            continue
+        message = msg.get("message") or {}
+        blocks = message.get("content") or []
+        request = _request(msg, message, [b for b in blocks if b.get("type") == "tool_use"])
+        if request is None:
+            continue
+        usage = message["usage"]
+        request["output"] = usage.get("output_tokens")
+        request["thinking"] = (usage.get("output_tokens_details") or {}).get("thinking_tokens")
+        known = requests.get(request["key"])
+        if known is not None:
+            request["at"] = known["at"]
+            request["tools"] = list(dict.fromkeys(known["tools"] + request["tools"]))
+        requests[request["key"]] = request
+    return list(requests.values())
+
+
 def _usage_fetched_at() -> float | None:
     """When claude last wrote its usage cache, epoch seconds: `cachedUsageUtilization.fetchedAtMs`
     in `.claude.json` under CLAUDE_CONFIG_DIR, or in the home directory. None when it holds none."""
@@ -531,7 +578,8 @@ def _request(msg: dict, message: dict, calls: list[dict]) -> dict | None:
         "cache_read": usage.get("cache_read_input_tokens"),
         "cache_write": usage.get("cache_creation_input_tokens"),
         "cache_write_1h": (usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens"),
-        # Not recorded per request; usage_turns holds the turn's total.
+        # The stream's figures are not the message's final counts; session_requests
+        # sets both from the session file.
         "output": None,
         "thinking": None,
         "tools": tools,

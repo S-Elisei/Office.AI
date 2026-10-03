@@ -462,6 +462,30 @@ def test_a_vendor_error_death_is_retried_and_the_fourth_in_a_row_fails_the_work(
     assert state.retry_at is None
 
 
+def test_a_turn_that_dies_on_a_reported_work_is_counted_against_the_work(
+    conn, config, monkeypatch
+):
+    make_agent(conn, "director1", kind="director")
+    exec_id = make_agent(conn, "exec1", manager="director1")
+    make_workspace(config, conn, exec_id, "ws-dies")
+    work = core.assign_work(
+        conn, agent_id=exec_id, brief="paint the fence", task_id=None, branch="fence",
+        complexity="medium", actor="director1",
+    )
+    core.finish_work(conn, work["id"], summary="painted", actor="exec1")
+    bus = Bus(conn, config)
+    monkeypatch.setattr(busmod, "adapter_for", lambda runtime, cfg: StubClaudeAdapter(die=True))
+
+    start_turn(bus, conn, "exec1")
+    finish_turn(bus, "exec1")
+
+    assert wait_until(lambda: db.query_one(conn, "SELECT id FROM usage_turns") is not None)
+    row = db.query_one(conn, "SELECT * FROM usage_turns")
+    assert row["outcome"] != "clean"
+    assert row["work_id"] == work["id"]
+    assert row["input_tokens"] > 0 and row["output_tokens"] == 7
+
+
 # --------------------------------------------------------------------------- quota hold
 
 

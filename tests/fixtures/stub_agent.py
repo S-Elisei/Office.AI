@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 
 def main() -> None:
@@ -31,21 +32,24 @@ def main() -> None:
             handle.write(prompt_text)
 
     session_id = os.environ.get("OFFICE_SESSION") or f"stub-{os.getpid()}"
+    message = {
+        "id": "msg-stub",
+        "role": "assistant",
+        "content": [{"type": "text", "text": f"ECHO:{prompt_text}"}],
+        "usage": {"input_tokens": int(args.limit * args.context_pct / 100.0)},
+    }
+
+    # Invented: the session file line of the message, as claude keeps one per session.
+    projects = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "stub")
+    os.makedirs(projects, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    with open(os.path.join(projects, f"{session_id}.jsonl"), "a", encoding="utf-8") as handle:
+        recorded = {**message, "usage": {**message["usage"], "output_tokens": 7}}
+        handle.write(json.dumps({"type": "assistant", "timestamp": stamp, "message": recorded}) + "\n")
 
     print(json.dumps({"type": "system", "subtype": "init", "session_id": session_id}), flush=True)
     print(
-        json.dumps(
-            {
-                "type": "assistant",
-                "session_id": session_id,
-                "message": {
-                    "id": "msg-stub",
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": f"ECHO:{prompt_text}"}],
-                    "usage": {"input_tokens": int(args.limit * args.context_pct / 100.0)},
-                },
-            }
-        ),
+        json.dumps({"type": "assistant", "session_id": session_id, "message": message}),
         flush=True,
     )
 

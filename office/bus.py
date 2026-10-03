@@ -1123,14 +1123,9 @@ class Bus:
 
     def _usage_meta(self, agent: dict, session_id: str | None, process: str) -> "_Usage":
         """What the usage_turns row of a process about to start records of it
-                from the start: the agent, its running work and the moment.
+                from the start: the agent, its open work and the moment.
         """
-        work = db.query_one(
-            self.conn,
-            "SELECT id, task_id FROM works WHERE agent_id = ? AND status = 'running' "
-            "ORDER BY id DESC",
-            (agent["id"],),
-        )
+        work = core.current_work(self.conn, agent["id"])
         return _Usage(
             row={
                 "agent": agent["name"],
@@ -1159,7 +1154,7 @@ class Bus:
                 requests = adapter.turn_requests(row["session_id"], row["started_at"])
             totals = (
                 adapter.turn_totals(requests) if hasattr(adapter, "turn_totals") else usage.totals
-            ) or {}
+            ) or _request_sums(requests)
             row.update({f"{key}_tokens": totals.get(key) for key in _USAGE_COUNTS})
             row.update(
                 ended_at=_utc_stamp(),
@@ -2032,6 +2027,16 @@ class Bus:
 
 #: The number keys of Event.request and Event.totals, each a `<key>_tokens` column.
 _USAGE_COUNTS = ("input", "cache_read", "cache_write", "cache_write_1h", "output", "thinking")
+
+
+def _request_sums(requests: list[dict]) -> dict:
+    """Totals in the keys of Event.totals summed over `requests`: None for a count no
+    request reports."""
+    return {
+        key: sum(r[key] for r in requests if r[key] is not None)
+        if any(r[key] is not None for r in requests) else None
+        for key in _USAGE_COUNTS
+    }
 
 
 def _utc_stamp() -> str:

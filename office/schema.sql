@@ -471,8 +471,8 @@ CREATE TABLE IF NOT EXISTS usage_turns (
     process TEXT NOT NULL CHECK (process IN ('turn', 'compact', 'ping')),
     -- 1 when the turn opened its session.
     new_session INTEGER NOT NULL DEFAULT 0,
-    -- The agent's running work and its task as the process started; no foreign
-    -- key, since a closed work's row is deleted.
+    -- The agent's open work, in whatever status, and its task as the process
+    -- started; no foreign key, since a closed work's row is deleted.
     work_id INTEGER,
     task_id INTEGER,
     -- The distinct senders of the direct messages the turn started with, in
@@ -486,9 +486,9 @@ CREATE TABLE IF NOT EXISTS usage_turns (
     -- 'clean', or the death's reason.
     outcome TEXT NOT NULL,
     context_used INTEGER,
-    -- The process's own totals: as the vendor printed them, except agy's, which
-    -- are the sums of the process's requests, NULL for a process with none; NULL
-    -- where the vendor prints none.
+    -- The process's own totals: as the vendor printed them, except agy's, and
+    -- those of a process that ended without printing them, which are the sums of
+    -- its requests; NULL for a process with none, and where no request reports one.
     input_tokens INTEGER,
     cache_read_tokens INTEGER,
     cache_write_tokens INTEGER,
@@ -513,9 +513,10 @@ CREATE TABLE IF NOT EXISTS usage_requests (
     cache_write_tokens INTEGER,
     -- claude: the part of cache_write_tokens written with the one-hour TTL.
     cache_write_1h_tokens INTEGER,
-    -- NULL for claude.
+    -- claude: read off the session file.
     output_tokens INTEGER,
-    -- codex: reasoning_output_tokens; agy: thinking_tokens; claude: NULL.
+    -- codex: reasoning_output_tokens; agy: thinking_tokens; claude:
+    -- output_tokens_details.thinking_tokens, read off the session file.
     thinking_tokens INTEGER,
     -- Tool names called in this request, comma-separated; an office tool with
     -- an op as '<tool>:<op>'. NULL where the vendor does not say (codex, agy).

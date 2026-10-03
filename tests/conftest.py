@@ -12,8 +12,10 @@ from office.config import Config
 
 @pytest.fixture(autouse=True)
 def office_root(tmp_path, monkeypatch):
-    """OFFICE_ROOT names the data directory of the `config` fixture."""
+    """OFFICE_ROOT names the data directory of the `config` fixture; CLAUDE_CONFIG_DIR
+    names where claude and its stand-in keep session files."""
     monkeypatch.setenv("OFFICE_ROOT", str(tmp_path / "office-data"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
 
 
 @pytest.fixture

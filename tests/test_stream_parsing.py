@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from office.adapters import shared
 from office.adapters.agy import AgyAdapter, reset_seconds
-from office.adapters.claude import AUTOCOMPACT, ClaudeAdapter, parse_usage_payload
+from office.adapters.claude import AUTOCOMPACT, ClaudeAdapter, parse_usage_payload, session_requests
 from office.adapters.codex import CodexAdapter, rollout_requests
 from office.process import _QUOTA_SIGNS, AgentTurn
 
@@ -92,6 +92,19 @@ def test_codex_rollout_requests_are_the_token_counts_since_the_turn_began():
 
     # The count repeated at the end of the earlier turn is one request, not two.
     assert len(rollout_requests(lines, "2026-09-27T17:00:00.000Z")) == 4
+
+
+def test_claude_session_requests_carry_the_output_the_stream_does_not():
+    lines = (STREAMS / "claude_session_capture.jsonl").read_text(encoding="utf-8").splitlines()
+
+    requests = session_requests(lines, "2026-10-03T19:59:08.000Z")
+    assert [(r["key"], r["tools"], r["output"], r["thinking"], r["cache_read"]) for r in requests] == [
+        ("REDACTED-1", ["Bash"], 144, 64, 0),
+        ("REDACTED-2", [], 80, 31, 33697),
+    ]
+    assert requests[0]["at"] == "2026-10-03T19:59:08.362Z"
+
+    assert [r["key"] for r in session_requests(lines, "2026-10-03T19:59:12.000Z")] == ["REDACTED-2"]
 
 
 def test_a_usage_reset_two_hours_ago_is_read_as_this_years():

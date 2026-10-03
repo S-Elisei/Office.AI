@@ -1979,7 +1979,7 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | Quota holds: runtime, model, the time of return | A hold outlives a hub restart |
 | Quota history: every reading that differs from the one before it for its bucket | Nothing in the office reads it; the owner does, with SQL |
 | The work log: one row per work, kept after the work is closed. Numbers and names, no text | The owner reads it with SQL |
-| Usage: one row per vendor process — a turn, a compaction or a keep-alive — with the agent, its work and task, who woke it, its outcome and its token totals; one row per model request and per compaction inside it. Numbers and names, no text. A turn's totals are the vendor's own, except agy's, which are the sums of its requests; a claude request's output count is NULL, the turn's total holds it | The keep-alive reads it; the owner reads the rest with SQL |
+| Usage: one row per vendor process — a turn, a compaction or a keep-alive — with the agent, its open work in whatever status and its task, who woke it, its outcome and its token totals; one row per model request and per compaction inside it. Numbers and names, no text. A turn's totals are the vendor's own, except agy's and those of a turn that ended without printing them, which are the sums of its requests; codex's requests are read off its rollout file and claude's off its session file | The keep-alive reads it; the owner reads the rest with SQL |
 | Each runtime's model catalogue | A snapshot, overwritten hourly |
 | Owner notices | The record of what happened while he was not looking |
 | How far the owner has read each conversation | Not recoverable from anywhere else |
