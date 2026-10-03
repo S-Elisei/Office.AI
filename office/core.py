@@ -699,12 +699,7 @@ def hire(
     if existing is not None:
         raise ValueError(f"an agent named '{name}' already exists")
     if adopt_workspace_id is not None:
-        ws_row = db.query_one(
-            conn,
-            "SELECT w.*, a.name AS owner FROM workspaces w "
-            "LEFT JOIN agents a ON a.id = w.owner_agent_id WHERE w.id = ?",
-            (adopt_workspace_id,),
-        )
+        ws_row = _workspace_with_owner(conn, adopt_workspace_id)
         if ws_row is None:
             raise ValueError(f"no such workspace '{adopt_workspace_id}' — roster() lists the ones that belong to nobody")
         if ws_row["owner"] is not None:
@@ -1454,7 +1449,8 @@ def ownerless_workspaces(conn) -> list[dict]:
 
     Firing an agent nulls owner_agent_id and leaves both the row and the
     directory, so a successor can take the tree over as it stands -
-    hire(adopt_workspace_id=...), which is the one route to it.
+    hire(adopt_workspace_id=...) - or the director can delete it -
+    delete_workspace().
     """
     return [
         dict(r)
@@ -1462,6 +1458,63 @@ def ownerless_workspaces(conn) -> list[dict]:
             conn, "SELECT * FROM workspaces WHERE owner_agent_id IS NULL ORDER BY id"
         )
     ]
+
+
+def _workspace_with_owner(conn, workspace_id: str):
+    """The workspace's row with `owner`, the owner's name, or None for no such workspace."""
+    return db.query_one(
+        conn,
+        "SELECT w.*, a.name AS owner FROM workspaces w "
+        "LEFT JOIN agents a ON a.id = w.owner_agent_id WHERE w.id = ?",
+        (workspace_id,),
+    )
+
+
+def delete_workspace(conn, config: Config, workspace_id: str) -> None:
+    """Delete a workspace that belongs to nobody.
+
+    Refuses one with an owner, one a work is on, and one whose tree holds
+    uncommitted changes or commits that no remote branch has. Then removes its directory, its sandbox
+    (which holds its wiki files and its stage artifacts) and its stage refs in
+    project.git, and then its rows in one transaction. A failure while removing
+    files raises and leaves the rows.
+
+    Blocking: call this off the event loop.
+    """
+    ws = _workspace_with_owner(conn, workspace_id)
+    if ws is None:
+        raise ValueError(f"no such workspace '{workspace_id}' — roster() lists the ones that belong to nobody")
+    if ws["owner"] is not None:
+        raise ValueError(
+            f"workspace '{workspace_id}' belongs to {ws['owner']} — only a workspace that "
+            "belongs to nobody can be deleted; roster() lists them"
+        )
+    work = db.query_one(conn, "SELECT id FROM works WHERE workspace_id = ? ORDER BY id", (workspace_id,))
+    if work is not None:
+        raise ValueError(
+            f"work {work['id']} is on workspace '{workspace_id}' — work_dismiss it or "
+            "work_reassign it, then delete the workspace"
+        )
+    tree = Path(ws["path"])
+    held = []
+    changed = git.uncommitted_paths(tree)
+    if changed:
+        held.append(f"{len(changed)} changed path(s) that are not committed")
+    unpublished, branches = git.unpublished_commits(tree)
+    if unpublished:
+        held.append(f"{unpublished} commit(s) that no remote branch has, on {', '.join(branches)}")
+    if held:
+        raise ValueError(
+            f"workspace '{workspace_id}' holds {' and '.join(held)} — adopt it with "
+            f"agent(op=hire, adopt_workspace_id='{workspace_id}') and have the new agent commit "
+            "and publish them, then delete it"
+        )
+    git._rmtree(config.scratch_dir / workspace_id)
+    git._rmtree(tree)
+    git.delete_stage_refs(config, workspace_id)
+    with db.transaction(conn):
+        db.execute(conn, "DELETE FROM wiki_copies WHERE workspace_id = ?", (workspace_id,))
+        db.execute(conn, "DELETE FROM workspaces WHERE id = ?", (workspace_id,))
 
 
 def team_tree(conn) -> list[dict]:

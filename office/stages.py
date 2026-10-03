@@ -27,8 +27,6 @@ REASON_LINES = 200
 #: How many changed paths outside LFS, and how many under it, a run's result names.
 RESULT_PATHS = 20
 
-_REF_PREFIX = "refs/office/stage/"
-
 #: A stage's LFS filters: content in the tree, not pointers.
 _LFS_ORDINARY = {
     "filter.lfs.process": "git-lfs filter-process",
@@ -139,7 +137,7 @@ def _said(proc) -> str:
 
 
 def _ref(stage: str, workspace_id: str) -> str:
-    return f"{_REF_PREFIX}{stage}/{workspace_id}"
+    return f"{git.STAGE_REF_PREFIX}{stage}/{workspace_id}"
 
 
 def _clone(config: Config, tree: Path, mark: str, note) -> str | None:
@@ -598,7 +596,7 @@ def _delete_now(conn, config: Config, name: str, actor: str | None, *, after_run
                          name=f"office-stage-trash-{name}").start()
     project = git.project_git(config)
     mark = marks.preparation_mark(name)
-    for ref in _git(["for-each-ref", "--format=%(refname)", f"{_REF_PREFIX}{name}"], project,
+    for ref in _git(["for-each-ref", "--format=%(refname)", f"{git.STAGE_REF_PREFIX}{name}"], project,
                     mark, check=True).stdout.split():
         dropped = _git(["update-ref", "-d", ref], project, mark)
         if dropped.returncode != 0:

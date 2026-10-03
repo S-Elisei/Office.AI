@@ -1628,6 +1628,7 @@ class Bus:
         """Whether something will move `agent`'s works: a turn of its own, or of the
                 other side of one of them, running or due (_turn_due); a direct message it has not read; a
                 deferred message it set or will get, or an expectation it holds open;
+                a place on a held resource's waiting list;
                 a running work it assigned to somebody else; or a direct message of
                 its own that its addressee has not taken yet — for the owner, one he
                 has not written back after.
@@ -1647,10 +1648,11 @@ class Bus:
             "AND recipient = ? AND id > ?) "
             "OR EXISTS (SELECT 1 FROM scheduled_messages WHERE sender = ? OR recipient = ?) "
             "OR EXISTS (SELECT 1 FROM expectations WHERE agent_id = ? AND closed_at IS NULL) "
+            "OR EXISTS (SELECT 1 FROM resource_waiters WHERE agent_id = ?) "
             "OR EXISTS (SELECT 1 FROM works WHERE assigned_by_agent_id = ? AND agent_id != ? "
             "AND status = 'running')",
             (name, agent["last_seen_message_id"] or 0, name, name, agent["id"], agent["id"],
-             agent["id"]),
+             agent["id"], agent["id"]),
         ) is not None:
             return True
         owner = core.get_owner_name(self.conn)

@@ -235,7 +235,8 @@ These are the tools of the MCP server named `office`:
   - `new_session` — drop an agent's conversation and keep its workspace;
   - `save_profile` — save a runtime, model and effort under a name;
   - `list_profiles` — list the saved profiles;
-  - `hire_from_profile` — hire with a saved profile.
+  - `hire_from_profile` — hire with a saved profile;
+  - `delete_workspace` — delete a workspace that belongs to nobody, its sandbox included.
 - `assign` — give a work to an agent, yourself included: a branch and a brief,
   optionally on a task. A work for an executor also takes a complexity of the
   executor's role.

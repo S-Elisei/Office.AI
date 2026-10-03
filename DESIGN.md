@@ -602,7 +602,8 @@ of the director's own that the owner stopped, which nobody answers for.
 
 Something **moves** an agent's works when it has a turn running, owed, or a retry of a
 dead turn pending (section 6), or the other side of one of them does; a direct message it has not read; a deferred message it set
-or will receive, or an expectation it holds open; a running work it assigned to
+or will receive, or an expectation it holds open; a place on a held resource's waiting
+list; a running work it assigned to
 somebody else; or a direct message of its own that its addressee has not taken —
 unread, or inside the addressee's running turn — and, for one to the owner, that
 he has not written back after. The director has one more while the owner has
@@ -916,6 +917,17 @@ A workspace outlives its owner: on firing it stays on disk with no owner, and
 `hire(adopt_workspace_id=…)` adopts it; `hire` refuses a workspace that has an owner,
 naming it. A sandbox belongs to its workspace (`<root>/scratch/<workspace-id>/`) and
 goes wherever the workspace goes.
+
+`agent(op=delete_workspace, workspace_id)` is the director's alone and takes a
+workspace that has no owner; it refuses one with an owner, naming it, one a work is
+on (a failed work of an agent that has since moved to another workspace), naming the
+work, and one whose
+working tree holds uncommitted changes or commits that no remote branch has,
+naming the count and, for the commits, the branches. It removes the sandbox, the
+workspace directory and the workspace's stage refs in every stage
+(`refs/office/stage/<stage>/<workspace-id>` in `project.git`), and then the
+workspace's rows, its `wiki_copies` included, in one transaction. A failure
+removing the files raises and leaves the rows.
 
 `work_reassign(workspace=inherit)` hands the work's workspace to the recipient
 together with everything uncommitted, and the workspace the recipient held until
@@ -1926,7 +1938,7 @@ The result is `run`'s, plus:
 - the artifacts folder and how many files it holds, once step 5 has emptied it.
 
 The ref is overwritten by that workspace's next run on the same stage and removed
-with the stage.
+with the stage, or with the workspace when the workspace is deleted.
 
 ### Visibility
 
@@ -2111,6 +2123,7 @@ Director only:
 
 ```
 stage(op, ...)   # create | reset | delete (section 12)
+agent(op=delete_workspace, workspace_id)   # a workspace that belongs to nobody (section 6)
 ```
 
 **A manager's reach is its subtree**, checked in code on every call:

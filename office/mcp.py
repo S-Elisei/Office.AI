@@ -1169,6 +1169,7 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
             "owner left in them: "
             f"{', '.join(w['id'] for w in ownerless)}. "
             "agent(op=hire, adopt_workspace_id=<id>) hands one to a new agent."
+            + (" agent(op=delete_workspace, workspace_id=<id>) removes one." if role == "director" else "")
         )
     return "\n".join(lines)
 
@@ -1368,6 +1369,15 @@ def _h_agent(conn, config, agent_name, role, args) -> str:
             f"{hired['kind']} '{hired['name']}' hired under you from profile "
             f"'{profile['name']}', status={hired['status']}"
         )
+    if op == "delete_workspace":
+        if role != "director":
+            raise PermissionError(
+                "agent(op=delete_workspace) is the director's alone — say() the director if a "
+                "workspace should go"
+            )
+        _require(args, "workspace_id")
+        core.delete_workspace(conn, config, args["workspace_id"])
+        return f"workspace '{args['workspace_id']}' deleted, its sandbox with it"
     if op == "list_profiles":
         profiles = core.list_profiles(conn)
         if not profiles:
@@ -1481,7 +1491,8 @@ def _h_agent(conn, config, agent_name, role, args) -> str:
         )
     raise ValueError(
         f"agent: unknown op '{op}' — expected hire, fire, stop, compact, new_session, instruct, "
-        "instructions, move, set_model, save_profile, hire_from_profile, or list_profiles"
+        "instructions, move, set_model, save_profile, hire_from_profile, delete_workspace, or "
+        "list_profiles"
     )
 
 
@@ -2092,7 +2103,7 @@ _TOOLS: dict[str, types.Tool] = {
         name="agent",
         description="The director's and the leads'. hire | fire | stop | compact | new_session | "
         "instruct | instructions | move | set_model | save_profile | hire_from_profile | "
-        "list_profiles. "
+        "delete_workspace | list_profiles. "
         "Every op that names an existing agent takes an agent under you: anyone whose chain of "
         "managers reaches you, not yourself. "
         "hire makes you the new agent's manager. It takes name, title (one line naming the "
@@ -2121,6 +2132,10 @@ _TOOLS: dict[str, types.Tool] = {
         "save_profile saves a composition (runtime, model, effort) under a name, for every "
         "manager. list_profiles lists the saved profiles. hire_from_profile hires with a saved "
         "one, taking name, title, role and lead as hire does. "
+        "delete_workspace is the director's alone. It takes workspace_id, a workspace that "
+        "belongs to nobody as roster() lists them, and deletes it with its sandbox. It "
+        "refuses a workspace that a work is on, and one whose tree holds uncommitted changes or "
+        "commits that no remote branch has. "
         "compact has the runtime summarize a session in place. The session and its id stay. "
         "claude only. new_session throws the conversation away and keeps the workspace, branch "
         "and working tree. The agent's next turn starts from a full state snapshot, on every "
@@ -2134,7 +2149,7 @@ _TOOLS: dict[str, types.Tool] = {
                     "enum": [
                         "hire", "fire", "stop", "compact", "new_session", "instruct",
                         "instructions", "move", "set_model", "save_profile", "hire_from_profile",
-                        "list_profiles",
+                        "delete_workspace", "list_profiles",
                     ],
                 },
                 "name": {"type": "string", "description": "Required for hire and hire_from_profile: the new agent's name. Latin letters, digits, '.', '_' and '-', starting and ending with a letter or a digit. Required for save_profile: the profile's name."},
@@ -2156,6 +2171,10 @@ _TOOLS: dict[str, types.Tool] = {
                 "adopt_workspace_id": {
                     "type": "string",
                     "description": "Optional for hire/hire_from_profile: take over a workspace that belongs to nobody, as roster() lists them, instead of a new clone.",
+                },
+                "workspace_id": {
+                    "type": "string",
+                    "description": "Required for delete_workspace: the id of the workspace to delete.",
                 },
                 "agent": {
                     "type": "string",

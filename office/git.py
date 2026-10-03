@@ -964,6 +964,38 @@ def transfer_workspace(path: Path | str, to_agent: str) -> None:
     """
     _set_identity(Path(path), to_agent)
 
+
+def uncommitted_paths(path: Path | str) -> list[str]:
+    """One status line per file of the working tree at `path` that differs from its
+    HEAD; untracked files that are not ignored are listed file by file."""
+    return git(["status", "--porcelain", "--untracked-files=all"], cwd=path).stdout.splitlines()
+
+
+def unpublished_commits(path: Path | str) -> tuple[int, list[str]]:
+    """The number of commits on the local branches and HEAD of the repository at `path`
+    that no remote-tracking ref reaches, and the names of the branches that hold them
+    (HEAD when it is detached)."""
+    total = int(_out(["rev-list", "--count", "--branches", "HEAD", "--not", "--remotes"], path))
+    if not total:
+        return 0, []
+    refs = _out(["for-each-ref", "--format=%(refname:short)", "refs/heads"], path).split()
+    if _out(["rev-parse", "--abbrev-ref", "HEAD"], path) == "HEAD":
+        refs.append("HEAD")
+    return total, [r for r in refs if int(_out(["rev-list", "--count", r, "--not", "--remotes"], path))]
+
+
+#: The refs project.git holds for what a stage run was given: <prefix><stage>/<workspace-id>.
+STAGE_REF_PREFIX = "refs/office/stage/"
+
+
+def delete_stage_refs(config: Config, workspace_id: str) -> None:
+    """Delete from project.git the stage refs of one workspace, in every stage."""
+    project = project_git(config)
+    for ref in git(["for-each-ref", "--format=%(refname)", STAGE_REF_PREFIX],
+                   cwd=project).stdout.split():
+        if ref.rsplit("/", 1)[1] == workspace_id:
+            git(["update-ref", "-d", ref], cwd=project)
+
 # --------------------------------------------------------------------------- publish
 
 
