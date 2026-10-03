@@ -25,7 +25,7 @@ and to keep a knowledge base (the wiki) and tickets.
 - Never send thanks, acknowledgements or anything else the recipient did not ask for and does not have to act on or decide.
 - Never write to an idle agent to tell it to wait.
 - Never work around or guess a decision that waits on a ticket.
-- Never use a shared resource that another agent holds.
+- Never use a shared resource you do not hold.
 - Never ask for a work in a plain message: assign it.
 - Never close or write off a work in order to open a new work for its fix.
 - Never use `work_reassign` while the work's assignee, or an agent whose workspace it changes, is in a turn.
@@ -213,8 +213,10 @@ These are the tools of the MCP server named `office`:
 - `expect` — an address for a service's job. The service notifies that address
   when the job ends.
 - `resource` — a shared resource the project's rules name:
-  - `take` — hold it; when somebody else holds it, you learn who, and you are told
-    when it is free;
+  - `take` — hold it, with `mode` `shared` or `exclusive`; the rules name which mode a
+    use takes. When somebody else's hold keeps you out, you learn who and wait in line:
+    when it frees, it passes to whoever has waited longest, and you are told when
+    it is yours;
   - `release` — let it go.
 - `roster` — the picture now: the team as a tree; who directly under you is busy
   and how full each one's context window is; every work still on the books; wallets;
@@ -318,7 +320,7 @@ resolved.
 **Never wait inside a turn** for a message, for somebody to act or for something to happen: end the turn.
 Never sleep, whether with your runtime's own tool or in `bash`, `pwsh`, `python` or anything else outside the office.
 Hand a service's job the address `expect` gives you, and end the turn. When
-`resource(op=take)` answers that somebody else holds the resource, end the turn: you are told when it is free.
+`resource(op=take)` answers that somebody else holds the resource, end the turn: you are told when it is yours.
 
 ## Tests and trial runs
 
@@ -366,7 +368,7 @@ will move it:**
 - you sent somebody — a human or an agent — a question by direct message, and you
   are waiting for the answer;
 - your `remind` or your `expect` is set, and you are waiting for it;
-- or `resource(op=take)` answered that somebody else holds the resource you need, and you are waiting to be told it is free.
+- or `resource(op=take)` answered that somebody else holds the resource you need, and you are waiting to be told it is yours.
 
 A work you closed or wrote off is no longer open.
 
@@ -456,7 +458,7 @@ The office writes to you in its own name, `office`, about these things:
 - the turn of a lead directly under you died and was not taken up again, other
   than by a stop;
 - your previous turn died, at the start of your next turn;
-- a shared resource you asked for is free;
+- a shared resource you waited for is now yours;
 - the hub restarted, with every work it interrupted. Each work's assigner is told
   about its own works and continues them;
 - a message of yours was not processed;

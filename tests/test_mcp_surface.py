@@ -454,26 +454,104 @@ def test_an_assignment_with_a_complexity_that_is_not_in_effect_for_the_executors
     assert not failed, text
 
 
-def test_an_agent_that_takes_a_held_resource_is_told_when_its_holder_releases_it(conn, config):
+def test_a_released_resource_passes_to_the_agent_that_waited_longest(conn, config):
     add_agent(conn, "boss", "director")
     add_agent(conn, "first", "executor", manager="boss")
     add_agent(conn, "second", "executor", manager="boss")
+    add_agent(conn, "third", "executor", manager="boss")
     take = {"op": "take", "name": "test-stage"}
 
     failed, text = answer_to(conn, config, "first", "resource", take)
     assert not failed, text
-    failed, text = answer_to(conn, config, "second", "resource", take)
-    assert not failed, text
-    assert "first" in text, text
-    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM resource_waiters")["n"] == 1
+    for waiter in ("second", "third"):
+        failed, text = answer_to(conn, config, waiter, "resource", take)
+        assert not failed, text
+        assert "first" in text, text
 
     failed, text = answer_to(
         conn, config, "first", "resource", {"op": "release", "name": "test-stage"}
     )
 
     assert not failed, text
+    holder = db.query_one(
+        conn, "SELECT a.name FROM resources r JOIN agents a ON a.id = r.holder_agent_id "
+        "WHERE r.name = 'test-stage'",
+    )
+    assert holder["name"] == "second"
     told = db.query(conn, "SELECT channel, sender, body FROM messages WHERE recipient = 'second'")
     assert [(m["channel"], m["sender"]) for m in told] == [("dm", core.OFFICE_SENDER)]
     assert "test-stage" in told[0]["body"]
-    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM resources")["n"] == 0
-    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM resource_waiters")["n"] == 0
+    assert db.query(conn, "SELECT 1 FROM messages WHERE recipient = 'third'") == []
+    waiting = db.query(
+        conn, "SELECT a.name FROM resource_waiters w JOIN agents a ON a.id = w.agent_id"
+    )
+    assert [w["name"] for w in waiting] == ["third"]
+
+
+def test_a_shared_request_behind_an_exclusive_waiter_waits_for_it(conn, config):
+    add_agent(conn, "boss", "director")
+    for name in ("reader-a", "reader-b", "writer", "reader-c"):
+        add_agent(conn, name, "executor", manager="boss")
+
+    def take(agent, mode):
+        failed, text = answer_to(
+            conn, config, agent, "resource", {"op": "take", "name": "stage", "mode": mode}
+        )
+        assert not failed, text
+
+    def release(agent):
+        failed, text = answer_to(
+            conn, config, agent, "resource", {"op": "release", "name": "stage"}
+        )
+        assert not failed, text
+
+    def holders():
+        return sorted(
+            (r["name"], r["mode"])
+            for r in db.query(
+                conn,
+                "SELECT a.name, r.mode FROM resources r JOIN agents a ON a.id = r.holder_agent_id",
+            )
+        )
+
+    def waiting():
+        return [
+            r["name"]
+            for r in db.query(
+                conn,
+                "SELECT a.name FROM resource_waiters w JOIN agents a ON a.id = w.agent_id "
+                "ORDER BY w.since, a.id",
+            )
+        ]
+
+    def told(agent):
+        return db.query_one(
+            conn,
+            "SELECT COUNT(*) AS n FROM messages WHERE recipient = ? AND sender = ?",
+            (agent, core.OFFICE_SENDER),
+        )["n"]
+
+    take("reader-a", "shared")
+    take("reader-b", "shared")
+    assert holders() == [("reader-a", "shared"), ("reader-b", "shared")]
+    assert waiting() == []
+
+    take("writer", "exclusive")
+    take("reader-c", "shared")
+    assert holders() == [("reader-a", "shared"), ("reader-b", "shared")]
+    assert waiting() == ["writer", "reader-c"]
+
+    release("reader-a")
+    assert holders() == [("reader-b", "shared")]
+    assert waiting() == ["writer", "reader-c"]
+    assert told("writer") == 0
+
+    release("reader-b")
+    assert holders() == [("writer", "exclusive")]
+    assert waiting() == ["reader-c"]
+    assert (told("writer"), told("reader-c")) == (1, 0)
+
+    release("writer")
+    assert holders() == [("reader-c", "shared")]
+    assert waiting() == []
+    assert told("reader-c") == 1

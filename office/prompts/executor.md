@@ -25,7 +25,7 @@ and to keep a knowledge base (the wiki) and tickets.
 - Never send thanks, acknowledgements or anything else the recipient did not ask for and does not have to act on or decide.
 - Never write to an idle agent to tell it to wait.
 - Never work around or guess a decision that waits on a ticket.
-- Never use a shared resource that another agent holds.
+- Never use a shared resource you do not hold.
 - Never guess a branch name.
 - Never close your own work.
 - Never make a branch for a job with nothing to merge.
@@ -160,8 +160,10 @@ These are the tools of the MCP server named `office`:
 - `expect` — an address for a service's job. The service notifies that address
   when the job ends.
 - `resource` — a shared resource the project's rules name:
-  - `take` — hold it; when somebody else holds it, you learn who, and you are told
-    when it is free;
+  - `take` — hold it, with `mode` `shared` or `exclusive`; the rules name which mode a
+    use takes. When somebody else's hold keeps you out, you learn who and wait in line:
+    when it frees, it passes to whoever has waited longest, and you are told when
+    it is yours;
   - `release` — let it go.
 - `work` — your own work:
   - `show` — the brief, the branch, who assigned it and its status;
@@ -241,7 +243,7 @@ resolved.
 **Never wait inside a turn** for a message, for somebody to act or for something to happen: end the turn.
 Never sleep, whether with your runtime's own tool or in `bash`, `pwsh`, `python` or anything else outside the office.
 Hand a service's job the address `expect` gives you, and end the turn. When
-`resource(op=take)` answers that somebody else holds the resource, end the turn: you are told when it is free.
+`resource(op=take)` answers that somebody else holds the resource, end the turn: you are told when it is yours.
 
 ## Messages come to you
 
@@ -260,7 +262,7 @@ The office writes to you in its own name, `office`, about these things:
 - an expectation of yours ran out of time;
 - a work of yours was closed;
 - your previous turn died, at the start of your next turn;
-- a shared resource you asked for is free;
+- a shared resource you waited for is now yours;
 - a reassignment changed your workspace, with your workspace and sandbox paths.
   From then on those paths are yours;
 - you were moved, with the name of your new manager;
@@ -310,7 +312,7 @@ move it:**
 - you sent somebody — a human or an agent — a question by direct message, and you
   are waiting for the answer;
 - your `remind` or your `expect` is set, and you are waiting for it;
-- or `resource(op=take)` answered that somebody else holds the resource you need, and you are waiting to be told it is free.
+- or `resource(op=take)` answered that somebody else holds the resource you need, and you are waiting to be told it is yours.
 
 **Stopping to ask is normal.** If you need something to go
 on, end the turn by asking for it. A question you are not blocked on does not

@@ -200,8 +200,18 @@ def _h_expect(conn, config, agent_name, role, args) -> str:
     )
 
 
+def _fmt_holds(holders: list[dict]) -> str:
+    """Each holder with its mode and since when: `a (shared) since ..., b (shared) since ...`."""
+    return ", ".join(f"{h['name']} ({h['mode']}) since {_fmt_stamp(h['since'])}" for h in holders)
+
+
+def _fmt_modes(agents: list[dict]) -> str:
+    """Each agent with its mode: `a (shared), b (exclusive)`."""
+    return ", ".join(f"{a['name']} ({a['mode']})" for a in agents)
+
+
 def _h_resource(conn, config, agent_name, role, args) -> str:
-    """A shared resource: held by one agent at a time, taken or released by name."""
+    """A shared resource: held shared or exclusive, taken or released by name."""
     op = args.get("op")
     if op not in ("take", "release"):
         raise ValueError(f"resource: unknown op '{op}' — expected take or release")
@@ -209,17 +219,21 @@ def _h_resource(conn, config, agent_name, role, args) -> str:
     name = args["name"]
     me = _agent_row(conn, agent_name)
     if op == "take":
-        taken = core.take_resource(conn, name, me["id"])
+        taken = core.take_resource(conn, name, me["id"], args.get("mode", "exclusive"))
         if taken["yours"]:
-            return f"you hold '{name}'"
+            return f"you hold '{name}' {taken['mode']}"
         return (
-            f"'{name}' is held by {taken['holder']} since {_fmt_stamp(taken['since'])}. You are "
-            "waiting for it: the office tells you when it is free."
+            f"'{name}' is held by {_fmt_holds(taken['holders'])}. You are in line for it: "
+            "the office tells you when it is yours."
         )
-    waiters = core.release_resource(conn, name, me)
-    if waiters:
-        return f"'{name}' is free. Told: {', '.join(waiters)}."
-    return f"'{name}' is free."
+    released, passed = core.release_resource(conn, name, me)
+    if released == [me["name"]]:
+        answer = f"'{name}' released"
+    else:
+        answer = f"'{name}' released for {', '.join(released)}"
+    if passed:
+        answer += f"; it passed to {_fmt_modes(passed)}"
+    return answer + "."
 
 
 _TASK_LIST_LINES = 200
@@ -1097,9 +1111,9 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
     if snap["resources"]:
         lines.append("Shared resources:")
         for r in snap["resources"]:
-            line = f"  {r['name']} — held by {r['holder']} since {_fmt_stamp(r['since'])}"
+            line = f"  {r['name']} — held by {_fmt_holds(r['holders'])}"
             if r["waiting"]:
-                line += f"; waiting: {', '.join(r['waiting'])}"
+                line += f"; in line: {_fmt_modes(r['waiting'])}"
             lines.append(line)
     if not manager:
         return "\n".join(lines)
@@ -1702,13 +1716,14 @@ _TOOLS: dict[str, types.Tool] = {
         "for every job you hand a service that notifies an address. Give the service the "
         "address and end your turn. What the service sends there reaches you as a direct "
         "message from hook:<service>, headed with `about`. If nothing arrives while the address "
-        "is open, it closes and you are told.",
+        "is open, it closes and you are told. An address takes one notification: open one for "
+        "each job.",
         input_schema={
             "type": "object",
             "properties": {
                 "about": {
                     "type": "string",
-                    "description": "What you are waiting for: the job or the batch.",
+                    "description": "What you are waiting for: the job.",
                 },
                 "within_seconds": {
                     "type": "integer",
@@ -1721,13 +1736,16 @@ _TOOLS: dict[str, types.Tool] = {
     ),
     "resource": types.Tool(
         name="resource",
-        description="Shared resources: take | release. A shared resource is a name that one "
-        "agent holds at a time. take holds it for you when it is free, and when it is already "
-        "yours. When another agent holds it, take answers with the holder and since when, and "
-        "records you as waiting: the office sends you a message when it is free. release frees "
-        "a resource you hold, or one held by an agent under you. Every agent waiting for it "
-        "gets a message from the office. roster() lists the resources that are held, with "
-        "their holders and the agents waiting.",
+        description="Shared resources: take | release. A shared resource is a name held in one "
+        "of two modes: shared, with any number of other agents holding it shared at once, or "
+        "exclusive, with nobody else holding it. take holds it for you when nobody is ahead of "
+        "you in line for it and no hold conflicts with your mode, and when it is already yours "
+        "in that mode. Otherwise take answers with the holders and their modes, and puts you in line "
+        "for it: the line is served oldest first, and nobody passes a waiter ahead of it. "
+        "release lets go of a resource you hold, or the holds of the agents under you: it then "
+        "passes down the line, and the office tells each agent it is given that it now holds "
+        "it. roster() lists the resources that are held, with their holders, their modes and "
+        "the agents in line.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1736,6 +1754,12 @@ _TOOLS: dict[str, types.Tool] = {
                     "type": "string",
                     "description": "Required. Lowercase letters, digits and hyphens, 1 to 40 "
                     "characters.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["shared", "exclusive"],
+                    "description": "For take. shared: a hold others may share. exclusive: a "
+                    "hold nobody else may share. exclusive when left out.",
                 },
             },
             "required": ["op", "name"],
@@ -2077,7 +2101,7 @@ _TOOLS: dict[str, types.Tool] = {
         "agent under its manager, with its title and, for an executor, its role; your "
         "workspace and sandbox paths; the "
         "stages, each with its state, who is running on it and who is waiting; the shared "
-        "resources that are held, each with its holder, since when and the agents waiting; "
+        "resources that are held, each with its holders, their modes and since when, and the agents in line; "
         "the reminders and open expectations you set. "
         "The director and a lead also get, for every agent directly under them, its status and "
         "how full its context window is; for every agent under them, the reminders and "
@@ -2135,7 +2159,7 @@ _TOOLS: dict[str, types.Tool] = {
         "delete_workspace is the director's alone. It takes workspace_id, a workspace that "
         "belongs to nobody as roster() lists them, and deletes it with its sandbox. It "
         "refuses a workspace that a work is on, and one whose tree holds uncommitted changes or "
-        "commits that no remote branch has. "
+        "commits, other than merges, that no remote branch has. "
         "compact has the runtime summarize a session in place. The session and its id stay. "
         "claude only. new_session throws the conversation away and keeps the workspace, branch "
         "and working tree. The agent's next turn starts from a full state snapshot, on every "

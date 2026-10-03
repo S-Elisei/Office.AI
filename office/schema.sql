@@ -289,17 +289,21 @@ CREATE TABLE IF NOT EXISTS stages (
     reason TEXT
 );
 
--- A shared resource is a name that at most one agent holds at a time. The agents
--- waiting for a held resource are told when it is released.
+-- A shared resource is a name held in one of two modes: `exclusive` by one agent
+-- and nobody else, or `shared` by any number of agents at once. One row per hold.
+-- The agents waiting for it are in line, oldest first, each with the mode it asked for.
 CREATE TABLE IF NOT EXISTS resources (
-    name TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
     holder_agent_id INTEGER NOT NULL REFERENCES agents(id),
-    since TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    mode TEXT NOT NULL CHECK (mode IN ('shared', 'exclusive')),
+    since TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (name, holder_agent_id)
 );
 
 CREATE TABLE IF NOT EXISTS resource_waiters (
     name TEXT NOT NULL,
     agent_id INTEGER NOT NULL REFERENCES agents(id),
+    mode TEXT NOT NULL CHECK (mode IN ('shared', 'exclusive')),
     since TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (name, agent_id)
 );

@@ -775,8 +775,8 @@ def fire(conn, agent_id: int, actor: str | None = None) -> None:
 
     Refuses while it still has an active work or a subordinate. Its failed works
     and its expectations go with the row (ON DELETE CASCADE), and the deferred
-    messages it set are deleted here. The shared resources it holds are released
-    and it leaves every waiting list.
+    messages it set are deleted here. Its holds of shared resources and its places
+    in line go, and each resource it held or waited for is granted from its line.
 
     The workspace is never deleted: workspaces.owner_agent_id -> NULL, so it
     sits free for the next hire, standing on whatever branch its last owner left
@@ -821,11 +821,19 @@ def fire(conn, agent_id: int, actor: str | None = None) -> None:
         ).rowcount
         if wakes:
             _emit(conn, "messages", "scheduled_message", None, {"deleted": True}, actor=actor)
-        for held in db.query(
-            conn, "SELECT name FROM resources WHERE holder_agent_id = ?", (agent_id,)
-        ):
-            _free_resource(conn, held["name"])
+        touched = [
+            row["name"]
+            for row in db.query(
+                conn,
+                "SELECT name FROM resources WHERE holder_agent_id = ? "
+                "UNION SELECT name FROM resource_waiters WHERE agent_id = ?",
+                (agent_id, agent_id),
+            )
+        ]
+        db.execute(conn, "DELETE FROM resources WHERE holder_agent_id = ?", (agent_id,))
         db.execute(conn, "DELETE FROM resource_waiters WHERE agent_id = ?", (agent_id,))
+        for name in touched:
+            _grant_from_line(conn, name)
         db.execute(conn, "DELETE FROM agents WHERE id = ?", (agent_id,))
         _emit(conn, "agents", "agent", agent_id, {"name": agent["name"], "status": "fired"}, actor=actor)
 
@@ -1474,7 +1482,7 @@ def delete_workspace(conn, config: Config, workspace_id: str) -> None:
     """Delete a workspace that belongs to nobody.
 
     Refuses one with an owner, one a work is on, and one whose tree holds
-    uncommitted changes or commits that no remote branch has. Then removes its directory, its sandbox
+    uncommitted changes or commits, other than merges, that no remote branch has. Then removes its directory, its sandbox
     (which holds its wiki files and its stage artifacts) and its stage refs in
     project.git, and then its rows in one transaction. A failure while removing
     files raises and leaves the rows.
@@ -1502,7 +1510,10 @@ def delete_workspace(conn, config: Config, workspace_id: str) -> None:
         held.append(f"{len(changed)} changed path(s) that are not committed")
     unpublished, branches = git.unpublished_commits(tree)
     if unpublished:
-        held.append(f"{unpublished} commit(s) that no remote branch has, on {', '.join(branches)}")
+        held.append(
+            f"{unpublished} commit(s), other than merges, that no remote branch has, on "
+            f"{', '.join(branches)}"
+        )
     if held:
         raise ValueError(
             f"workspace '{workspace_id}' holds {' and '.join(held)} — adopt it with "
@@ -3001,107 +3012,156 @@ def close_pr(conn, pr_id: int, actor: str) -> dict:
 
 # --------------------------------------------------------------------------- shared resources
 #
-# A shared resource is a name that at most one agent holds at a time. The only
-# write path into `resources` and `resource_waiters`.
+# A shared resource is a name held in one of two modes: `exclusive` by one agent and
+# nobody else, or `shared` by any number of agents at once, none of them exclusive.
+# `resources` has a row per hold, `resource_waiters` a row per agent in line. The only
+# write path into either.
 
 RESOURCE_NAME = re.compile(r"[a-z0-9-]{1,40}")
+RESOURCE_MODES = ("shared", "exclusive")
 
 
-def take_resource(conn, name: str, agent_id: int) -> dict:
-    """resource(op=take): the agent holds `name` when it is free or already its own;
-    held by another agent, the agent is recorded as waiting for it. Returns the
-    holder's name, `since` and whether the holder is the agent."""
+def take_resource(conn, name: str, agent_id: int, mode: str) -> dict:
+    """resource(op=take): the agent holds `name` in `mode` when it already does.
+    Otherwise it takes its place in line, or keeps its place with `mode` as the one
+    asked now, and the line is served (_grant_from_line), which grants it at once when
+    nobody is ahead of it and no hold conflicts with `mode`. Returns `yours` and, when
+    it holds, its `mode`; when it is in line, the `holders` with their `mode` and
+    `since`."""
     if not RESOURCE_NAME.fullmatch(name):
         raise ValueError(
             f"'{name}' is not a resource name: 1 to 40 lower-case letters, digits and '-'"
         )
+    if mode not in RESOURCE_MODES:
+        raise ValueError(f"'{mode}' is not a mode: shared or exclusive")
     with db.transaction(conn):
-        db.execute(
-            conn, "INSERT OR IGNORE INTO resources (name, holder_agent_id) VALUES (?, ?)",
+        mine = db.query_one(
+            conn, "SELECT mode FROM resources WHERE name = ? AND holder_agent_id = ?",
             (name, agent_id),
         )
-        held = db.query_one(
+        if mine is not None:
+            if mine["mode"] != mode:
+                raise ValueError(
+                    f"you hold '{name}' {mine['mode']}; release it, then take it {mode}"
+                )
+            return {"yours": True, "mode": mode}
+        db.execute(
             conn,
-            "SELECT r.holder_agent_id, r.since, a.name AS holder FROM resources r "
-            "JOIN agents a ON a.id = r.holder_agent_id WHERE r.name = ?",
+            "INSERT INTO resource_waiters (name, agent_id, mode) VALUES (?, ?, ?) "
+            "ON CONFLICT (name, agent_id) DO UPDATE SET mode = excluded.mode",
+            (name, agent_id, mode),
+        )
+        if any(g["id"] == agent_id for g in _grant_from_line(conn, name, asking=agent_id)):
+            return {"yours": True, "mode": mode}
+        holders = db.query(
+            conn,
+            "SELECT a.name, r.mode, r.since FROM resources r "
+            "JOIN agents a ON a.id = r.holder_agent_id WHERE r.name = ? ORDER BY r.since, a.id",
             (name,),
         )
-        yours = held["holder_agent_id"] == agent_id
-        if not yours:
-            db.execute(
-                conn, "INSERT OR IGNORE INTO resource_waiters (name, agent_id) VALUES (?, ?)",
-                (name, agent_id),
-            )
-    return {"holder": held["holder"], "since": held["since"], "yours": yours}
+    return {"yours": False, "holders": [dict(h) for h in holders]}
 
 
-def release_resource(conn, name: str, caller: dict) -> list[str]:
-    """resource(op=release): free `name`, held by `caller` or by an agent in its
-    subtree. Returns the names of the waiting agents, each told it is free."""
+def release_resource(conn, name: str, caller: dict) -> tuple[list[str], list[dict]]:
+    """resource(op=release): let go of `name`. The caller's own hold goes; when it has
+    none, the holds of every holder in its subtree go. Returns the names of the agents
+    whose hold went and, for each agent the line then granted, its `name` and `mode`."""
     with db.transaction(conn):
-        held = db.query_one(
+        holds = db.query(
             conn,
-            "SELECT r.holder_agent_id, a.name AS holder FROM resources r "
-            "JOIN agents a ON a.id = r.holder_agent_id WHERE r.name = ?",
+            "SELECT r.holder_agent_id AS id, a.name, r.mode FROM resources r "
+            "JOIN agents a ON a.id = r.holder_agent_id WHERE r.name = ? ORDER BY r.since, a.id",
             (name,),
         )
-        if held is None:
+        if not holds:
             raise ValueError(f"nobody holds '{name}' — roster() lists the resources that are held")
-        holder_id = held["holder_agent_id"]
-        if holder_id != caller["id"] and holder_id not in subtree_ids(conn, caller["id"]):
-            raise PermissionError(
-                f"'{name}' is held by {held['holder']}; only its holder, or a manager above "
-                "the holder, releases it"
+        released = [h for h in holds if h["id"] == caller["id"]]
+        if not released:
+            reach = subtree_ids(conn, caller["id"])
+            released = [h for h in holds if h["id"] in reach]
+            if not released:
+                named = ", ".join(f"{h['name']} ({h['mode']})" for h in holds)
+                raise PermissionError(
+                    f"'{name}' is held by {named}; only a holder, or a manager above a holder, "
+                    "releases it"
+                )
+        for hold in released:
+            db.execute(
+                conn, "DELETE FROM resources WHERE name = ? AND holder_agent_id = ?",
+                (name, hold["id"]),
             )
-        return _free_resource(conn, name)
+        return [h["name"] for h in released], _grant_from_line(conn, name)
 
 
-def _free_resource(conn, name: str) -> list[str]:
-    """Delete the resource and its waiting list, and send each waiting agent a direct
-    message from the office saying it is free. Call inside db.transaction(). Returns
-    the names of the agents told, the longest-waiting first."""
-    waiters = [
-        row["name"]
-        for row in db.query(
-            conn,
-            "SELECT a.name FROM resource_waiters w JOIN agents a ON a.id = w.agent_id "
-            "WHERE w.name = ? ORDER BY w.since, a.id",
-            (name,),
+def _grant_from_line(conn, name: str, asking: int | None = None) -> list[dict]:
+    """Walk the line for `name`, oldest first, and grant each waiter its mode until one
+    cannot be granted: an exclusive waiter needs nobody holding `name`, a shared one
+    needs nobody holding it exclusive. Nobody passes a waiter ahead of it. Each agent
+    granted leaves the line, becomes a holder and gets a direct message from the
+    office, except `asking`, the agent whose take is being answered. Call inside
+    db.transaction() after any hold or place in line changes. Returns the `id`, `name`
+    and `mode` of each agent granted."""
+    modes = [r["mode"] for r in db.query(conn, "SELECT mode FROM resources WHERE name = ?", (name,))]
+    held = bool(modes)
+    exclusive = "exclusive" in modes
+    granted = []
+    for waiter in db.query(
+        conn,
+        "SELECT a.id, a.name, w.mode FROM resource_waiters w JOIN agents a ON a.id = w.agent_id "
+        "WHERE w.name = ? ORDER BY w.since, a.id",
+        (name,),
+    ):
+        if held if waiter["mode"] == "exclusive" else exclusive:
+            break
+        db.execute(
+            conn, "DELETE FROM resource_waiters WHERE name = ? AND agent_id = ?",
+            (name, waiter["id"]),
         )
-    ]
-    db.execute(conn, "DELETE FROM resource_waiters WHERE name = ?", (name,))
-    db.execute(conn, "DELETE FROM resources WHERE name = ?", (name,))
-    for waiter in waiters:
+        db.execute(
+            conn, "INSERT INTO resources (name, holder_agent_id, mode) VALUES (?, ?, ?)",
+            (name, waiter["id"], waiter["mode"]),
+        )
+        held = True
+        exclusive = waiter["mode"] == "exclusive"
+        granted.append({"id": waiter["id"], "name": waiter["name"], "mode": waiter["mode"]})
+        if waiter["id"] == asking:
+            continue
         _write_message(
-            conn, "dm", OFFICE_SENDER, waiter,
-            f"The shared resource '{name}' is free. resource(op=take, name='{name}') takes it.",
+            conn, "dm", OFFICE_SENDER, waiter["name"],
+            f"The shared resource '{name}' is now yours ({waiter['mode']}): you were next in "
+            f"line. resource(op=release, name='{name}') when you are done with it, at once if "
+            "you no longer need it.",
             OFFICE_SENDER,
         )
-    return waiters
+    return granted
 
 
 def held_resources(conn) -> list[dict]:
-    """Every held resource by name: `name`, `holder`, `since` and the names of the
-    agents `waiting` for it, the longest-waiting first."""
-    held = [
-        dict(r)
-        for r in db.query(
-            conn,
-            "SELECT r.name, a.name AS holder, r.since FROM resources r "
-            "JOIN agents a ON a.id = r.holder_agent_id ORDER BY r.name",
+    """Every held resource by name: `name`, its `holders` (each `name`, `mode` and
+    `since`, the earliest first) and the agents `waiting` for it (each `name` and
+    `mode`), the longest-waiting first."""
+    resources: list[dict] = []
+    for row in db.query(
+        conn,
+        "SELECT r.name, a.name AS holder, r.mode, r.since FROM resources r "
+        "JOIN agents a ON a.id = r.holder_agent_id ORDER BY r.name, r.since, a.id",
+    ):
+        if not resources or resources[-1]["name"] != row["name"]:
+            resources.append({"name": row["name"], "holders": []})
+        resources[-1]["holders"].append(
+            {"name": row["holder"], "mode": row["mode"], "since": row["since"]}
         )
-    ]
-    for resource in held:
+    for resource in resources:
         resource["waiting"] = [
-            r["name"]
+            dict(r)
             for r in db.query(
                 conn,
-                "SELECT a.name FROM resource_waiters w JOIN agents a ON a.id = w.agent_id "
+                "SELECT a.name, w.mode FROM resource_waiters w JOIN agents a ON a.id = w.agent_id "
                 "WHERE w.name = ? ORDER BY w.since, a.id",
                 (resource["name"],),
             )
         ]
-    return held
+    return resources
 
 
 # --------------------------------------------------------------------------- wiki & rules

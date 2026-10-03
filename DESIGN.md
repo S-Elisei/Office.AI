@@ -922,8 +922,8 @@ goes wherever the workspace goes.
 workspace that has no owner; it refuses one with an owner, naming it, one a work is
 on (a failed work of an agent that has since moved to another workspace), naming the
 work, and one whose
-working tree holds uncommitted changes or commits that no remote branch has,
-naming the count and, for the commits, the branches. It removes the sandbox, the
+working tree holds uncommitted changes or commits, other than merges, that no remote
+branch has, naming the count and, for the commits, the branches. It removes the sandbox, the
 workspace directory and the workspace's stage refs in every stage
 (`refs/office/stage/<stage>/<workspace-id>` in `project.git`), and then the
 workspace's rows, its `wiki_copies` included, in one transaction. A failure
@@ -1969,7 +1969,7 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | Agents: kind, an executor's role, manager, title, standing instructions, composition, runtime/model/effort, workspace path | Not recoverable |
 | Tasks, each with its parent, and their dependencies | This is the plan |
 | Rules, each with its audience, and wiki | What the database exists for |
-| Shared resources that are held, and the agents waiting for each | Live state |
+| Shared resources that are held, each hold with its mode, and the agents in line for each | Live state |
 | Wiki copies: per workspace and page, the version and body last written into its file | The base a publish is merged from |
 | Open PRs and their comments | git holds no metadata |
 | Works that are still on the books: brief, assignee, assigner, session id, what each commits | Live state |
@@ -2092,7 +2092,7 @@ chat(before_id?)                 # the common chat, newest page first, cursor ba
 remind(op, ...)                  # set(to, text, in_seconds) — the same message, sent later; wakes the addressee
                                  # cancel(reminder_id) — one of your own that has not gone
 expect(about, within_seconds?)   # an address a service notifies; its answer or the due time wakes you
-resource(op, name)               # take | release — a shared resource, held by one agent at a time
+resource(op, name, mode?)        # take | release — a shared resource, held shared or exclusive; mode is for take
 task(op, ...)                    # list | read | create | update | move | link (link with remove=true drops it)
                                  # list(parent?, status?, query?) — one level, or a search under parent or over the board
 work(op, ...)                    # show — your brief, branch and assigner
@@ -2170,8 +2170,8 @@ any work is on the task.
 `roster()` answers by role. Everyone gets the whole team as a tree — each agent's
 name, title, kind, runtime and model, and for an executor its role, indented under
 its manager — its own workspace and sandbox paths, the stages, as section 12 lists,
-the shared resources that are held, each with its holder, since when and the agents
-waiting, and the deferred messages it set itself, each with its number, and the open
+the shared resources that are held, each with its holders, their modes and since when,
+and the agents in line with their modes, and the deferred messages it set itself, each with its number, and the open
 expectations it set. A
 manager additionally gets, for each agent directly under it, its status and context
 fill; for its subtree, every deferred message and open expectation; every work that is not finished
@@ -2195,17 +2195,27 @@ report to the sender if the turn died. A due time that passed while the hub was
 down fires on the first tick after startup.
 
 **Shared resources.** A shared resource is a name of 1 to 40 lowercase letters, digits
-and `-` that at most one agent holds at a time (`resources`; the agents waiting for it
-are `resource_waiters`). `resource(op=take, name)` makes the caller the holder when
-the resource is free or already its own; when another agent holds it, the caller is
-recorded as waiting, and the answer names the holder and since when. The decision and
-the write are one transaction. `resource(op=release, name)` takes a resource held by
-the caller or by an agent in its subtree, the director's being every agent; it frees
-the resource and sends every agent waiting for it a direct message from `office`, which
-gives that agent a turn, and clears the waiting list. A release of a resource nobody
-holds, or of one held outside the caller's reach, is refused with the state. Firing an
-agent releases every resource it holds, telling the waiters in the same way, and
-removes it from every waiting list.
+and `-`, held in one of two modes: `exclusive` by one agent and nobody else, or `shared`
+by any number of agents at once. `resources` has a row per hold, with its mode; the
+agents waiting for the name, each with the mode it asked for, are `resource_waiters`.
+`resource(op=take, name, mode)` takes `mode` `shared` or `exclusive`, `exclusive` when it
+is left out. When the caller already holds the name, the answer says so with the mode
+it holds; asking for the other mode is refused. Otherwise the caller joins the line, or
+keeps its place in it with the mode it asked now, and the line is walked as below; when
+the walk grants the caller, the answer says it holds the name, and otherwise it names the
+holders with their modes. The caller is granted at once when nobody is ahead of it and no
+hold conflicts with its mode: for `exclusive`, nobody holds the name; for `shared`,
+nobody holds it exclusive. The decision and the write are one transaction. `resource(op=release, name)` lets go of the caller's own hold; when the
+caller holds none, of the holds of every holder in its subtree, the director's being
+every agent. A release of a name nobody holds, or whose holders are all outside the
+caller's reach, is refused with the state. After every take, release and firing, the
+office walks the line for the name, oldest first: an exclusive waiter is granted when
+nobody holds the name, a shared waiter when nobody holds it exclusive, and the walk
+stops at the first waiter that cannot be granted, so nobody passes a waiter ahead of
+it. Each agent granted leaves the line, becomes a holder in its mode, and, unless it is
+the caller of the take being answered, gets a direct message from `office` saying the resource is now its own, which gives it a turn; the
+others stay in line and are told nothing. Firing an agent removes its holds and its
+places in line, and walks the line of every resource it held or waited for.
 
 `all` is not accepted as a recipient: a post to the common chat wakes nobody, so a
 deferred one would arrive at the appointed moment and do nothing. The ceiling is
@@ -2220,7 +2230,7 @@ first), while an open PR names it as author, and while any vendor process is
 speaking on its session — a turn or a compaction. The decision and the deletion
 happen under the same lock that starts turns. The fired agent's failed works are
 deleted with it, and so are the deferred messages it set and its expectations; the
-shared resources it held are released.
+shared resources it held are released to the lines waiting for them.
 
 The managers' tools are hidden from an executor's `tools/list` and rejected by name
 if it calls them; `stage` is hidden from a lead and rejected the same way.

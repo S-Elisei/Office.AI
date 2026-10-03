@@ -972,16 +972,18 @@ def uncommitted_paths(path: Path | str) -> list[str]:
 
 
 def unpublished_commits(path: Path | str) -> tuple[int, list[str]]:
-    """The number of commits on the local branches and HEAD of the repository at `path`
-    that no remote-tracking ref reaches, and the names of the branches that hold them
-    (HEAD when it is detached)."""
-    total = int(_out(["rev-list", "--count", "--branches", "HEAD", "--not", "--remotes"], path))
+    """The number of commits other than merges on the local branches and HEAD of the
+    repository at `path` that no remote-tracking ref reaches, and the names of the
+    branches that hold them (HEAD when it is detached)."""
+    total = int(_out(["rev-list", "--count", "--no-merges", "--branches", "HEAD", "--not",
+                      "--remotes"], path))
     if not total:
         return 0, []
     refs = _out(["for-each-ref", "--format=%(refname:short)", "refs/heads"], path).split()
     if _out(["rev-parse", "--abbrev-ref", "HEAD"], path) == "HEAD":
         refs.append("HEAD")
-    return total, [r for r in refs if int(_out(["rev-list", "--count", r, "--not", "--remotes"], path))]
+    return total, [r for r in refs if int(_out(["rev-list", "--count", "--no-merges", r, "--not",
+                                                "--remotes"], path))]
 
 
 #: The refs project.git holds for what a stage run was given: <prefix><stage>/<workspace-id>.
