@@ -82,6 +82,19 @@ def answer_to(conn, config, agent, name, arguments) -> tuple[bool, str]:
     )
 
 
+def look_at_roster(conn, config, agent) -> None:
+    """`agent` calls roster(), given a workspace row first if it owns none."""
+    if core.workspace_of(conn, agent_row(conn, agent)["id"]) is None:
+        with db.transaction(conn) as c:
+            c.execute(
+                "INSERT INTO workspaces (id, path, owner_agent_id) "
+                "VALUES (?, ?, (SELECT id FROM agents WHERE name = ?))",
+                (f"ws-{agent}", str(config.ws_dir / f"ws-{agent}"), agent),
+            )
+    failed, text = answer_to(conn, config, agent, "roster", {})
+    assert not failed, text
+
+
 def row_counts(conn) -> dict[str, int]:
     tables = [
         row["name"]
@@ -136,6 +149,8 @@ def test_a_lead_reaches_nothing_outside_its_own_subtree(conn, config):
     add_agent(conn, "s-hand", "executor", manager="south")
     add_agent(conn, "n-lead", "lead", manager="north")
     add_agent(conn, "s-lead", "lead", manager="south")
+    look_at_roster(conn, config, "south")
+    look_at_roster(conn, config, "north")
     failed, text = answer_to(
         conn, config, "south", "assign",
         {"agent": "s-hand", "brief": "dig", "branch": "main", "complexity": "medium"},
@@ -205,6 +220,7 @@ def test_a_move_is_refused_while_a_failed_work_would_leave_its_assigner_behind(c
     add_agent(conn, "north", "lead", manager="boss")
     add_agent(conn, "south", "lead", manager="boss")
     add_agent(conn, "hand", "executor", manager="north")
+    look_at_roster(conn, config, "north")
     failed, text = answer_to(
         conn, config, "north", "assign",
         {"agent": "hand", "brief": "dig", "branch": "main", "complexity": "medium"},
@@ -381,6 +397,7 @@ def test_an_inherited_workspace_is_swapped_for_the_recipients_own(conn, config):
     add_agent(conn, "second", "executor", manager="boss")
     first_tree = git_workspace(conn, config, "first", "ws-first")
     second_tree = git_workspace(conn, config, "second", "ws-second")
+    look_at_roster(conn, config, "boss")
     failed, text = answer_to(
         conn, config, "boss", "assign",
         {"agent": "first", "brief": "dig", "branch": "main", "complexity": "medium"},
@@ -401,7 +418,7 @@ def test_an_inherited_workspace_is_swapped_for_the_recipients_own(conn, config):
             "SELECT w.id, a.name FROM workspaces w LEFT JOIN agents a ON a.id = w.owner_agent_id",
         )
     }
-    assert owners == {"ws-first": "second", "ws-second": "first"}
+    assert owners == {"ws-first": "second", "ws-second": "first", "ws-boss": "boss"}
     assert db.query_one(conn, "SELECT workspace_id FROM works")["workspace_id"] == "ws-first"
     for agent, tree, ws_id in (("second", first_tree, "ws-first"), ("first", second_tree, "ws-second")):
         told = db.query_one(
@@ -420,6 +437,7 @@ def test_an_inherited_workspace_is_swapped_for_the_recipients_own(conn, config):
 def test_an_assignment_with_a_complexity_that_is_not_in_effect_for_the_executors_role_is_refused_naming_the_complexities(conn, config):
     add_agent(conn, "boss", "director")
     add_agent(conn, "hand", "executor", manager="boss")
+    look_at_roster(conn, config, "boss")
 
     failed, refusal = answer_to(
         conn, config, "boss", "assign",
@@ -451,6 +469,23 @@ def test_an_assignment_with_a_complexity_that_is_not_in_effect_for_the_executors
         conn, config, "boss", "assign",
         {"agent": "hand", "brief": "dig", "branch": "main", "complexity": "medium"},
     )
+    assert not failed, text
+
+
+def test_an_assignment_waits_for_the_assigners_own_roster_call(conn, config):
+    # Names no other test uses: the hub keeps roster() calls for the life of the process.
+    add_agent(conn, "gate-chief", "director")
+    add_agent(conn, "gate-lead", "lead", manager="gate-chief")
+    add_agent(conn, "gate-hand", "executor", manager="gate-lead")
+    assignment = {"agent": "gate-hand", "brief": "dig", "branch": "main", "complexity": "medium"}
+    look_at_roster(conn, config, "gate-chief")
+
+    failed, refusal = answer_to(conn, config, "gate-lead", "assign", assignment)
+    assert failed
+    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM work_log")["n"] == 0
+
+    look_at_roster(conn, config, "gate-lead")
+    failed, text = answer_to(conn, config, "gate-lead", "assign", assignment)
     assert not failed, text
 
 

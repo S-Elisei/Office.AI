@@ -84,6 +84,13 @@ def set_fire_hook(fn) -> None:
     _fire_hook = fn or _no_supervisor
 
 
+#: Epoch seconds of each agent's latest roster() call since the hub started.
+_roster_at: dict[str, float] = {}
+
+#: How long ago an agent's latest roster() may have been when it calls assign.
+ROSTER_FRESH_SECONDS = 300
+
+
 # --------------------------------------------------------------------------- identity & role
 
 
@@ -1063,6 +1070,7 @@ def _h_roster(conn, config, agent_name, role, args) -> str:
     stands on it until its assigner closes it. Below it, the running and paused works
     that are not on it, by runtime.
     """
+    _roster_at[agent_name] = time.time()
     snap = core.roster(conn)
     me = next(a for a in snap["agents"] if a["name"] == agent_name)
     manager = role in _MANAGER_ROLES
@@ -1520,6 +1528,11 @@ def _ask_for_yourself(conn, me: dict, button: str) -> str:
 
 
 def _h_assign(conn, config, agent_name, role, args) -> str:
+    if time.time() - _roster_at.get(agent_name, 0) > ROSTER_FRESH_SECONDS:
+        raise ValueError(
+            f"you have not called roster() in the last {ROSTER_FRESH_SECONDS // 60} minutes — "
+            "call roster(), consider your assignment and try again"
+        )
     # task is optional: filing a kanban card is not a precondition for
     # giving someone a job.
     _require(args, "brief", "branch")
@@ -2217,7 +2230,7 @@ _TOOLS: dict[str, types.Tool] = {
     "assign": types.Tool(
         name="assign",
         description="The director's and the leads'. Assign work, on a named branch, to yourself or "
-        "to an agent under you. You name the branch. The agent creates it itself. No branch is "
+        "to an agent under you. Call roster() right before each assign. You name the branch. The agent creates it itself. No branch is "
         "reserved. You are recorded as the work's assigner. A work for an executor is of the "
         "executor's role and takes a complexity, one of those roster() lists as in effect for "
         "that role; a work for a lead or for the director takes none. "
