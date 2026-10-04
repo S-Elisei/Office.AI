@@ -1255,7 +1255,8 @@ def _wallet_lines(conn) -> list[str]:
             if w["works"] else "nothing committed"
         )
         line = (
-            f"    {w['currency']} ({w['runtime']}): {wallets.units(w['available'])} available, "
+            f"    {w['currency']} ({w['runtime']}): {wallets.units(w['available'])} available "
+            f"({_share(w['available'], w)} of its {w['window']}), "
             f"{committed}, spare {wallets.units(w['spare'])}"
         )
         if w["more_at"] is not None:
@@ -1264,24 +1265,40 @@ def _wallet_lines(conn) -> list[str]:
     return lines
 
 
+def _share(amount: float, wallet: dict) -> str:
+    """`amount` as a percentage of the window that limits `wallet`."""
+    pct = 100 * amount / wallet["window_size"]
+    return f"{pct:.2f}%" if pct < 1 else f"{pct:.1f}%" if pct < 10 else f"{pct:.0f}%"
+
+
 def _price_list_lines(conn) -> list[str]:
     """roster()'s price list: the two lists, each as its column names and its rows with
-    the cells joined by ` | `."""
+    the cells joined by ` | `; a works row whose model's runtime has a wallet also carries
+    its price as a share of the window that limits that wallet."""
+    runtime_of = {m["model_id"]: m["runtime"] for m in core.list_models(conn)}
+    wallet_of = {w["runtime"]: w for w in wallets.overview(conn)}
 
     def cell(value) -> str:
         return f"{value:g}" if isinstance(value, float) else value or ""
 
-    def table(columns, rows) -> list[str]:
+    def share(row) -> str:
+        wallet = wallet_of.get(runtime_of.get(row["model"]))
+        return f"{_share(row['price'], wallet)} of the {wallet['runtime']} {wallet['window']}" if wallet else ""
+
+    def table(columns, rows, shares=False) -> list[str]:
         if not rows:
             return ["    (empty)"]
-        lines = [" | ".join(columns)] + [" | ".join(cell(row[c]) for c in columns) for row in rows]
+        lines = [" | ".join((*columns, "share") if shares else columns)] + [
+            " | ".join((*(cell(row[c]) for c in columns), *((share(row),) if shares else ()))) for row in rows
+        ]
         return [f"    {line}" for line in lines]
 
     return [
         "Price list (the average price of a work, from brief to close, in the currency of its "
-        "model's runtime):",
+        "model's runtime; share: the price as a part of the window that limits its runtime's "
+        "wallet, the one the wallet's line names):",
         "  Works you assign:",
-        *table(core.PRICE_WORKS_COLUMNS, core.price_works(conn)),
+        *table(core.PRICE_WORKS_COLUMNS, core.price_works(conn), shares=True),
         "  Committed to your own wallet for each work you assign to an executor, by the "
         "work's role and your model and effort (in the currency of your runtime):",
         *table(core.PRICE_OWN_COLUMNS, core.price_own(conn)),

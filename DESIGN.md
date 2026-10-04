@@ -1636,6 +1636,8 @@ computed from the settings, the stored buckets and the works' commitments:
   is the share times 1 − e², where e is the part of the week gone: the weekly reset less
   seven days, measured to now, over seven days; e is 0 when no weekly reset is stored.
   While the spare is withheld it is 0, and it stays so until the owner clears it;
+- the **limiting window** is the week when the week cap is no greater than the window cap,
+  its size the share; otherwise the 5h window, its size the window setting;
 - **more** becomes available at the time the cap that limits it next lets more through: when
   the week cap is no greater than the window cap, the weekly reset less an hour, or, when
   the week already has its addition, a week later; otherwise the `5h` reset less an hour,
@@ -1643,7 +1645,8 @@ computed from the settings, the stored buckets and the works' commitments:
   reset is not stored.
 
 `roster()` gives a manager, in its quota part, per wallet one line, such as
-`CL (claude): 31 available, 46 committed to 7 works, spare 12; more available at <time>`:
+`CL (claude): 31 available (28% of its 5h window), 46 committed to 7 works, spare 12; more available at <time>`,
+the percentage being what is available over the size of the limiting window, which the line names:
 "nothing committed" stands where no work commits on it, and the last clause is absent where
 more has no time. The quota buckets themselves are not listed; the holds are.
 
@@ -1659,8 +1662,11 @@ box, saved with the rest of the form.
 Right after the quota part, `roster()` gives a manager the **price list**: a header
 saying its prices are the average price of a work, from brief to close, in the currency
 of its model's runtime; "Works you assign:" and, indented, the line of its column names
-`role | complexity | model | effort | price` and the rows of the table
-`price_works` with their cells in that order (`(empty)` alone when it has none); "Committed
+`role | complexity | model | effort | price | share` and the rows of the table
+`price_works` with their cells in that order (`(empty)` alone when it has none). The
+share is the row's price over the size of the limiting window of the wallet of its model's
+runtime, written as `<percent> of the <runtime> <window>`, and empty where that runtime has
+no wallet; the header says so. "Committed
 to your own wallet for each work you assign to an executor, by the work's role and your
 model and effort", with a note that its prices are in the currency of the caller's
 runtime, and `price_own` the same way, its columns `what | role | model | effort | price`.

@@ -100,8 +100,10 @@ def _wallet(conn, runtime: str, buckets: dict, now: float, leaving: int | None =
     committed), `committed` and `works` (what the open works commit on this runtime,
     and how many do), `spare` (what may go to work that can wait: what is left above
     the line the share times 1 - e² draws, e being the part of the week gone; 0
-    while the owner withholds it) and `more_at` (epoch seconds when what limits it
-    next lets more through, None when that reset is not stored).
+    while the owner withholds it), `more_at` (epoch seconds when what limits it
+    next lets more through, None when that reset is not stored), and `window` and
+    `window_size` (the period that limits `available` — "5h window" or "week" — and its
+    size: the window's setting, or the week's limit less the reserve).
 
     The window limits only when its size is set and its bucket is stored. The
     amount of a period counts as available from CREDIT_SECONDS before its reset.
@@ -130,8 +132,10 @@ def _wallet(conn, runtime: str, buckets: dict, now: float, leaving: int | None =
     withheld = core.get_setting(conn, withhold_key(runtime)) == "1"
     if week_cap <= window_cap:
         reset, credit, period = week["reset_time"], week_credit, _WEEK_SECONDS
+        window, window_size = "week", share
     else:
         reset, credit, period = five_hours["reset_time"], window_credit, WINDOW_SECONDS
+        window, window_size = "5h window", size
     more_at = None
     if reset:
         more_at = int(reset) - CREDIT_SECONDS + (period if credit else 0)
@@ -143,6 +147,8 @@ def _wallet(conn, runtime: str, buckets: dict, now: float, leaving: int | None =
         "works": works,
         "spare": 0 if withheld else max(0, min(available, left - committed - share * (1 - gone ** 2))),
         "more_at": more_at,
+        "window": window,
+        "window_size": window_size,
     }
 
 

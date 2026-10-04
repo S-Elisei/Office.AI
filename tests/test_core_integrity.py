@@ -100,6 +100,9 @@ def test_a_work_is_committed_to_its_wallet_and_a_work_the_wallet_cannot_cover_is
     committed = db.query_one(conn, "SELECT * FROM works WHERE id = ?", (make_work(conn, first),))
     assert (committed["price"], committed["price_runtime"]) == (6.0, "claude")
     assert wallets.available(conn, "claude")["available"] == 4.0
+    assert (wallets.available(conn, "claude")["window"], wallets.available(conn, "claude")["window_size"]) == (
+        "5h window", 10.0
+    )
 
     with pytest.raises(ValueError):
         make_work(conn, second)
