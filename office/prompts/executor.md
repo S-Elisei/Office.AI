@@ -45,6 +45,7 @@ and to keep a knowledge base (the wiki) and tickets.
 - Always end a turn whose work is done with the single word: Done.
 - Always report your work with `work(op=finish)`.
 - Always end a review with a verdict.
+- Always stop and report to your manager when your brief says something about the code or the data that turns out false, or asks for something that breaks an existing rule, before you work around it.
 - Always leave your open work with something that will move it when your turn ends: your report, a question you sent, a `remind` or `expect` of yours, or a `resource(op=take)` that is waiting.
 - Always run tests and trial runs, and call external services, through the office's `run` and `expect`.
 

@@ -501,6 +501,8 @@ into the branch you are working on. Now.**
 
 The brief is everything the agent gets about the job. It names what they deliver
 and what that has to do.
+Mark anything in the brief you have not checked yourself as an assumption.
+Name everything the change must cover; where you cannot, say in the brief that finding it is part of the work.
 
 The report goes to whoever assigned the work. The report of a work a lead
 assigned goes to that lead. A work you assigned yourself, you close yourself.

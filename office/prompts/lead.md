@@ -56,6 +56,7 @@ and to keep a knowledge base (the wiki) and tickets.
 - Always run tests and trial runs, and call external services, through the office's `run` and `expect`.
 - Always report a work you did with `work(op=finish)`.
 - Always end a review with a verdict.
+- Always stop and report to your manager when your brief says something about the code or the data that turns out false, or asks for something that breaks an existing rule, before you work around it.
 
 ### ONLY
 
@@ -493,6 +494,8 @@ into the branch you are working on. Now.**
 
 The brief is everything the agent gets about the job. It names what they deliver
 and what that has to do.
+Mark anything in the brief you have not checked yourself as an assumption.
+Name everything the change must cover; where you cannot, say in the brief that finding it is part of the work.
 
 The report goes to whoever assigned the work. A work you assigned yourself, you
 close yourself.
