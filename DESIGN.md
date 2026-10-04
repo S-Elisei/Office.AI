@@ -855,16 +855,32 @@ session. Statuses: `running` · `paused` · `failed` · `done`. A paused work go
 to `running` when its holder's next turn starts; a failed one only by
 `work_reassign`.
 
-`assign(agent, brief, task_id, branch, complexity)` — the branch is required, the
-task is not. `complexity` is required when the assignee is an executor and refused
+`assign(agent, brief, task_id, branch, complexity, fresh_session, complexity_reason)` —
+the branch is required, the task is not. `complexity`, `fresh_session` and
+`complexity_reason` are each required when the assignee is an executor and refused
 when it is a lead or the director: only an executor's work is classified. The work's
 role is the executor's own (`agents.role`), and the complexity is one of the distinct
 values of the works price list's Complexity column in that role's rows (section 10).
 A price list with no rows gives the roles `coding`, `review`, `consultation`,
 `design`, each with the complexities `easy`, `medium`, `hard`. A complexity outside
-these is refused; the refusal names it and lists those in effect for the role. The
-role and the complexity go to the work's row in `work_log` (section 13), NULL for a
-lead's or the director's work. An executor's work commits its price from the price list (section 10). The caller is recorded as the assigner, `works.assigned_by_agent_id`; a manager
+these is refused; the refusal names it and lists those in effect for the role.
+`complexity_reason` is the assigner's reason for the complexity; an empty one is
+refused. The role, the complexity and the reason go to the
+work's row in `work_log` (section 13), NULL for a lead's or the director's work.
+
+`fresh_session` true starts the executor on the work in a new session; false leaves its
+conversation as it is. With true, `assign` runs in this order:
+
+1. every check `assign_work` makes (the agent is in the caller's subtree, it has no
+   active work, the price list prices the work and the wallets cover it), with nothing
+   written (`core.check_assign`);
+2. the dropping of the agent's session, the step `agent(op=new_session)` takes, which is
+   refused while a turn or a compaction is running on the agent's session; the refusal
+   is `assign`'s and nothing is assigned;
+3. `assign_work`, which checks again inside its transaction and then sends the brief.
+
+A work refused at step 1 or 2 leaves the agent's session as it was, and the brief
+reaches the agent only after its session is dropped. An executor's work commits its price from the price list (section 10). The caller is recorded as the assigner, `works.assigned_by_agent_id`; a manager
 that assigns a work to itself is its own assigner. `work_reassign` records its
 caller as the assigner in the same way, and the work's report and notices go to
 that caller from then on. Handed to another agent, the work commits its price anew for
@@ -1978,7 +1994,7 @@ It does not gate a merge, does not run by itself, and is reached by nothing but
 | The current quota snapshot | One row per bucket |
 | Quota holds: runtime, model, the time of return | A hold outlives a hub restart |
 | Quota history: every reading that differs from the one before it for its bucket | Nothing in the office reads it; the owner does, with SQL |
-| The work log: one row per work, kept after the work is closed. Numbers and names, no text | The owner reads it with SQL |
+| The work log: one row per work, kept after the work is closed. Numbers and names, and the assigner's reason for the complexity; no brief, no report | The owner reads it with SQL |
 | Usage: one row per vendor process — a turn, a compaction or a keep-alive — with the agent, its open work in whatever status and its task, who woke it, its outcome and its token totals; one row per model request and per compaction inside it. Numbers and names, no text. A turn's totals are the vendor's own, except agy's and those of a turn that ended without printing them, which are the sums of its requests; codex's requests are read off its rollout file and claude's off its session file | The keep-alive reads it; the owner reads the rest with SQL |
 | Each runtime's model catalogue | A snapshot, overwritten hourly |
 | Owner notices | The record of what happened while he was not looking |
@@ -2016,12 +2032,13 @@ grouped query.
 ### The work log
 
 `work_log` holds one row per work, keyed by `work_id`, the id of the row in `works`.
-Nothing deletes a row and no foreign key reaches it. It holds names and numbers only: no
-brief, no summary. The owner reads it with SQL, together with `usage_turns` and
+Nothing deletes a row and no foreign key reaches it. It holds names and numbers and the
+assigner's reason for the complexity: no brief, no report text. The owner reads it with SQL, together with `usage_turns` and
 `usage_requests`, which carry `work_id` and `task_id`.
 
 Columns: `work_id`, `task_id`, `agent`, `runtime`, `model` and `effort` (the work's
-holder; `effort` NULL where its runtime takes none), `assigned_by`, `branch`, `role`, `complexity`, `assigned_at`, `reports`, `pr_id`,
+holder; `effort` NULL where its runtime takes none), `assigned_by`, `branch`, `role`, `complexity`, `complexity_reason` (NULL, like `role` and
+`complexity`, for a work whose assignee is not an executor), `assigned_at`, `reports`, `pr_id`,
 `merge_commit`, `files_changed`, `lines_changed`, `ended_at`, `ended_as`.
 
 Each column is written by the function that changes the fact:
@@ -2113,7 +2130,7 @@ Managers only — the director and the leads:
 ```
 agent(op, ...)   # hire | fire | stop | compact | new_session | instruct | instructions | move
                  # set_model | save_profile | hire_from_profile | list_profiles
-assign(agent, brief, task_id, branch, complexity)
+assign(agent, brief, task_id, branch, complexity, fresh_session, complexity_reason)
 work_close(work, summary)        # accept a reported work: the row goes, the result lands on the task
 work_dismiss(work)               # write off a failed work together with its tail
 work_reassign(work, to_agent, workspace)   # workspace = inherit | fresh

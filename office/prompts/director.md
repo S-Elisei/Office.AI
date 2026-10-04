@@ -241,7 +241,7 @@ These are the tools of the MCP server named `office`:
   - `delete_workspace` — delete a workspace that belongs to nobody, its sandbox included.
 - `assign` — give a work to an agent, yourself included: a branch and a brief,
   optionally on a task. A work for an executor also takes a complexity of the
-  executor's role.
+  executor's role, `fresh_session` and a `complexity_reason`.
 - `work_close` — end a work that has been reported. Your summary becomes its line
   on the task.
 - `work_reassign` — hand a work to an agent, its own assignee included. Use it to

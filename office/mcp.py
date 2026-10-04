@@ -1538,7 +1538,7 @@ def _h_assign(conn, config, agent_name, role, args) -> str:
     _require(args, "brief", "branch")
     target = _named_agent(conn, args, "agent")
     if target["kind"] == "executor":
-        _require(args, "complexity")
+        _require(args, "complexity", "fresh_session", "complexity_reason")
         roles = core.work_roles(conn)
         if target["role"] not in roles:
             raise ValueError(
@@ -1552,14 +1552,23 @@ def _h_assign(conn, config, agent_name, role, args) -> str:
                 f"'{args['complexity']}' is not in effect — assign again with one of: "
                 f"{'; '.join(allowed)}"
             )
-    elif args.get("complexity") is not None:
-        raise ValueError(
-            f"'{target['name']}' is a {target['kind']}: a work for a {target['kind']} takes no "
-            "complexity — assign again without it"
-        )
+    else:
+        for param in ("complexity", "fresh_session", "complexity_reason"):
+            if args.get(param) is not None:
+                raise ValueError(
+                    f"'{target['name']}' is a {target['kind']}: a work for a {target['kind']} takes no "
+                    f"{param} — assign again without it"
+                )
+    if args.get("fresh_session"):
+        # The session goes only for an assignment that nothing refuses, and before the
+        # brief is sent.
+        core.check_assign(conn, agent_id=target["id"], complexity=args["complexity"], actor=agent_name)
+        result = _new_session_hook(target["name"], agent_name)
+        if not result.get("ok"):
+            raise ValueError(result["reason"])
     work = core.assign_work(
         conn, agent_id=target["id"], brief=args["brief"], task_id=args.get("task_id"), branch=args["branch"],
-        complexity=args.get("complexity"), actor=agent_name,
+        complexity=args.get("complexity"), complexity_reason=args.get("complexity_reason"), actor=agent_name,
     )
     pending = " (workspace still provisioning — it attaches once ready)" if work["workspace_id"] is None else ""
     if target["name"] == agent_name:
@@ -2233,7 +2242,8 @@ _TOOLS: dict[str, types.Tool] = {
         "to an agent under you. Call roster() right before each assign. You name the branch. The agent creates it itself. No branch is "
         "reserved. You are recorded as the work's assigner. A work for an executor is of the "
         "executor's role and takes a complexity, one of those roster() lists as in effect for "
-        "that role; a work for a lead or for the director takes none. "
+        "that role, and fresh_session and complexity_reason; a work for a lead or "
+        "for the director takes none of them. "
         "Assigning a work to an executor commits its price from the price list to the wallets it "
         "draws; closing it settles it. "
         "On another agent's work: its report comes to you, and so does a notice if it fails or "
@@ -2256,6 +2266,14 @@ _TOOLS: dict[str, types.Tool] = {
                 "complexity": {
                     "type": "string",
                     "description": "Executors only: one of the complexities roster() lists as in effect for the executor's role.",
+                },
+                "fresh_session": {
+                    "type": "boolean",
+                    "description": "Executors only: true starts the executor on this work in a new session; false keeps its current conversation.",
+                },
+                "complexity_reason": {
+                    "type": "string",
+                    "description": "Executors only: why this complexity.",
                 },
             },
             "required": ["agent", "brief", "branch"],

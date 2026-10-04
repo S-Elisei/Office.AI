@@ -2003,11 +2003,33 @@ def _commitment(
     }
 
 
+def check_assign(conn, *, agent_id: int, complexity: str | None, actor: str) -> tuple[dict, dict, dict]:
+    """Every refusal assign_work() makes, with nothing written: the agent is not the
+    caller's or in its subtree, it has an active work, or _commitment() refuses.
+
+    Returns the caller's row, the agent's row and the works columns the work commits.
+    """
+    caller = _row(conn, "agents", "name", actor)
+    agent = _row(conn, "agents", "id", agent_id)
+    if agent_id != caller["id"]:
+        check_in_subtree(conn, caller, agent, "assign")
+    # 'done' belongs in this tuple: a work that has reported and has not been
+    # closed is still an obligation on both sides. 'failed' is not here.
+    active = db.query_one(
+        conn,
+        "SELECT id FROM works WHERE agent_id = ? AND status IN ('running', 'paused', 'done')",
+        (agent_id,),
+    )
+    if active is not None:
+        raise ValueError(f"agent '{agent['name']}' already has an active work ({active['id']})")
+    return caller, agent, _commitment(conn, caller, agent, agent["role"], complexity)
+
+
 def assign_work(
     conn, *, agent_id: int, brief: str, task_id: int | None, branch: str,
-    complexity: str | None, actor: str
+    complexity: str | None, complexity_reason: str | None, actor: str
 ) -> dict:
-    """assign(agent, brief, task, branch, complexity).
+    """assign(agent, brief, task, branch, complexity, complexity_reason).
 
     `actor` is the calling manager, recorded as the assigner; the agent is the
     caller itself or one in its subtree.
@@ -2019,30 +2041,20 @@ def assign_work(
     The name lives in works.branch as what the assigner asked for; the agent
     creates the branch itself.
 
-    The work's role is its assignee's, and its role and `complexity` go to the work's
-    work_log row and, for an executor's work, price it; both None for a work whose
-    assignee is not an executor.
+    The work's role is its assignee's, and its role, `complexity` and
+    `complexity_reason` go to the work's work_log row; role and `complexity` also, for
+    an executor's work, price it. All three are None for a work whose assignee is not
+    an executor.
 
     A work for an executor commits its price (_commitment) on the works row until the
     row is deleted.
 
-    The decision and the write are one transaction.
+    The decision and the write are one transaction; check_assign() is the decision.
     """
     with db.transaction(conn):
-        caller = _row(conn, "agents", "name", actor)
-        agent = _row(conn, "agents", "id", agent_id)
-        if agent_id != caller["id"]:
-            check_in_subtree(conn, caller, agent, "assign")
-        # 'done' belongs in this tuple: a work that has reported and has not been
-        # closed is still an obligation on both sides. 'failed' is not here.
-        active = db.query_one(
-            conn,
-            "SELECT id FROM works WHERE agent_id = ? AND status IN ('running', 'paused', 'done')",
-            (agent_id,),
+        caller, agent, committed = check_assign(
+            conn, agent_id=agent_id, complexity=complexity, actor=actor
         )
-        if active is not None:
-            raise ValueError(f"agent '{agent['name']}' already has an active work ({active['id']})")
-        committed = _commitment(conn, caller, agent, agent["role"], complexity)
         ws_row = workspace_of(conn, agent_id) if agent["status"] != "provisioning" else None
         workspace_id = ws_row["id"] if ws_row is not None else None
         cur = db.execute(
@@ -2056,10 +2068,10 @@ def assign_work(
         db.execute(
             conn,
             "INSERT INTO work_log (work_id, task_id, agent, runtime, model, effort, assigned_by, "
-            "branch, role, complexity, assigned_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT started_at FROM works WHERE id = ?))",
+            "branch, role, complexity, complexity_reason, assigned_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT started_at FROM works WHERE id = ?))",
             (work_id, task_id, agent["name"], agent["runtime"], agent["model"], agent["effort"],
-             caller["name"], branch, agent["role"], complexity, work_id),
+             caller["name"], branch, agent["role"], complexity, complexity_reason, work_id),
         )
         _emit(
             conn, "works", "work", work_id,

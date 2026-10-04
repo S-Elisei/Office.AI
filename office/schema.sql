@@ -399,8 +399,9 @@ CREATE TABLE IF NOT EXISTS notices (
 );
 
 -- One row per work, written when it is assigned and updated as it goes; no
--- code path deletes a row, and no foreign key reaches it. Numbers and names
--- only; no text of any brief or report. The owner reads it with SQL.
+-- code path deletes a row, and no foreign key reaches it. Numbers and names,
+-- and the assigner's reason for the complexity; no brief and no report.
+-- The owner reads it with SQL.
 CREATE TABLE IF NOT EXISTS work_log (
     work_id INTEGER PRIMARY KEY,
     task_id INTEGER,
@@ -417,6 +418,9 @@ CREATE TABLE IF NOT EXISTS work_log (
     -- NULL for a work assigned to a lead or the director.
     role TEXT,
     complexity TEXT,
+    -- The assigner's reason for the complexity; NULL for a work assigned
+    -- to a lead or the director.
+    complexity_reason TEXT,
     assigned_at TEXT NOT NULL,
     -- How many times the holder reported it with work(op=finish).
     reports INTEGER NOT NULL DEFAULT 0,

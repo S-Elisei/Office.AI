@@ -153,7 +153,8 @@ def test_a_lead_reaches_nothing_outside_its_own_subtree(conn, config):
     look_at_roster(conn, config, "north")
     failed, text = answer_to(
         conn, config, "south", "assign",
-        {"agent": "s-hand", "brief": "dig", "branch": "main", "complexity": "medium"},
+        {"agent": "s-hand", "brief": "dig", "branch": "main", "complexity": "medium", "fresh_session": False,
+         "complexity_reason": "one module"},
     )
     assert not failed, text
     work_id = db.query_one(conn, "SELECT id FROM works")["id"]
@@ -166,7 +167,8 @@ def test_a_lead_reaches_nothing_outside_its_own_subtree(conn, config):
     before = row_counts(conn)
     reaching_out = [
         ("assign", {"agent": "s-hand", "brief": "dig elsewhere", "branch": "main",
-                    "complexity": "medium"}),
+                    "complexity": "medium", "fresh_session": False,
+                    "complexity_reason": "one module"}),
         ("agent", {"op": "instruct", "agent": "s-lead", "text": "stop digging"}),
         ("agent", {"op": "instructions", "agent": "boss"}),
         ("agent", {"op": "new_session", "agent": "s-hand"}),
@@ -223,7 +225,8 @@ def test_a_move_is_refused_while_a_failed_work_would_leave_its_assigner_behind(c
     look_at_roster(conn, config, "north")
     failed, text = answer_to(
         conn, config, "north", "assign",
-        {"agent": "hand", "brief": "dig", "branch": "main", "complexity": "medium"},
+        {"agent": "hand", "brief": "dig", "branch": "main", "complexity": "medium", "fresh_session": False,
+         "complexity_reason": "one module"},
     )
     assert not failed, text
     work_id = db.query_one(conn, "SELECT id FROM works")["id"]
@@ -400,7 +403,8 @@ def test_an_inherited_workspace_is_swapped_for_the_recipients_own(conn, config):
     look_at_roster(conn, config, "boss")
     failed, text = answer_to(
         conn, config, "boss", "assign",
-        {"agent": "first", "brief": "dig", "branch": "main", "complexity": "medium"},
+        {"agent": "first", "brief": "dig", "branch": "main", "complexity": "medium", "fresh_session": False,
+         "complexity_reason": "one module"},
     )
     assert not failed, text
     work_id = db.query_one(conn, "SELECT id FROM works")["id"]
@@ -441,7 +445,8 @@ def test_an_assignment_with_a_complexity_that_is_not_in_effect_for_the_executors
 
     failed, refusal = answer_to(
         conn, config, "boss", "assign",
-        {"agent": "hand", "brief": "dig", "branch": "dig", "complexity": "huge"},
+        {"agent": "hand", "brief": "dig", "branch": "dig", "complexity": "huge", "fresh_session": False,
+         "complexity_reason": "one module"},
     )
 
     assert failed
@@ -461,13 +466,15 @@ def test_an_assignment_with_a_complexity_that_is_not_in_effect_for_the_executors
     )
     failed, refusal = answer_to(
         conn, config, "boss", "assign",
-        {"agent": "hand", "brief": "dig", "branch": "main", "complexity": "easy"},
+        {"agent": "hand", "brief": "dig", "branch": "main", "complexity": "easy", "fresh_session": False,
+         "complexity_reason": "one module"},
     )
     assert failed
     assert "medium" in refusal and "epic" not in refusal, refusal
     failed, text = answer_to(
         conn, config, "boss", "assign",
-        {"agent": "hand", "brief": "dig", "branch": "main", "complexity": "medium"},
+        {"agent": "hand", "brief": "dig", "branch": "main", "complexity": "medium", "fresh_session": False,
+         "complexity_reason": "one module"},
     )
     assert not failed, text
 
@@ -477,7 +484,8 @@ def test_an_assignment_waits_for_the_assigners_own_roster_call(conn, config):
     add_agent(conn, "gate-chief", "director")
     add_agent(conn, "gate-lead", "lead", manager="gate-chief")
     add_agent(conn, "gate-hand", "executor", manager="gate-lead")
-    assignment = {"agent": "gate-hand", "brief": "dig", "branch": "main", "complexity": "medium"}
+    assignment = {"agent": "gate-hand", "brief": "dig", "branch": "main", "complexity": "medium", "fresh_session": False,
+                  "complexity_reason": "one module"}
     look_at_roster(conn, config, "gate-chief")
 
     failed, refusal = answer_to(conn, config, "gate-lead", "assign", assignment)

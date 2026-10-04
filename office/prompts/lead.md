@@ -233,7 +233,7 @@ These are the tools of the MCP server named `office`:
   - `hire_from_profile` — hire with a saved profile.
 - `assign` — give a work to an agent under you or to yourself: a branch and a
   brief, optionally on a task. A work for an executor also takes a complexity of
-  the executor's role.
+  the executor's role, `fresh_session` and a `complexity_reason`.
 - `work_close` — end a work that has been reported. Your summary becomes its line
   on the task.
 - `work_reassign` — hand a work to an agent, its own assignee included. Use it to
