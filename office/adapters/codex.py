@@ -150,6 +150,23 @@ def _newest_token_count(lines: list[str]) -> dict | None:
     return None
 
 
+def _reasoning_items(lines: list[str]) -> int:
+    """How many of these lines record a finished reasoning item."""
+    count = 0
+    for line in lines:
+        if '"Reasoning"' not in line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
+        item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+        if payload.get("type") == "item_completed" and item.get("type") == "Reasoning":
+            count += 1
+    return count
+
+
 def rollout_requests(lines: list[str], since: str) -> list[dict]:
     """One request per `token_count` line stamped at or after `since` (the
     rollout's own ISO-8601 UTC form), in the keys of Event.request.
@@ -194,7 +211,8 @@ def rollout_requests(lines: list[str], since: str) -> list[dict]:
 
 
 class _RolloutTail:
-    """The newest `token_count` in a rollout file, read incrementally.
+    """The newest `token_count` in a rollout file, read incrementally, and the
+    reasoning items finished since the first look.
 
     The first look reads at most `_TAIL_BYTES` (and, only if that tail holds
     no `token_count` yet, the whole file once); every look after that reads
@@ -214,6 +232,15 @@ class _RolloutTail:
         self._path: Path | None = None
         self._offset = 0
         self._payload: dict | None = None
+        # Reasoning items in the bytes appended after the first look, not yet
+        # taken by take_reasoning().
+        self._reasoning = 0
+
+    def take_reasoning(self) -> int:
+        """The reasoning items counted since the previous call."""
+        with self._lock:
+            count, self._reasoning = self._reasoning, 0
+            return count
 
     def token_count(self, path: Path | None) -> dict | None:
         if path is None:
@@ -224,38 +251,47 @@ class _RolloutTail:
             except OSError:
                 return self._payload if path == self._path else None
             if path != self._path or size < self._offset:
-                self._path, self._offset, self._payload = path, 0, None
+                self._path, self._offset, self._payload, self._reasoning = path, 0, None, 0
             if size == self._offset:
                 return self._payload  # nothing appended since the last look
             first_look = self._offset == 0
             start = max(0, size - _TAIL_BYTES) if first_look else self._offset
-            payload, consumed = self._scan(path, start, size, drop_first_line=first_look and start > 0)
+            payload, consumed, reasoning = self._scan(
+                path, start, size, drop_first_line=first_look and start > 0
+            )
             if payload is None and first_look and start > 0:
                 # The tail held no token_count yet — read the whole file, once.
-                payload, consumed = self._scan(path, 0, size, drop_first_line=False)
+                payload, consumed, reasoning = self._scan(path, 0, size, drop_first_line=False)
             if consumed is None:
                 return self._payload  # unreadable right now; the last figure stands
             self._offset = consumed
+            if not first_look:
+                self._reasoning += reasoning
             if payload is not None:
                 self._payload = payload
             return self._payload
 
     @staticmethod
-    def _scan(path: Path, start: int, end: int, drop_first_line: bool) -> tuple[dict | None, int | None]:
+    def _scan(
+        path: Path, start: int, end: int, drop_first_line: bool
+    ) -> tuple[dict | None, int | None, int]:
+        """The newest token_count in [start, end), the offset after the last
+        complete line, and the reasoning items among the complete lines."""
         try:
             with path.open("rb") as handle:
                 handle.seek(start)
                 blob = handle.read(end - start)
         except OSError:
-            return None, None
+            return None, None, 0
         newline = blob.rfind(b"\n")
         consumed = start + newline + 1 if newline >= 0 else start
         lines = blob.decode("utf-8", errors="replace").splitlines()
+        complete = blob[: newline + 1].decode("utf-8", errors="replace").splitlines()
         if drop_first_line and lines:
             # Only true of the first look: every later one starts exactly
             # where the previous complete line ended.
             lines = lines[1:]
-        return _newest_token_count(lines), consumed
+        return _newest_token_count(lines), consumed, _reasoning_items(complete)
 
 
 _SHIM_SUFFIXES = (".cmd", ".bat", ".ps1")
@@ -423,29 +459,31 @@ class CodexAdapter:
         return None
 
     def poll_context(self, session_id: str | None) -> Event | None:
-        """Window occupancy and size for a live thread, from its session file.
+        """Window occupancy and size for a live thread, and the reasoning items
+        finished since the previous poll, from its session file.
 
         `last_token_usage` is the occupancy — NOT `total_token_usage`, which is
         the same cumulative figure `turn.completed` carries.
 
-        Returns None on any reading or parsing failure, which leaves the
-        previous figure standing and reports nothing new; it never estimates.
+        Returns None when the file shows neither a figure nor a new reasoning
+        item, which leaves the previous figure standing and reports nothing new;
+        it never estimates.
 
         The file is located once per turn (_rollout_file) and read forward
         from where the last poll stopped (_RolloutTail).
         """
         payload = self._tail.token_count(self._rollout_file(session_id or ""))
-        if payload is None:
-            return None
-        info = payload.get("info") or {}
+        reasoning = self._tail.take_reasoning()
+        info = (payload or {}).get("info") or {}
         used = (info.get("last_token_usage") or {}).get("total_tokens")
         limit = info.get("model_context_window")
-        if used is None and limit is None:
+        if used is None and limit is None and not reasoning:
             return None
         return Event(
             kind="usage",
             context_used=int(used) if used is not None else None,
             context_limit=int(limit) if limit else None,
+            reasoning=reasoning,
         )
 
     def quota_reset(self, error: str | None) -> int | None:

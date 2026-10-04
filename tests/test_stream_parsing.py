@@ -94,6 +94,26 @@ def test_codex_rollout_requests_are_the_token_counts_since_the_turn_began():
     assert len(rollout_requests(lines, "2026-09-27T17:00:00.000Z")) == 4
 
 
+def test_codex_poll_reports_the_reasoning_items_appended_since_the_last_look(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    thread = "00000000-0000-4000-8000-000000000000"
+    day = tmp_path / "sessions" / datetime.now().strftime("%Y/%m/%d")
+    day.mkdir(parents=True)
+    rollout = day / f"rollout-2026-10-04T13-45-08-{thread}.jsonl"
+    reasoning = (STREAMS / "codex_rollout_reasoning_capture.jsonl").read_text(encoding="utf-8")
+    history = (STREAMS / "codex_rollout_capture.jsonl").read_text(encoding="utf-8")
+    rollout.write_text(reasoning + history, encoding="utf-8")
+    adapter = CodexAdapter(bin_path="codex")
+
+    # What the file held before the first look belongs to earlier turns.
+    assert adapter.poll_context(thread).reasoning == 0
+
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write(reasoning)
+    assert adapter.poll_context(thread).reasoning == 2
+    assert adapter.poll_context(thread).reasoning == 0
+
+
 def test_claude_session_requests_carry_the_output_the_stream_does_not():
     lines = (STREAMS / "claude_session_capture.jsonl").read_text(encoding="utf-8").splitlines()
 

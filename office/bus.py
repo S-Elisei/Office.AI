@@ -2403,13 +2403,13 @@ def _undelivered_notice(recipient: str, reason: str, resume_after, bodies: list[
         next turn starts a new one.
     """
     if reason == "quota_exhausted":
-        cause = "its runtime is out of quota"
+        cause = "its runtime ran out of quota"
     elif reason == "hub_restart":
-        cause = "the hub restarted and the turn died with it"
+        cause = "the hub restarted"
     else:
-        cause = f"the turn died: {reason}"
+        cause = f"it died: {reason}"
     many = len(bodies) > 1
-    what = f"{len(bodies)} messages were" if many else "message was"
+    what = f"{len(bodies)} messages" if many else "message"
     it, matters = ("them", "they still matter") if many else ("it", "it still matters")
     if reason == "context_overflow":
         action = (
@@ -2422,7 +2422,10 @@ def _undelivered_notice(recipient: str, reason: str, resume_after, bodies: list[
             f"{'They are' if many else 'It is'} in {recipient}'s conversation, and {recipient} "
             f"reads {it} when its next turn starts{when}; do not send {it} again."
         )
-    lines = [f"[office] Your {what} not processed by {recipient} — {cause}. {action}"]
+    lines = [
+        f"[office] {recipient}'s turn ended early ({cause}) after it received your {what}; "
+        f"it may not have acted on {it}. {action}"
+    ]
     lines.extend(f"  - {_excerpt(body)}" for body in bodies)
     return "\n".join(lines)
 
@@ -2430,7 +2433,10 @@ def _undelivered_notice(recipient: str, reason: str, resume_after, bodies: list[
 def _lost_hook_notice(sender: str, body: str) -> str:
     """A service's message that died with a turn, as the quiet line that gives it
     back to the agent it was for."""
-    return f"[office] A turn of yours ended before it processed this message from {sender}:\n{body}"
+    return (
+        f"[office] A turn of yours ended early after it received this message from {sender}; "
+        f"it may not have acted on it:\n{body}"
+    )
 
 
 def _expired_expectation_notice(about: str) -> str:

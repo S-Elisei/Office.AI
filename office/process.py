@@ -31,6 +31,9 @@ LINGER_GRACE_SECONDS = 15.0
 # How often an adapter that reports occupancy OUT OF BAND is asked for it.
 CONTEXT_POLL_SECONDS = 5.0
 
+# The tail's line for one reasoning item an out-of-band poll reported.
+REASONING_LINE = "thinking: the model finished a reasoning block"
+
 # POST-MORTEM ONLY. A death at or above this much of the window reads as
 # `context_overflow`. Nothing consults it while a turn is alive.
 CONTEXT_OVERFLOW_AT = 0.85
@@ -429,6 +432,12 @@ class AgentTurn:
             self._last_error = event.error
         if event.quota:
             self.quota = event.quota
+        if event.reasoning:
+            # Counts as output: quiet_for and the tail see the model thinking.
+            self.last_output_at = time.monotonic()
+            with self._tail_lock:
+                self._tail.extend([REASONING_LINE] * event.reasoning)
+                self._tail_dirty = True
         if event.kind == "tool":
             with self._calls_lock:
                 for call_id, summary in event.calls:

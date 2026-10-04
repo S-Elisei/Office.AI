@@ -140,6 +140,9 @@ class Event:
     # On a `quota` event: the buckets the vendor reported, already under the
     # office's window names; the vendor's other buckets go unmentioned.
     quota: tuple[QuotaSnapshot, ...] = ()
+    # On a `usage` event from poll_context: reasoning items the model finished
+    # that its stream does not print.
+    reasoning: int = 0
 
 
 def clamp_fraction(value: float) -> float:

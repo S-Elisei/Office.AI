@@ -143,7 +143,7 @@ it.
 
 ### Visibility and stopping
 
-- `quiet_for` (age of the last output) and `running_for` are shown in the works
+- `quiet_for` (age of the last output, a codex reasoning item included) and `running_for` are shown in the works
   monitor beside every live work, and on the main page beside the director's stop
   button;
 - stopping: the button on a work card in the monitor, the button beside the
@@ -182,7 +182,8 @@ Optional methods: `child_env()` (claude), `compact_command(ws, model, effort,
 office_url, session_id)` (claude), `poll_context(session_id)` (codex), `turn_requests(session_id, since)` (codex).
 
 `Event` carries `kind`, `text`, `phase`, `calls`, `session_id`, `context_used`,
-`context_limit`, `context_before`, `error`, `request`, `totals` and `quota`.
+`context_limit`, `context_before`, `error`, `request`, `totals`, `quota` and
+`reasoning`.
 `phase` is `started` or `finished` on a tool event: a started call with no finished
 twin is the diagnosis "the agent is sitting inside a command". `calls` is, on a tool
 event, the vendor's own id and the summary of each call the event starts or ends; the
@@ -191,7 +192,10 @@ turn keeps the calls started and not yet ended, each with the moment it started
 model request's token counts, model and tools, keyed so that the events of one
 request fold into one; `totals` is the process's own sum on `turn_end`. `quota` is,
 on a `quota` event, the buckets the stream reported under the office's window names;
-the turn keeps the latest (`AgentTurn.quota`).
+the turn keeps the latest (`AgentTurn.quota`). `reasoning` is, on codex's
+`poll_context` reading, the number of reasoning items the model finished since the
+previous poll, which its stream does not print; each one counts as output for
+`quiet_for` and adds a `thinking:` line to the turn's tail.
 
 `resume` is required and separate from `session_id`: an id alone cannot tell a
 first turn from a continuation. `office_url` is the address of this agent's
@@ -260,8 +264,8 @@ At startup the hub:
    turn in progress when the hub died, and attaches the output tails spilled to
    disk;
 4. closes the turn of every agent carrying a turn-start marker: drops the marker
-   and tells the senders whose messages that turn consumed that they were not
-   processed (section 4);
+   and tells the senders whose messages that turn consumed that it ended early
+   after receiving them (section 4);
 5. moves agents from `running` to `idle`;
 6. when a work was interrupted or a lead's turn was killed, sends the director a
    message from `office` listing the interrupted works, and every other agent that
@@ -540,7 +544,8 @@ turn did not take is given back when it ends (above), so a turn's range never
 holds a message the turn did not receive, and never misses one it did. At turn
 start, the mark as it stood is saved in `agents.turn_start_message_id` — "what
 this turn took". **On an abnormal end, every sender of a direct message in that
-range gets a message from `office` saying it was not processed, with the reason.**
+range gets a message from `office` saying the turn ended early after receiving
+it and may not have acted on it, with the reason.**
 The brief of the agent's work is not among them. A message in the range counts as
 read and is not repeated.
 
@@ -582,7 +587,7 @@ participant `office`:
 | A work failed or was paused (unless whoever would be told caused it with `agent(op=stop)`) | the work's assigner; for a work its assignee assigned itself, the assignee's manager, and for the director the owner's journal | yes; the journal buys nothing |
 | A lead's turn ended abnormally — for any reason but a stop, and not retried | its manager | yes |
 | Hub restart that interrupted a work or killed a lead's turn, with the list of interrupted works | the director, with all of them; every other agent the two rows above name for an interrupted work or a killed turn, with those | yes |
-| Your message was not processed | the sender | yes |
+| The recipient's turn ended early after receiving your message | the sender | yes |
 | A deferred message has nowhere to go (the recipient was fired) | the sender | yes |
 | Your expectation ran out of time: nothing came, and its address is closed | that agent | yes |
 | A running agent has said nothing for the owner's silence threshold | its manager | yes |
