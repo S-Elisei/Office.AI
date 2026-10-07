@@ -36,7 +36,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 def fmt_time(value: str | None) -> str:
-    """'2026-09-11T14:32:01.123Z' -> '09-11 17:32' in the machine's own zone.
+    """'2026-09-11T14:32:01.123Z' -> '11.09 17:32' in the machine's own zone.
     Empty/None -> ''.
 
     Also accepts a raw Unix epoch (seconds) as a numeric string.
@@ -46,7 +46,7 @@ def fmt_time(value: str | None) -> str:
     if value.isdigit():
         try:
             dt = datetime.fromtimestamp(int(value), tz=timezone.utc)
-            return dt.astimezone().strftime("%m-%d %H:%M")
+            return dt.astimezone().strftime("%d.%m %H:%M")
         except (ValueError, OSError, OverflowError):
             return value
     try:
@@ -55,7 +55,7 @@ def fmt_time(value: str | None) -> str:
         return value
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone().strftime("%m-%d %H:%M")
+    return dt.astimezone().strftime("%d.%m %H:%M")
 
 
 def pct(used: int | None, limit: int | None) -> int | None:
