@@ -254,7 +254,7 @@ def window_occupancy(prompt_tokens, output_tokens) -> int | None:
 # Keyed by MODEL, not by runtime.
 # Matched as substrings.
 _CONTEXT_LIMITS = {
-    "claude": {"haiku": 200_000, "sonnet": 1_000_000, "opus": 1_000_000, "fable": 1_000_000},
+    "claude": {"haiku": 1_000_000, "sonnet": 1_000_000, "opus": 1_000_000, "fable": 1_000_000},
     "agy": {"gemini": 280_000},  # just above where agy compacts, not the model's window
 }
 
