@@ -233,11 +233,17 @@ def _h_resource(conn, config, agent_name, role, args) -> str:
             f"'{name}' is held by {_fmt_holds(taken['holders'])}. You are in line for it: "
             "the office tells you when it is yours."
         )
-    released, passed = core.release_resource(conn, name, me)
+    released, left, passed = core.release_resource(conn, name, me)
+    parts = []
     if released == [me["name"]]:
-        answer = f"'{name}' released"
-    else:
-        answer = f"'{name}' released for {', '.join(released)}"
+        parts.append(f"'{name}' released")
+    elif released:
+        parts.append(f"'{name}' released for {', '.join(released)}")
+    if left == [me["name"]]:
+        parts.append(f"you left the line for '{name}'")
+    elif left:
+        parts.append(f"{', '.join(left)} left the line for '{name}'")
+    answer = "; ".join(parts)
     if passed:
         answer += f"; it passed to {_fmt_modes(passed)}"
     return answer + "."
@@ -1781,9 +1787,10 @@ _TOOLS: dict[str, types.Tool] = {
         "you in line for it and no hold conflicts with your mode, and when it is already yours "
         "in that mode. Otherwise take answers with the holders and their modes, and puts you in line "
         "for it: the line is served oldest first, and nobody passes a waiter ahead of it. "
-        "release lets go of a resource you hold, or the holds of the agents under you: it then "
-        "passes down the line, and the office tells each agent it is given that it now holds "
-        "it. roster() lists the resources that are held, with their holders, their modes and "
+        "release lets go of a resource you hold, or takes you out of its line when you are "
+        "waiting for it; when you do neither, it does both for the agents under you. A "
+        "resource let go passes down the line, and the office tells each agent it is given "
+        "that it now holds it. roster() lists the resources that are held, with their holders, their modes and "
         "the agents in line.",
         input_schema={
             "type": "object",

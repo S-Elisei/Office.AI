@@ -3074,10 +3074,12 @@ def take_resource(conn, name: str, agent_id: int, mode: str) -> dict:
     return {"yours": False, "holders": [dict(h) for h in holders]}
 
 
-def release_resource(conn, name: str, caller: dict) -> tuple[list[str], list[dict]]:
+def release_resource(conn, name: str, caller: dict) -> tuple[list[str], list[str], list[dict]]:
     """resource(op=release): let go of `name`. The caller's own hold goes; when it has
-    none, the holds of every holder in its subtree go. Returns the names of the agents
-    whose hold went and, for each agent the line then granted, its `name` and `mode`."""
+    none, its own place in line; when it has neither, the holds and the places in line
+    of every agent in its subtree. Returns the names of the agents whose hold went, the
+    names of the agents who left the line and, for each agent the line then granted,
+    its `name` and `mode`."""
     with db.transaction(conn):
         holds = db.query(
             conn,
@@ -3085,24 +3087,39 @@ def release_resource(conn, name: str, caller: dict) -> tuple[list[str], list[dic
             "JOIN agents a ON a.id = r.holder_agent_id WHERE r.name = ? ORDER BY r.since, a.id",
             (name,),
         )
-        if not holds:
-            raise ValueError(f"nobody holds '{name}' — roster() lists the resources that are held")
+        waiters = db.query(
+            conn,
+            "SELECT w.agent_id AS id, a.name FROM resource_waiters w "
+            "JOIN agents a ON a.id = w.agent_id WHERE w.name = ? ORDER BY w.since, a.id",
+            (name,),
+        )
         released = [h for h in holds if h["id"] == caller["id"]]
-        if not released:
+        left = [] if released else [w for w in waiters if w["id"] == caller["id"]]
+        if not released and not left:
             reach = subtree_ids(conn, caller["id"])
             released = [h for h in holds if h["id"] in reach]
-            if not released:
+            left = [w for w in waiters if w["id"] in reach]
+            if not released and not left:
+                if not holds:
+                    raise ValueError(
+                        f"nobody holds '{name}' — roster() lists the resources that are held"
+                    )
                 named = ", ".join(f"{h['name']} ({h['mode']})" for h in holds)
                 raise PermissionError(
-                    f"'{name}' is held by {named}; only a holder, or a manager above a holder, "
-                    "releases it"
+                    f"'{name}' is held by {named}; only a holder, an agent in line for it, "
+                    "or a manager above either releases it"
                 )
         for hold in released:
             db.execute(
                 conn, "DELETE FROM resources WHERE name = ? AND holder_agent_id = ?",
                 (name, hold["id"]),
             )
-        return [h["name"] for h in released], _grant_from_line(conn, name)
+        for waiter in left:
+            db.execute(
+                conn, "DELETE FROM resource_waiters WHERE name = ? AND agent_id = ?",
+                (name, waiter["id"]),
+            )
+        return [h["name"] for h in released], [w["name"] for w in left], _grant_from_line(conn, name)
 
 
 def _grant_from_line(conn, name: str, asking: int | None = None) -> list[dict]:

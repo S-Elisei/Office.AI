@@ -2234,9 +2234,10 @@ the walk grants the caller, the answer says it holds the name, and otherwise it 
 holders with their modes. The caller is granted at once when nobody is ahead of it and no
 hold conflicts with its mode: for `exclusive`, nobody holds the name; for `shared`,
 nobody holds it exclusive. The decision and the write are one transaction. `resource(op=release, name)` lets go of the caller's own hold; when the
-caller holds none, of the holds of every holder in its subtree, the director's being
-every agent. A release of a name nobody holds, or whose holders are all outside the
-caller's reach, is refused with the state. After every take, release and firing, the
+caller holds none, it takes the caller out of the line; when the caller is in neither,
+it lets go of the holds and removes the places in line of every agent in its subtree,
+the director's being every agent. A release that reaches no hold and no place in line
+is refused with the state. After every take, release and firing, the
 office walks the line for the name, oldest first: an exclusive waiter is granted when
 nobody holds the name, a shared waiter when nobody holds it exclusive, and the walk
 stops at the first waiter that cannot be granted, so nobody passes a waiter ahead of
