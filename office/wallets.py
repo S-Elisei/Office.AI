@@ -48,6 +48,10 @@ def withhold_key(runtime: str) -> str:
     return f"wallet_{runtime}_withhold"
 
 
+#: The setting that, when "1", makes the office keep codex's 5h window itself.
+WINDOW_EMULATED_KEY = "wallet_codex_window_emulated"
+
+
 #: Every setting the owner edits per runtime: weekly limit and 5h window in units,
 #: reserve in percent.
 SETTING_KEYS = tuple(

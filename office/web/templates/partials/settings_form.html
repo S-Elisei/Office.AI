@@ -16,7 +16,7 @@
   </div>
   <div class="form-row mb-0" style="margin-top: 16px;">
     <label>Wallets</label>
-    <span class="hint">Each runtime's weekly limit and 5h window in its currency (CL claude, CD codex, GM agy), empty when there is none; the slider sets the share of the week the team leaves untouched; while Withhold spare is ticked, the team sees no spare on that wallet.</span>
+    <span class="hint">Each runtime's weekly limit and 5h window in its currency (CL claude, CD codex, GM agy), empty when there is none; the slider sets the share of the week the team leaves untouched; while Withhold spare is ticked, the team sees no spare on that wallet; while Emulate 5h window is ticked, the office keeps codex's 5h window itself from its weekly use, at the size in its 5h window field.</span>
     {% for row in wallet_rows %}
     {% set reserve = (wallet_values[row.reserve_key] or 0)|float %}
     <div data-wallet data-currency="{{ row.currency }}" style="margin-top: 10px;">
@@ -27,8 +27,11 @@
                value="{{ wallet_values[row.week_key] }}" style="width: 110px;" data-week>
         <label for="s-{{ row.window_key }}" style="margin: 0;">5h window</label>
         <input id="s-{{ row.window_key }}" name="{{ row.window_key }}" type="number" step="any" min="0"
-               value="{{ wallet_values[row.window_key] }}" style="width: 110px;">
+               value="{{ wallet_values[row.window_key] }}" style="width: 110px;" data-window>
         <label style="margin: 0;"><input type="checkbox" name="{{ row.withhold_key }}" value="1"{{ ' checked' if row.withheld }}> Withhold spare</label>
+        {% if row.runtime == 'codex' %}
+        <label style="margin: 0;"><input type="checkbox" name="{{ window_emulated_key }}" value="1"{{ ' checked' if window_emulated }} data-emulate> Emulate 5h window</label>
+        {% endif %}
       </div>
       <div class="bar-row">
         <div class="bar-track wallet-bar">

@@ -473,10 +473,31 @@
   });
 
   document.addEventListener("input", (e) => syncRequired(e.target.form));
+  // While a wallet's Emulate 5h window box is ticked, its weekly limit and its 5h
+  // window must each be above 0.
+  function validateEmulatedWindow(form) {
+    if (!form) return;
+    for (const row of form.querySelectorAll("[data-wallet]")) {
+      const box = row.querySelector("[data-emulate]");
+      if (!box) continue;
+      const size = row.querySelector("[data-window]");
+      const ready = Number(row.querySelector("[data-week]").value) > 0 && Number(size.value) > 0;
+      size.setCustomValidity(
+        box.checked && !ready
+          ? "Emulate 5h window needs a codex weekly limit and 5h window above 0."
+          : ""
+      );
+    }
+  }
+
   document.addEventListener("input", (e) => validatePriceLists(e.target.form));
+  document.addEventListener("input", (e) => validateEmulatedWindow(e.target.form));
   document.addEventListener("htmx:afterSwap", () => {
     syncAllRequired(document);
-    for (const form of document.querySelectorAll("form[data-price-runtimes]")) validatePriceLists(form);
+    for (const form of document.querySelectorAll("form[data-price-runtimes]")) {
+      validatePriceLists(form);
+      validateEmulatedWindow(form);
+    }
   });
 
   // ---- audio and 3D previews of files -----------------------------------------

@@ -172,6 +172,7 @@ def _context(
         or _fmt_minutes(SILENCE_NOTICE_DEFAULT_MINUTES),
         "wallet_rows": [
             {
+                "runtime": runtime,
                 "currency": currency,
                 "week_key": wallets.week_key(runtime),
                 "window_key": wallets.window_key(runtime),
@@ -198,6 +199,8 @@ def _context(
             row["model_id"]: {"runtime": row["runtime"], "window": wallets.window_key(row["runtime"])}
             for row in core.list_models(conn)
         },
+        "window_emulated_key": wallets.WINDOW_EMULATED_KEY,
+        "window_emulated": core.get_setting(conn, wallets.WINDOW_EMULATED_KEY) == "1",
         # The stored value of every wallet field, by its setting key.
         "wallet_values": {
             key: core.get_setting(conn, key, "") or "" for key in wallets.SETTING_KEYS
@@ -240,8 +243,8 @@ def settings_fragment(request: Request):
 @router.post("/settings")
 async def save_settings(request: Request):
     """Owner-facing config only: owner_name, the silence threshold, the wallets'
-    weekly limits, 5h windows, reserve and withheld spare, and the two price lists with their
-    note.
+    weekly limits, 5h windows, reserve, withheld spare and codex's emulated 5h window, and
+    the two price lists with their note.
     """
     conn = get_db(request)
     data = await read_form(request)
@@ -260,6 +263,9 @@ async def save_settings(request: Request):
         if wallets.week_key(runtime) in data:
             withhold = "1" if wallets.withhold_key(runtime) in data else ""
             core.set_setting(conn, wallets.withhold_key(runtime), withhold, actor=owner_name)
+    if wallets.week_key("codex") in data:
+        emulated = "1" if wallets.WINDOW_EMULATED_KEY in data else ""
+        core.set_setting(conn, wallets.WINDOW_EMULATED_KEY, emulated, actor=owner_name)
     core.set_price_lists(
         conn,
         _table_rows(lists, WORKS_FIELDS, core.PRICE_WORKS_COLUMNS),

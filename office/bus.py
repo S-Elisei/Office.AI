@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from office import commands, core, db, git, marks, stages, wiki_files
+from office import commands, core, db, git, marks, stages, wallets, wiki_files
 from office.adapters import RUNTIMES, adapter_for, shared
 from office.adapters import agy, codex
 from office.adapters.base import name_quota_windows
@@ -138,7 +138,9 @@ class Bus:
         # time.monotonic() of each runtime's last poll and last reading from a
         # turn, by runtime (QUOTA_POLL_SPACING_SECONDS). In memory.
         self._quota_read_at: dict[str, float] = {}
-        # Held for every recording of a codex poll.
+        # Held for every recording of a codex poll and every write of codex's
+        # emulated 5h window (_extend_codex_window and the methods beside it), and
+        # never while an agent's state.lock is being taken.
         self._codex_quota_lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------
@@ -185,12 +187,17 @@ class Bus:
                 before its first tick."""
         for runtime in QUOTA_RUNTIMES:
             self._poll_runtime(runtime)
+        self._extend_codex_window()
         core.expire_passed_quota(self.conn)
 
     def _poll_runtime(self, runtime: str) -> None:
         """Poll one runtime's quota: in each round, and as soon as a turn or a
         compaction on it ends without its stream having reported quota. Skipped
-        inside the runtime's QUOTA_POLL_SPACING_SECONDS. Never raises."""
+        inside the runtime's QUOTA_POLL_SPACING_SECONDS. A codex poll first extends
+        codex's emulated 5h window (_extend_codex_window), whether or not the poll
+        then succeeds. Never raises on a vendor's failure."""
+        if runtime == "codex":
+            self._extend_codex_window()
         spacing = QUOTA_POLL_SPACING_SECONDS.get(runtime)
         if spacing is not None:
             last = self._quota_read_at.get(runtime)
@@ -214,16 +221,108 @@ class Bus:
         except Exception:
             _log.exception("quota poll failed for %s", runtime)
 
+    # -- codex's emulated 5h window ------------------------------------------
+    #
+    # The window is the quota row (codex, '5h'); it is open while its reset time
+    # lies ahead. It is emulated while the setting wallets.WINDOW_EMULATED_KEY is "1"
+    # and the (codex, 'week') row is stored. Every method below takes
+    # _codex_quota_lock itself, except the ones named _locked, which need it held.
+
+    def _codex_row(self, label: str) -> sqlite3.Row | None:
+        return db.query_one(
+            self.conn,
+            "SELECT remaining_fraction, reset_time FROM quota WHERE runtime = 'codex' AND label = ?",
+            (label,),
+        )
+
+    def _codex_window_emulated(self) -> bool:
+        return (
+            core.get_setting(self.conn, wallets.WINDOW_EMULATED_KEY) == "1"
+            and self._codex_row("week") is not None
+        )
+
+    @staticmethod
+    def _window_open(window: sqlite3.Row | None, now: float) -> bool:
+        return window is not None and window["reset_time"] is not None and int(window["reset_time"]) > now
+
+    def _codex_turn_running(self) -> bool:
+        """Whether any codex agent has a turn installed (state.turn)."""
+        names = [r["name"] for r in db.query(self.conn, "SELECT name FROM agents WHERE runtime = 'codex'")]
+        return any(self._state(name).turn is not None for name in names)
+
+    def _extend_window_locked(self, now: float) -> None:
+        """When the window's reset has passed and a codex turn is running, open it
+        again full from that reset, or from `now` when that reset is too old to
+        reach it. Needs the emulation on."""
+        window = self._codex_row("5h")
+        if window is None or window["reset_time"] is None or int(window["reset_time"]) > now:
+            return
+        if not self._codex_turn_running():
+            return
+        reset = int(window["reset_time"]) + wallets.WINDOW_SECONDS
+        core.write_codex_window(
+            self.conn, 1.0, reset if reset > now else int(now) + wallets.WINDOW_SECONDS
+        )
+
+    def _extend_codex_window(self) -> None:
+        with self._codex_quota_lock:
+            if self._codex_window_emulated():
+                self._extend_window_locked(time.time())
+
+    def _codex_turn_launched(self) -> None:
+        """After a codex turn's process was launched: extend the window with the
+        turns already running, then open it full from now if it is closed."""
+        with self._codex_quota_lock:
+            if not self._codex_window_emulated():
+                return
+            now = time.time()
+            self._extend_window_locked(now)
+            if not self._window_open(self._codex_row("5h"), now):
+                core.write_codex_window(self.conn, 1.0, int(now) + wallets.WINDOW_SECONDS)
+
+    def _consumed_window_locked(self, snapshots: list, now: float) -> tuple[float, int] | None:
+        """The window as the fall of the week between the stored reading and this
+        answer leaves it, or None when the window stays. Needs the emulation on."""
+        answered = next((s for s in snapshots if s.label == "week"), None)
+        if answered is None:
+            return None
+        stored = self._codex_row("week")
+        after = (
+            1.0 if answered.reset_time is not None and answered.reset_time <= now
+            else answered.remaining_fraction
+        )
+        before = (
+            1.0 if stored["reset_time"] is not None and int(stored["reset_time"]) <= now
+            else stored["remaining_fraction"]
+        )
+        fall = before - after
+        if fall <= 0:
+            return None
+        spent = fall * (
+            float(core.get_setting(self.conn, wallets.week_key("codex")))
+            / float(core.get_setting(self.conn, wallets.window_key("codex")))
+        )
+        window = self._codex_row("5h")
+        if self._window_open(window, now):
+            return max(0.0, window["remaining_fraction"] - spent), int(window["reset_time"])
+        return max(0.0, 1.0 - spent), int(now) + wallets.WINDOW_SECONDS
+
     def _record_codex_quota(self, snapshots: list) -> None:
         """Record a codex poll's named answer. An answer whose `read_at` is older
-        than the greatest one stored is discarded."""
+        than the greatest one stored is discarded. While the window is emulated, the
+        week's fall since the stored reading draws the window down, and the
+        pruning of record_quota spares the window."""
         with self._codex_quota_lock:
             stored = db.query_one(
                 self.conn, "SELECT MAX(read_at) AS read_at FROM quota WHERE runtime = 'codex'"
             )["read_at"]
             if stored is not None and snapshots[0].read_at < stored:
                 return
-            core.record_quota(self.conn, snapshots)
+            emulated = self._codex_window_emulated()
+            window = self._consumed_window_locked(snapshots, time.time()) if emulated else None
+            core.record_quota(self.conn, snapshots, keep=("5h",) if emulated else ())
+            if window is not None:
+                core.write_codex_window(self.conn, *window)
 
     def _quota_after(self, runtime: str, turn: AgentTurn) -> None:
         """Store the quota a finished turn or compaction reported in its own stream,
@@ -1001,6 +1100,8 @@ class Bus:
                 resume=resume,
                 tail_path=self.config.tails_dir / f"{name}.log",
             )
+            if agent["runtime"] == "codex":
+                self._codex_turn_launched()
             state.turn = turn
             state.pinging = ping
             state.retry_at = None
@@ -1096,6 +1197,8 @@ class Bus:
             # Before the turn is let go: _keep_alive_due reads the row.
             self._record_usage(usage, turn)
         finally:
+            if runtime == "codex":
+                self._extend_codex_window()
             # Unconditionally: _start_turn refuses for as long as this is set.
             state.turn = None
 

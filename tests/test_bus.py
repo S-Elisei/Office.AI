@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from office import core, db
+from office import core, db, wallets
 from office.adapters import shared
 from office.adapters.claude import ClaudeAdapter
 import office.bus as busmod
@@ -1213,3 +1213,59 @@ def test_a_codex_reading_older_than_the_stored_one_is_discarded(conn, config, tm
     assert round(codex_buckets(conn)["week"]["remaining_fraction"], 2) == 0.7
     history = db.query(conn, "SELECT remaining_fraction FROM quota_polls WHERE label = 'week' ORDER BY id")
     assert [round(r["remaining_fraction"], 2) for r in history] == [0.8, 0.7]
+
+
+def test_a_fall_of_codexs_week_lowers_its_emulated_window_by_the_fall_times_the_ratio(
+    conn, config, tmp_path, monkeypatch
+):
+    # The limits are invented: a ratio of 100 to 20.
+    core.set_setting(conn, wallets.week_key("codex"), "100")
+    core.set_setting(conn, wallets.window_key("codex"), "20")
+    core.set_setting(conn, wallets.WINDOW_EMULATED_KEY, "1")
+    bus = codex_quota_bus(conn, config, tmp_path, monkeypatch)
+    resets = int(time.time()) + 3 * 24 * 3600
+
+    # No week is stored yet, so nothing is emulated.
+    codex_reading(bus, tmp_path, 1, 0.9, resets)
+    assert "5h" not in codex_buckets(conn)
+
+    # The window was closed: it opens at what the fall leaves of it.
+    codex_reading(bus, tmp_path, 2, 0.8, resets)
+    window = codex_buckets(conn)["5h"]
+    assert round(window["remaining_fraction"], 2) == 0.5
+    assert abs(int(window["reset_time"]) - (time.time() + 5 * 3600)) < 60
+    assert window["read_at"] is None
+
+    # Open: the fall comes off what is left, and the reset stays.
+    codex_reading(bus, tmp_path, 3, 0.78, resets)
+    after = codex_buckets(conn)["5h"]
+    assert round(after["remaining_fraction"], 2) == 0.4
+    assert after["reset_time"] == window["reset_time"]
+
+    codex_reading(bus, tmp_path, 4, 0.78, resets)
+    assert round(codex_buckets(conn)["5h"]["remaining_fraction"], 2) == 0.4
+    assert db.query_one(conn, "SELECT COUNT(*) AS n FROM quota_polls WHERE label = '5h'")["n"] == 0
+
+
+def test_a_week_that_reset_between_two_codex_readings_counts_from_full(conn, config, tmp_path, monkeypatch):
+    # The limits are invented: a ratio of 1.
+    core.set_setting(conn, wallets.week_key("codex"), "100")
+    core.set_setting(conn, wallets.window_key("codex"), "100")
+    core.set_setting(conn, wallets.WINDOW_EMULATED_KEY, "1")
+    bus = codex_quota_bus(conn, config, tmp_path, monkeypatch)
+    resets = int(time.time()) + 3 * 24 * 3600
+    codex_reading(bus, tmp_path, 1, 0.9, resets)
+    codex_reading(bus, tmp_path, 2, 0.8, resets)
+    assert round(codex_buckets(conn)["5h"]["remaining_fraction"], 2) == 0.9
+
+    # The stored week's reset has passed since it was read.
+    db.execute(
+        conn, "UPDATE quota SET remaining_fraction = 0.1, reset_time = ? WHERE label = 'week'",
+        (str(int(time.time()) - 1),),
+    )
+    codex_reading(bus, tmp_path, 3, 0.95, resets)
+    assert round(codex_buckets(conn)["5h"]["remaining_fraction"], 2) == 0.85
+
+    # The answered week's reset has passed: nothing was drawn.
+    codex_reading(bus, tmp_path, 4, 0.5, int(time.time()) - 1)
+    assert round(codex_buckets(conn)["5h"]["remaining_fraction"], 2) == 0.85

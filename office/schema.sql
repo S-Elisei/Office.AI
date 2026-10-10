@@ -259,7 +259,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 -- reset time has passed; reset_time is epoch seconds UTC, or NULL when the
 -- vendor's answer could not be turned into an instant or it has passed.
 -- read_at is the vendor's own moment of the reading, as the string the vendor
--- stamped it with; NULL when the vendor gives none.
+-- stamped it with; NULL when the vendor gives none or the office wrote the row.
 CREATE TABLE IF NOT EXISTS quota (
     runtime TEXT NOT NULL CHECK (runtime IN ('claude', 'codex', 'agy')),
     label TEXT NOT NULL,

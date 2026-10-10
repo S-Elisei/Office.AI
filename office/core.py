@@ -1171,7 +1171,9 @@ def start_new_session(conn, agent_id: int) -> dict:
 
 
 
-def record_quota(conn, snapshots, *, partial: bool = False) -> int:
+def record_quota(
+    conn, snapshots, *, partial: bool = False, keep: tuple[str, ...] = ()
+) -> int:
     """Store a poll's worth of quota buckets, and tell the page about it.
 
     One row per (runtime, label), shared by every agent of that runtime.
@@ -1185,8 +1187,8 @@ def record_quota(conn, snapshots, *, partial: bool = False) -> int:
     stored in the row, is not counted as a change and adds no history entry.
 
     A successful poll also deletes that runtime's buckets the answer does not
-    mention; a `partial` reading, one that names only some of the buckets,
-    deletes nothing.
+    mention, except the labels in `keep`; a `partial` reading, one that names only
+    some of the buckets, deletes nothing.
     """
     changed = 0
     now = time.time()
@@ -1251,16 +1253,45 @@ def record_quota(conn, snapshots, *, partial: bool = False) -> int:
                 )
             changed += 1
         for runtime, labels in ({} if partial else live_labels).items():
-            placeholders = ", ".join("?" for _ in labels)
+            spared = (*labels, *keep)
+            placeholders = ", ".join("?" for _ in spared)
             cur = db.execute(
                 conn,
                 f"DELETE FROM quota WHERE runtime = ? AND label NOT IN ({placeholders})",
-                (runtime, *labels),
+                (runtime, *spared),
             )
             changed += cur.rowcount
         if changed:
             _emit(conn, "quota", "quota", None, {"runtime": snapshots[0].runtime})
     return changed
+
+
+def write_codex_window(conn, remaining_fraction: float, reset_time: int) -> None:
+    """Store codex's emulated 5h window as the row (codex, '5h') with this
+    remaining fraction and this reset time, read_at NULL, and tell the page when
+    the row changed. Writes nothing to quota_polls."""
+    reset = str(int(reset_time))
+    with db.transaction(conn):
+        current = db.query_one(
+            conn,
+            "SELECT remaining_fraction, reset_time, read_at FROM quota "
+            "WHERE runtime = 'codex' AND label = '5h'",
+        )
+        if current is not None and (
+            current["remaining_fraction"], current["reset_time"], current["read_at"]
+        ) == (remaining_fraction, reset, None):
+            return
+        db.execute(
+            conn,
+            "INSERT INTO quota (runtime, label, remaining_fraction, reset_time, read_at) "
+            "VALUES ('codex', '5h', ?, ?, NULL) "
+            "ON CONFLICT(runtime, label) DO UPDATE SET "
+            "remaining_fraction = excluded.remaining_fraction, "
+            "reset_time = excluded.reset_time, read_at = NULL, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            (remaining_fraction, reset),
+        )
+        _emit(conn, "quota", "quota", None, {"runtime": "codex"})
 
 
 def expire_passed_quota(conn) -> int:

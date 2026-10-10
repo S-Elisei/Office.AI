@@ -1566,7 +1566,7 @@ Two numbers are normalised:
 
 `read_at` is the vendor's own moment of the reading, as the string the vendor stamped
 it with. A codex reading carries the timestamp of its rollout line; claude and agy give
-none: `NULL`. A change of `read_at`
+none, and a bucket the office writes itself has none: `NULL`. A change of `read_at`
 alone is stored in the bucket, publishes nothing and adds nothing to the history.
 
 Reading it is free for all three, with no turn, at any moment:
@@ -1588,17 +1588,19 @@ every 60 seconds on a thread of its own, and one round of a runtime as soon as a
 a compaction on it ends without its stream having reported quota. claude is polled no
 sooner than 5 minutes after its last poll or its last reading from a turn. The web app
 does not wait for the first round. A successful poll of a runtime deletes the buckets
-its answer did not mention. A failed poll deletes and changes nothing. A runtime that
+its answer did not mention, except codex's `5h` bucket while its window is emulated. A failed poll deletes and changes nothing. A runtime that
 has never answered has no row, and `health()` says so.
 
-**The history** (`quota_polls`) keeps every reading that differs from the one
-before it for its bucket, as the poll gave it.
+**The history** (`quota_polls`) keeps every vendor reading that differs from the one
+before it for its bucket, as the vendor gave it. What the office computes itself is not
+kept.
 
 Only Gemini models are used from agy: its quota keeps the Gemini group alone, and its
 model catalogue (below) the models whose id starts with `gemini` — the one place where
 part of a vendor's answer is not shown.
 
-The buckets carry no derived figure; the wallets below are derived from them.
+The buckets carry no derived figure, except codex's emulated `5h` window (below); the
+wallets below are derived from them.
 
 A quota change publishes the SSE event `quota` and the page redraws itself. Quota
 is not substituted into any system prompt; the director and the leads read it
@@ -1667,7 +1669,46 @@ a slider at the right edge is a reserve of 0. A label beside it gives the reserv
 and in units of the runtime's currency, and follows the slider and the weekly limit field. A
 runtime with no weekly reading stored has a bar with no fill and a working slider. The
 reserve is saved with the rest of the form. Beside the 5h window is a "Withhold spare"
-box, saved with the rest of the form.
+box, saved with the rest of the form. On the codex row an "Emulate 5h window" box stands
+beside it, saved with the rest of the form; while it is ticked, the form cannot be
+submitted unless the codex total weekly limit and 5h window are each above 0.
+
+**The emulated 5h window of codex.** While the setting `wallet_codex_window_emulated` is
+"1" and the `week` bucket of codex is stored, the office keeps the `5h` bucket of codex
+itself, at the size of the setting `wallet_codex_window`. The wallet reads it like any
+`5h` bucket and every page shows it like one, with no mark. The window is **open** at a
+moment t when the `5h` bucket is stored and its reset time lies after t, and **closed**
+otherwise. A codex turn is **running** from the moment its state is installed in
+`_start_turn` to the moment `_watch` clears it, a keep-alive turn included. k is the
+weekly limit over the window setting. While the emulation is off the rules do nothing.
+Each rule reads the stored buckets, computes and writes the `5h` bucket under one lock,
+the lock that every recording of a codex poll holds:
+
+1. **Extension.** When the reset time r of the window is stored and no later than t, and
+   a codex turn is running, the window becomes remaining 1 with reset time r + 18000
+   seconds where that lies after t, and with t + 18000 otherwise. It applies at the start
+   of every poll of codex, whether or not the poll then succeeds; in the polling round,
+   just before the expired buckets are closed; in `_start_turn` for a codex agent, once
+   its process is launched, counting the codex turns already running and not this one;
+   and in `_watch` for a codex agent, when its turn ends, counting this one.
+2. **Turn start.** Right after rule 1 in `_start_turn`, a closed window becomes
+   remaining 1 with reset time t + 18000.
+3. **Consumption.** On every successful poll of codex whose answer is kept and holds a
+   `week` bucket, after rule 1 and before the answer is recorded: a is the remaining
+   fraction of the answer's week, or 1 where that week's reset time is no later than t;
+   w is the stored week's, or 1 where its reset time is stored and no later than t;
+   d = w − a. Where d is above 0 and the window is open, its remaining fraction falls by
+   d·k, not below 0, its reset time unchanged; where d is above 0 and the window is
+   closed, it becomes remaining 1 − d·k, not below 0, with reset time t + 18000. Where d
+   is 0 or less, or the answer holds no `week` bucket, the window stays.
+4. **Closing.** The rewriting of a bucket whose reset time has passed to fully
+   remaining with no reset time closes the window.
+
+Every reset time a rule writes is a whole second. The window is written without a
+history entry, and with no `read_at`. Once the emulation is off, the first successful poll
+of codex deletes the `5h` bucket unless the answer names it. The window produces no
+vendor refusal: with remaining 0 a turn still starts and a running turn is not
+interrupted.
 
 Right after the quota part, `roster()` gives a manager the **price list**: a header
 saying its prices are the average price of a work, from brief to close, in the currency
@@ -1736,11 +1777,12 @@ window of its model's runtime (the model's runtime is read from the model catalo
 window from the form's own field), naming the window, and two own rows with the same role,
 model and effort. Saving zips each table's fields into rows, trims every cell, and replaces
 both tables in one transaction, prices stored as numbers and an empty own role as NULL; the note is written as posted. The wallet fields are written only for the runtimes the page
-shows. A
+shows; the emulation setting only when the codex row was posted, "1" when its box was and
+empty otherwise. A
 table scrolls inside its own box.
 
 There is no notion of paid overflow: the vendors' overdraft fields are not read. An
-exhausted window arrives as a turn error and is classified as `quota_exhausted`.
+exhausted window of a vendor arrives as a turn error and is classified as `quota_exhausted`.
 Its time of return is the one the vendor's refusal names (`quota_reset`), worked
 out once per death. The work is paused, a message from `office`
 goes to whoever section 4 names for it, and the owner gets a plate (if it was the
@@ -2391,7 +2433,7 @@ All times are shown local and stored UTC.
    marked process that survived being killed, and open works that nothing moves and
    nobody above their agent has moved.
 11. **Settings** — the owner's name, the director's standing instructions, the
-    silence threshold, the wallets' weekly limits, 5h windows and reserve, the two price lists (a table each) and their note, and the director's runtime/model/effort with the cost shown
+    silence threshold, the wallets' weekly limits, 5h windows and reserve, whether codex's 5h window is emulated, the two price lists (a table each) and their note, and the director's runtime/model/effort with the cost shown
     before confirmation. Also the delivery address, the outcome of the last delivery,
     and — while the owner's repository is missing `receive.denyCurrentBranch` — the
     "Set up delivery" button that writes it back.
@@ -2490,6 +2532,7 @@ switch_timer            the pending timer of the office's switch: "run" or "paus
 wallet_<runtime>_week   the total weekly limit of a runtime's wallet, in units; empty means no wallet
 wallet_<runtime>_window the 5h window of a runtime's wallet, in units; empty means none
 wallet_<runtime>_reserve the percentage of the week the team leaves untouched; empty means 0
+wallet_codex_window_emulated "1" while the office keeps codex's 5h window itself; empty otherwise
 price_list_note         the owner's note on the price list, in the director's and the leads' system prompts; plain text
 delivery_last           the outcome of the last delivery (JSON), for the settings page
 ```
