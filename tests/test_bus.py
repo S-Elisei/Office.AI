@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from office import core, db
@@ -1150,3 +1152,64 @@ def test_an_executor_with_an_open_work_of_its_own_is_due_a_keep_alive_up_to_its_
     assert due("exec3")
     add_usage_row(conn, "exec3", "ping", DUE_MINUTES)
     assert not due("exec3")
+
+
+# --------------------------------------------------------------------------- codex quota
+
+CODEX_THREAD = "00000000-0000-4000-8000-000000000001"
+
+
+def codex_quota_bus(conn, config, tmp_path, monkeypatch):
+    """A bus over one codex agent whose thread is CODEX_THREAD."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    agent_id = make_agent(conn, "exec1", runtime="codex")
+    with db.transaction(conn) as c:
+        c.execute("UPDATE agents SET session_id = ? WHERE id = ?", (CODEX_THREAD, agent_id))
+    return Bus(conn, dataclasses.replace(config, codex_bin="codex"))
+
+
+def codex_reading(bus, tmp_path, second, week_remaining, week_resets_at):
+    """Rewrite the thread's rollout file to one token_count line stamped `second`
+    seconds past a fixed minute, then poll codex once. The line is constructed from
+    the field names on record: top-level `timestamp`, `payload.type`, and
+    `payload.rate_limits.secondary` with `used_percent`, `window_minutes`, `resets_at`."""
+    day = tmp_path / "codex" / "sessions" / datetime.now().strftime("%Y/%m/%d")
+    day.mkdir(parents=True, exist_ok=True)
+    line = {
+        "timestamp": f"2026-10-10T12:00:{second:02d}.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "rate_limits": {
+                "primary": None,
+                "secondary": {
+                    "used_percent": (1 - week_remaining) * 100,
+                    "window_minutes": 10080,
+                    "resets_at": week_resets_at,
+                },
+            },
+        },
+    }
+    (day / f"rollout-2026-10-10T12-00-00-{CODEX_THREAD}.jsonl").write_text(
+        json.dumps(line) + "\n", encoding="utf-8"
+    )
+    bus._poll_runtime("codex")
+
+
+def codex_buckets(conn):
+    return {q["label"]: q for q in core.quota_buckets(conn)}
+
+
+def test_a_codex_reading_older_than_the_stored_one_is_discarded(conn, config, tmp_path, monkeypatch):
+    bus = codex_quota_bus(conn, config, tmp_path, monkeypatch)
+    resets = int(time.time()) + 3 * 24 * 3600
+
+    codex_reading(bus, tmp_path, 2, 0.8, resets)
+    codex_reading(bus, tmp_path, 1, 0.3, resets)
+    week = codex_buckets(conn)["week"]
+    assert (round(week["remaining_fraction"], 2), week["read_at"]) == (0.8, "2026-10-10T12:00:02.000Z")
+
+    codex_reading(bus, tmp_path, 3, 0.7, resets)
+    assert round(codex_buckets(conn)["week"]["remaining_fraction"], 2) == 0.7
+    history = db.query(conn, "SELECT remaining_fraction FROM quota_polls WHERE label = 'week' ORDER BY id")
+    assert [round(r["remaining_fraction"], 2) for r in history] == [0.8, 0.7]

@@ -11,12 +11,15 @@ class QuotaSnapshot:
 
     `remaining_fraction` is what is left.
     `reset_time` is epoch seconds, UTC.
+    `read_at` is the vendor's own moment of the reading, as the string the vendor
+    stamped it with; None where the vendor gives none.
     """
 
     runtime: str  # "claude" | "codex" | "agy"
     label: str
     remaining_fraction: float
     reset_time: int | None = None
+    read_at: str | None = None
 
 
 QUOTA_5H = "5h"
@@ -90,6 +93,7 @@ def name_quota_windows(snapshots: list[QuotaSnapshot]) -> list[QuotaSnapshot]:
                 label=label,
                 remaining_fraction=snapshot.remaining_fraction,
                 reset_time=snapshot.reset_time,
+                read_at=snapshot.read_at,
             )
         )
     return out

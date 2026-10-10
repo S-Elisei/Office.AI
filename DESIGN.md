@@ -1543,7 +1543,7 @@ director's leaves the audience out. A rule with no title prints as its own text.
 Quota is a property of a vendor account, not of a session, a work or an agent.
 
 ```
-QuotaBucket { runtime, label, remaining_fraction, reset_time }
+QuotaBucket { runtime, label, remaining_fraction, reset_time, read_at }
 ```
 
 The key is the pair (runtime, `label`). The office names the **window** and nothing
@@ -1564,12 +1564,17 @@ Two numbers are normalised:
   reset time — when a reading is saved, and in every polling round for buckets
   no reading has refreshed. The history keeps the vendor's figure.
 
+`read_at` is the vendor's own moment of the reading, as the string the vendor stamped
+it with. A codex reading carries the timestamp of its rollout line; claude and agy give
+none: `NULL`. A change of `read_at`
+alone is stored in the bucket, publishes nothing and adds nothing to the history.
+
 Reading it is free for all three, with no turn, at any moment:
 
 | Runtime | Source |
 |---|---|
 | claude | `claude -p /usage --output-format json`, lines of the form `<label>: N% used`; an answer counts only if `cachedUsageUtilization.fetchedAtMs` in `.claude.json` (under `CLAUDE_CONFIG_DIR`, else the home directory) is no more than 60 seconds older than the call |
-| codex | `rate_limits` from the newest session file of a session the office itself started |
+| codex | `rate_limits` of the `token_count` with the greatest timestamp among the last `token_count` lines of the rollout files of the sessions the office itself started; a `token_count` without a timestamp is not read; a reading older than the greatest `read_at` stored for codex is discarded |
 | agy | `agy --output-format json --print /usage`, `command.data.groups[].buckets[]` |
 
 claude also reports quota in every turn's own stream: a `rate_limit_event` whose

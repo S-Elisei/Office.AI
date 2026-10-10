@@ -1180,8 +1180,9 @@ def record_quota(conn, snapshots, *, partial: bool = False) -> int:
     deletion counted as a change like any other.
 
     A bucket whose reset time has passed is stored as fully remaining, with no
-    reset time. quota_polls gets every reading that differs from the one before it
-    for its bucket, exactly as it came.
+    reset time. quota_polls gets every reading whose figure differs from the one
+    before it for its bucket, exactly as it came. A change of `read_at` alone is
+    stored in the row, is not counted as a change and adds no history entry.
 
     A successful poll also deletes that runtime's buckets the answer does not
     mention; a `partial` reading, one that names only some of the buckets,
@@ -1217,7 +1218,8 @@ def record_quota(conn, snapshots, *, partial: bool = False) -> int:
             fraction = 1.0 if passed else snap.remaining_fraction
             current = db.query_one(
                 conn,
-                "SELECT remaining_fraction, reset_time FROM quota WHERE runtime = ? AND label = ?",
+                "SELECT remaining_fraction, reset_time, read_at FROM quota "
+                "WHERE runtime = ? AND label = ?",
                 (snap.runtime, snap.label),
             )
             if (
@@ -1225,21 +1227,27 @@ def record_quota(conn, snapshots, *, partial: bool = False) -> int:
                 and current["remaining_fraction"] == fraction
                 and current["reset_time"] == reset
             ):
+                if current["read_at"] != snap.read_at:
+                    db.execute(
+                        conn,
+                        "UPDATE quota SET read_at = ? WHERE runtime = ? AND label = ?",
+                        (snap.read_at, snap.runtime, snap.label),
+                    )
                 continue
             if current is None:
                 db.execute(
                     conn,
-                    "INSERT INTO quota (runtime, label, remaining_fraction, reset_time) "
-                    "VALUES (?, ?, ?, ?)",
-                    (snap.runtime, snap.label, fraction, reset),
+                    "INSERT INTO quota (runtime, label, remaining_fraction, reset_time, read_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (snap.runtime, snap.label, fraction, reset, snap.read_at),
                 )
             else:
                 db.execute(
                     conn,
-                    "UPDATE quota SET remaining_fraction = ?, reset_time = ?, "
+                    "UPDATE quota SET remaining_fraction = ?, reset_time = ?, read_at = ?, "
                     "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                     "WHERE runtime = ? AND label = ?",
-                    (fraction, reset, snap.runtime, snap.label),
+                    (fraction, reset, snap.read_at, snap.runtime, snap.label),
                 )
             changed += 1
         for runtime, labels in ({} if partial else live_labels).items():

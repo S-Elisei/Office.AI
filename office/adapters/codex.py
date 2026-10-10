@@ -70,24 +70,6 @@ def _session_file(thread_id: str) -> Path | None:
     return matches[-1] if matches else None
 
 
-def _newest_office_session_file(thread_ids: Sequence[str]) -> Path | None:
-    """The most recently written rollout file among the office's own threads.
-
-    Returns None before the office has run a codex turn.
-
-    Each id is resolved through _session_file().
-    """
-    newest: tuple[float, Path] | None = None
-    for thread_id in thread_ids:
-        path = _session_file(thread_id)
-        if path is None:
-            continue
-        mtime = path.stat().st_mtime
-        if newest is None or mtime > newest[0]:
-            newest = (mtime, path)
-    return newest[1] if newest else None
-
-
 def models_cache_path() -> Path:
     """`$CODEX_HOME/models_cache.json`."""
     return codex_home() / "models_cache.json"
@@ -131,8 +113,9 @@ def parse_models_cache(payload: dict) -> list[ModelInfo] | None:
     return out
 
 
-def _newest_token_count(lines: list[str]) -> dict | None:
-    """The newest `token_count` payload among these lines, or None.
+def _newest_token_count(lines: list[str]) -> tuple[str | None, dict] | None:
+    """The newest `token_count` among these lines as its top-level `timestamp`
+    (None where that is not a string) and its payload, or None.
 
     A line the writer has not finished simply fails to parse and is skipped.
     """
@@ -146,7 +129,8 @@ def _newest_token_count(lines: list[str]) -> dict | None:
             continue
         payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else msg
         if payload.get("type") == "token_count":
-            return payload
+            stamp = msg.get("timestamp")
+            return (stamp if isinstance(stamp, str) else None), payload
     return None
 
 
@@ -211,8 +195,8 @@ def rollout_requests(lines: list[str], since: str) -> list[dict]:
 
 
 class _RolloutTail:
-    """The newest `token_count` in a rollout file, read incrementally, and the
-    reasoning items finished since the first look.
+    """The newest `token_count` in a rollout file (_newest_token_count), read
+    incrementally, and the reasoning items finished since the first look.
 
     The first look reads at most `_TAIL_BYTES` (and, only if that tail holds
     no `token_count` yet, the whole file once); every look after that reads
@@ -231,7 +215,7 @@ class _RolloutTail:
         self._lock = threading.Lock()
         self._path: Path | None = None
         self._offset = 0
-        self._payload: dict | None = None
+        self._reading: tuple[str | None, dict] | None = None
         # Reasoning items in the bytes appended after the first look, not yet
         # taken by take_reasoning().
         self._reasoning = 0
@@ -242,41 +226,44 @@ class _RolloutTail:
             count, self._reasoning = self._reasoning, 0
             return count
 
-    def token_count(self, path: Path | None) -> dict | None:
+    def token_count(self, path: Path | None) -> tuple[str | None, dict] | None:
+        """The file's newest `token_count` as its timestamp and payload, or None
+        while the file holds none or `path` is None."""
         if path is None:
             return None
         with self._lock:
             try:
                 size = path.stat().st_size
             except OSError:
-                return self._payload if path == self._path else None
+                return self._reading if path == self._path else None
             if path != self._path or size < self._offset:
-                self._path, self._offset, self._payload, self._reasoning = path, 0, None, 0
+                self._path, self._offset, self._reading, self._reasoning = path, 0, None, 0
             if size == self._offset:
-                return self._payload  # nothing appended since the last look
+                return self._reading  # nothing appended since the last look
             first_look = self._offset == 0
             start = max(0, size - _TAIL_BYTES) if first_look else self._offset
-            payload, consumed, reasoning = self._scan(
+            reading, consumed, reasoning = self._scan(
                 path, start, size, drop_first_line=first_look and start > 0
             )
-            if payload is None and first_look and start > 0:
+            if reading is None and first_look and start > 0:
                 # The tail held no token_count yet — read the whole file, once.
-                payload, consumed, reasoning = self._scan(path, 0, size, drop_first_line=False)
+                reading, consumed, reasoning = self._scan(path, 0, size, drop_first_line=False)
             if consumed is None:
-                return self._payload  # unreadable right now; the last figure stands
+                return self._reading  # unreadable right now; the last figure stands
             self._offset = consumed
             if not first_look:
                 self._reasoning += reasoning
-            if payload is not None:
-                self._payload = payload
-            return self._payload
+            if reading is not None:
+                self._reading = reading
+            return self._reading
 
     @staticmethod
     def _scan(
         path: Path, start: int, end: int, drop_first_line: bool
-    ) -> tuple[dict | None, int | None, int]:
-        """The newest token_count in [start, end), the offset after the last
-        complete line, and the reasoning items among the complete lines."""
+    ) -> tuple[tuple[str | None, dict] | None, int | None, int]:
+        """The newest token_count in [start, end) (_newest_token_count), the
+        offset after the last complete line, and the reasoning items among the
+        complete lines."""
         try:
             with path.open("rb") as handle:
                 handle.seek(start)
@@ -472,7 +459,8 @@ class CodexAdapter:
         The file is located once per turn (_rollout_file) and read forward
         from where the last poll stopped (_RolloutTail).
         """
-        payload = self._tail.token_count(self._rollout_file(session_id or ""))
+        reading = self._tail.token_count(self._rollout_file(session_id or ""))
+        payload = reading[1] if reading else None
         reasoning = self._tail.take_reasoning()
         info = (payload or {}).get("info") or {}
         used = (info.get("last_token_usage") or {}).get("total_tokens")
@@ -516,22 +504,32 @@ class CodexAdapter:
         return rollout_requests(lines, since)
 
     def poll_quota(self, session_ids: Sequence[str] = ()) -> list[QuotaSnapshot] | None:
-        """Quota from the office's newest session file. Free: no turn, no tokens.
+        """Quota from the office's freshest reading. Free: no turn, no tokens.
 
-        Account-wide: any of the office's own threads carries the same figure,
-        including the file of a turn running right now.
+        Takes the last `token_count` of each rollout file the office's threads
+        resolve to (_session_file) and answers with the `rate_limits` of the one
+        whose top-level `timestamp` is greatest, compared as strings. A
+        `token_count` without a string `timestamp` is not a candidate. Every
+        snapshot carries that timestamp as its `read_at`.
 
         **`session_ids` must be the office's own threads and nothing else.**
         The ids come from `agents.session_id` via office/bus.py.
 
-        Returns None when the office has run no codex turn yet: no thread, no
-        file, no number.
+        Returns None when no file yields a candidate, and when the freshest
+        reading carries no usable `rate_limits`.
 
-        Not per-thread state: this does not go through _rollout_file. The
-        newest office file is looked up on each round.
+        Not per-thread state: this does not go through _rollout_file. Every file
+        is looked up on each round, through this instance's _RolloutTail.
         """
-        path = _newest_office_session_file(session_ids)
-        return _quota((self._tail.token_count(path) or {}).get("rate_limits"))
+        newest: tuple[str, dict | None] | None = None
+        for thread_id in session_ids:
+            reading = self._tail.token_count(_session_file(thread_id))
+            if reading is None or reading[0] is None:
+                continue
+            stamp, payload = reading
+            if newest is None or stamp > newest[0]:
+                newest = (stamp, payload.get("rate_limits"))
+        return _quota(newest[1], newest[0]) if newest else None
 
     def list_models(self) -> list[ModelInfo] | None:
         """`$CODEX_HOME/models_cache.json`. Free, local, and NO process at all.
@@ -548,8 +546,9 @@ class CodexAdapter:
         return parse_models_cache(payload)
 
 
-def _quota(rate_limits: dict | None) -> list[QuotaSnapshot] | None:
-    """`rate_limits` -> buckets, labelled by the window they cover.
+def _quota(rate_limits: dict | None, read_at: str) -> list[QuotaSnapshot] | None:
+    """`rate_limits` -> buckets, labelled by the window they cover, each stamped
+    with `read_at`.
 
     A window codex does not report, or one that is neither, keeps codex's own
     key.
@@ -571,6 +570,7 @@ def _quota(rate_limits: dict | None) -> list[QuotaSnapshot] | None:
                 label=quota_window(bucket.get("window_minutes")) or key,
                 remaining_fraction=clamp_fraction(1.0 - float(used) / 100.0),
                 reset_time=int(reset) if reset else None,
+                read_at=read_at,
             )
         )
     return snapshots or None

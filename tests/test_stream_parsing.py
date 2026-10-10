@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -112,6 +114,49 @@ def test_codex_poll_reports_the_reasoning_items_appended_since_the_last_look(tmp
         handle.write(reasoning)
     assert adapter.poll_context(thread).reasoning == 2
     assert adapter.poll_context(thread).reasoning == 0
+
+
+def _token_count_line(stamp: str, week_used_percent: float) -> str:
+    # Constructed from the field names on record: the top-level `timestamp`,
+    # `payload.type`, and `payload.rate_limits.primary` / `.secondary` with
+    # `used_percent`, `window_minutes` and `resets_at`.
+    return json.dumps({
+        "timestamp": stamp,
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "rate_limits": {
+                "primary": {"used_percent": 5.0, "window_minutes": 300, "resets_at": 1790543283},
+                "secondary": {
+                    "used_percent": week_used_percent, "window_minutes": 10080, "resets_at": 1791079503
+                },
+            },
+        },
+    }) + "\n"
+
+
+def test_codex_quota_is_the_reading_stamped_latest_not_the_one_in_the_newest_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    day = tmp_path / "sessions" / datetime.now().strftime("%Y/%m/%d")
+    day.mkdir(parents=True)
+    latest, earlier, unstamped = (f"00000000-0000-4000-8000-00000000000{n}" for n in (1, 2, 3))
+    (day / f"rollout-2026-10-04T13-45-08-{latest}.jsonl").write_text(
+        _token_count_line("2026-10-04T14:00:00.000Z", 40.0), encoding="utf-8"
+    )
+    newest_file = day / f"rollout-2026-10-04T13-45-09-{earlier}.jsonl"
+    newest_file.write_text(_token_count_line("2026-10-04T13:50:00.000Z", 30.0), encoding="utf-8")
+    os.utime(newest_file, (time.time() + 60, time.time() + 60))
+    bare = json.loads(_token_count_line("2026-10-04T15:00:00.000Z", 10.0))
+    del bare["timestamp"]
+    (day / f"rollout-2026-10-04T13-45-10-{unstamped}.jsonl").write_text(json.dumps(bare) + "\n", encoding="utf-8")
+
+    polled = CodexAdapter(bin_path="codex").poll_quota([earlier, latest, unstamped])
+
+    assert [(q.label, round(q.remaining_fraction, 2), q.read_at) for q in polled] == [
+        ("5h", 0.95, "2026-10-04T14:00:00.000Z"),
+        ("week", 0.6, "2026-10-04T14:00:00.000Z"),
+    ]
+    assert CodexAdapter(bin_path="codex").poll_quota([unstamped]) is None
 
 
 def test_claude_session_requests_carry_the_output_the_stream_does_not():

@@ -138,6 +138,8 @@ class Bus:
         # time.monotonic() of each runtime's last poll and last reading from a
         # turn, by runtime (QUOTA_POLL_SPACING_SECONDS). In memory.
         self._quota_read_at: dict[str, float] = {}
+        # Held for every recording of a codex poll.
+        self._codex_quota_lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -204,9 +206,24 @@ class Bus:
             # (office/adapters/base.py).
             polled = adapter.poll_quota(self._office_session_ids(runtime))
             if polled:
-                core.record_quota(self.conn, name_quota_windows(polled))
+                named = name_quota_windows(polled)
+                if runtime == "codex":
+                    self._record_codex_quota(named)
+                else:
+                    core.record_quota(self.conn, named)
         except Exception:
             _log.exception("quota poll failed for %s", runtime)
+
+    def _record_codex_quota(self, snapshots: list) -> None:
+        """Record a codex poll's named answer. An answer whose `read_at` is older
+        than the greatest one stored is discarded."""
+        with self._codex_quota_lock:
+            stored = db.query_one(
+                self.conn, "SELECT MAX(read_at) AS read_at FROM quota WHERE runtime = 'codex'"
+            )["read_at"]
+            if stored is not None and snapshots[0].read_at < stored:
+                return
+            core.record_quota(self.conn, snapshots)
 
     def _quota_after(self, runtime: str, turn: AgentTurn) -> None:
         """Store the quota a finished turn or compaction reported in its own stream,

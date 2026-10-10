@@ -258,11 +258,14 @@ CREATE TABLE IF NOT EXISTS profiles (
 -- label). remaining_fraction is always what is LEFT, and 1.0 for a bucket whose
 -- reset time has passed; reset_time is epoch seconds UTC, or NULL when the
 -- vendor's answer could not be turned into an instant or it has passed.
+-- read_at is the vendor's own moment of the reading, as the string the vendor
+-- stamped it with; NULL when the vendor gives none.
 CREATE TABLE IF NOT EXISTS quota (
     runtime TEXT NOT NULL CHECK (runtime IN ('claude', 'codex', 'agy')),
     label TEXT NOT NULL,
     remaining_fraction REAL NOT NULL,
     reset_time TEXT,
+    read_at TEXT,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (runtime, label)
 );
