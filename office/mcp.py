@@ -1279,23 +1279,29 @@ def _share(amount: float, wallet: dict) -> str:
 
 def _price_list_lines(conn) -> list[str]:
     """roster()'s price list: the two lists, each as its column names and its rows with
-    the cells joined by ` | `; a works row whose model's runtime has a wallet also carries
-    its price as a share of the window that limits that wallet."""
+    the cells joined by ` | `. A works row also carries its price as a share of the window
+    that limits its model's runtime's wallet; an own row carries its currency and that
+    share. The share is empty where the runtime has no wallet."""
     runtime_of = {m["model_id"]: m["runtime"] for m in core.list_models(conn)}
     wallet_of = {w["runtime"]: w for w in wallets.overview(conn)}
 
     def cell(value) -> str:
         return f"{value:g}" if isinstance(value, float) else value or ""
 
+    def currency(row) -> str:
+        runtime = runtime_of.get(row["model"])
+        return wallets.CURRENCY[runtime] if runtime else ""
+
     def share(row) -> str:
         wallet = wallet_of.get(runtime_of.get(row["model"]))
         return f"{_share(row['price'], wallet)} of the {wallet['runtime']} {wallet['window']}" if wallet else ""
 
-    def table(columns, rows, shares=False) -> list[str]:
+    def table(columns, rows, extra) -> list[str]:
         if not rows:
             return ["    (empty)"]
-        lines = [" | ".join((*columns, "share") if shares else columns)] + [
-            " | ".join((*(cell(row[c]) for c in columns), *((share(row),) if shares else ()))) for row in rows
+        lines = [" | ".join((*columns, *(name for name, _ in extra)))] + [
+            " | ".join((*(cell(row[c]) for c in columns), *(value(row) for _, value in extra)))
+            for row in rows
         ]
         return [f"    {line}" for line in lines]
 
@@ -1304,10 +1310,10 @@ def _price_list_lines(conn) -> list[str]:
         "model's runtime; share: the price as a part of the window that limits its runtime's "
         "wallet, the one the wallet's line names):",
         "  Works you assign:",
-        *table(core.PRICE_WORKS_COLUMNS, core.price_works(conn), shares=True),
+        *table(core.PRICE_WORKS_COLUMNS, core.price_works(conn), [("share", share)]),
         "  Committed to your own wallet for each work you assign to an executor, by the "
-        "work's role and your model and effort (in the currency of your runtime):",
-        *table(core.PRICE_OWN_COLUMNS, core.price_own(conn)),
+        "work's role and your model and effort:",
+        *table(core.PRICE_OWN_COLUMNS, core.price_own(conn), [("currency", currency), ("share", share)]),
     ]
 
 

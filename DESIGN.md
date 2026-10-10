@@ -1673,8 +1673,9 @@ share is the row's price over the size of the limiting window of the wallet of i
 runtime, written as `<percent> of the <runtime> <window>`, and empty where that runtime has
 no wallet; the header says so. "Committed
 to your own wallet for each work you assign to an executor, by the work's role and your
-model and effort", with a note that its prices are in the currency of the caller's
-runtime, and `price_own` the same way, its columns `what | role | model | effort | price`.
+model and effort", and `price_own` the same way, its columns
+`what | role | model | effort | price | currency | share`: the currency of the row's
+model's runtime, and the share as in the works table.
 Prices are shown as numbers. An executor does not see it.
 
 The office reads these rows in three ways. The **roles in effect** are the distinct
