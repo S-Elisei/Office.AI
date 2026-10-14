@@ -1,0 +1,504 @@
+{
+  "settings": {
+    "wallet_claude_week": "1250",
+    "wallet_claude_window": "110",
+    "wallet_claude_reserve": "0",
+    "wallet_codex_week": "425",
+    "wallet_codex_window": "62.5",
+    "wallet_codex_reserve": "0",
+    "wallet_agy_week": "127",
+    "wallet_agy_window": "21",
+    "wallet_agy_reserve": "",
+    "wallet_codex_window_emulated": "1"
+  },
+  "price_list": {
+    "note": "Coding takes two factors, written \"<depth>, <reach>\". A coding work is assigned only when its brief can state a checkable definition of done; otherwise it is clarified or designed first.\nDepth - what the executor has to devise: craft - the solution is known and named in the brief: follow a pattern in the code, move, wire up, rename, add tests to existing code; engineering - the executor understands the existing code and picks an ordinary approach, and the brief lists every requirement and invariant correctness rests on; research - there is no ready solution, or correctness rests on what the brief cannot list: a new algorithm or data layout, an unknown cause, determinism or concurrency to think through; or correctness rests on a property of the data or the existing code that you state in the brief and have not checked yourself, or the brief leaves the executor to find what else the change needs.\nReach - how much has to be held and checked: point - one place, correctness visible at once; several - several related changes in one module, or an addition that carries its own edge cases and tests, or existing code refactored so that several paths share it; through - the change runs through several modules and must be complete in all of them. The project's record of existing behaviour - versions, Golden files, scenario baselines - is a module: a change that alters what the simulation already produces or saves is through. Code that only adds measurement (a MapCheck figure, a new scenario with its own baseline) does not raise reach.\nJudging a coding work: write its definition of done first. Judge from the brief you are about to send, not from the task card. Depth: ask what the executor must work out that the brief does not give - nothing: craft; how, with every requirement and invariant listed in the brief: engineering; what correctness rests on, or a solution nobody has yet, or a property you state that you have not checked: research. Reach: count the places and the modules the change must be complete in, and the edge cases it must hold, and ask whether it moves what the simulation already produces or saves.\nBetween vendors, take the one whose wallet keeps the largest share of its window after the work; roster() shows each wallet's share left and each price's share. If the work needs a particular vendor, take it and say why in complexity_reason. Within a vendor, choose by your experience of how each model did on such work.\nA work runs on the model and effort its row names.\nReview takes the complexity any. Its reviewer runs on another vendor than the work's author.\nConsultation: ordinary - an opinion on a design or code decision of the project; expert - the facts of a real-world field the game models; principle-level - a global decision that binds several domains.\nArt takes one complexity, by what the work delivers: edit - one existing asset changed, one check render; study - variants for Owner to choose from, or a trial of a factory model in the sandbox, and nothing enters the repository; finish - an asset enters the repository: LODs, bakes, FBX, provenance, one PR; pipeline - one stage of a unit's multi-stage pipeline: mesh, UV and bake, or rig and clips. A sound set takes the same complexities.\nOther roles take the complexities their rows name.",
+    "works": [
+      {
+        "role": "coding",
+        "complexity": "craft, point",
+        "model": "gpt-6-luna",
+        "effort": "high",
+        "price": 0.025
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, point",
+        "model": "haiku",
+        "effort": "medium",
+        "price": 0.03
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, point",
+        "model": "gemini-3.8-flash-medium",
+        "effort": "",
+        "price": 0.76
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, point",
+        "model": "sonnet",
+        "effort": "low",
+        "price": 0.23
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, several",
+        "model": "gpt-6-luna",
+        "effort": "max",
+        "price": 0.054
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, several",
+        "model": "haiku",
+        "effort": "high",
+        "price": 0.12
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, several",
+        "model": "gemini-3.8-flash-medium",
+        "effort": "",
+        "price": 2.11
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, several",
+        "model": "sonnet",
+        "effort": "low",
+        "price": 0.82
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, several",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "price": 0.57
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, through",
+        "model": "gemini-3.8-flash-high",
+        "effort": "",
+        "price": 4.34
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, through",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "price": 1.35
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, through",
+        "model": "sonnet",
+        "effort": "medium",
+        "price": 1.41
+      },
+      {
+        "role": "coding",
+        "complexity": "craft, through",
+        "model": "gpt-6-luna",
+        "effort": "max",
+        "price": 0.23
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, point",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "price": 0.38
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, point",
+        "model": "opus",
+        "effort": "low",
+        "price": 0.76
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, point",
+        "model": "sonnet",
+        "effort": "low",
+        "price": 0.28
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, point",
+        "model": "gemini-3.8-flash-high",
+        "effort": "",
+        "price": 1.23
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, several",
+        "model": "gpt-6.1-sol",
+        "effort": "medium",
+        "price": 0.9
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, several",
+        "model": "sonnet",
+        "effort": "medium",
+        "price": 0.72
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, several",
+        "model": "opus",
+        "effort": "low",
+        "price": 1.67
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, several",
+        "model": "gemini-3.8-flash-high",
+        "effort": "",
+        "price": 2.21
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, through",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 1.48
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, through",
+        "model": "sonnet",
+        "effort": "high",
+        "price": 2.14
+      },
+      {
+        "role": "coding",
+        "complexity": "engineering, through",
+        "model": "opus",
+        "effort": "medium",
+        "price": 7.87
+      },
+      {
+        "role": "coding",
+        "complexity": "research, point",
+        "model": "opus",
+        "effort": "medium",
+        "price": 2.88
+      },
+      {
+        "role": "coding",
+        "complexity": "research, point",
+        "model": "gpt-6.1-sol",
+        "effort": "medium",
+        "price": 1.26
+      },
+      {
+        "role": "coding",
+        "complexity": "research, several",
+        "model": "opus",
+        "effort": "medium",
+        "price": 6.28
+      },
+      {
+        "role": "coding",
+        "complexity": "research, several",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 3.82
+      },
+      {
+        "role": "coding",
+        "complexity": "research, through",
+        "model": "opus",
+        "effort": "high",
+        "price": 16.73
+      },
+      {
+        "role": "coding",
+        "complexity": "research, through",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 6.32
+      },
+      {
+        "role": "review",
+        "complexity": "any",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 0.29
+      },
+      {
+        "role": "review",
+        "complexity": "any",
+        "model": "opus",
+        "effort": "medium",
+        "price": 0.48
+      },
+      {
+        "role": "consultation",
+        "complexity": "ordinary",
+        "model": "opus",
+        "effort": "high",
+        "price": 1.14
+      },
+      {
+        "role": "consultation",
+        "complexity": "ordinary",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 0.38
+      },
+      {
+        "role": "consultation",
+        "complexity": "expert",
+        "model": "gpt-6.1-sol",
+        "effort": "xhigh",
+        "price": 0.73
+      },
+      {
+        "role": "consultation",
+        "complexity": "principle-level",
+        "model": "opus",
+        "effort": "high",
+        "price": 1.16
+      },
+      {
+        "role": "consultation",
+        "complexity": "principle-level",
+        "model": "gpt-6-astra",
+        "effort": "high",
+        "price": 1.12
+      },
+      {
+        "role": "visual design",
+        "complexity": "any",
+        "model": "sonnet",
+        "effort": "high",
+        "price": 10.5
+      },
+      {
+        "role": "art",
+        "complexity": "edit",
+        "model": "sonnet",
+        "effort": "high",
+        "price": 0.38
+      },
+      {
+        "role": "art",
+        "complexity": "study",
+        "model": "sonnet",
+        "effort": "high",
+        "price": 0.99
+      },
+      {
+        "role": "art",
+        "complexity": "finish",
+        "model": "sonnet",
+        "effort": "high",
+        "price": 1.55
+      },
+      {
+        "role": "art",
+        "complexity": "pipeline",
+        "model": "sonnet",
+        "effort": "high",
+        "price": 1.2
+      },
+      {
+        "role": "art",
+        "complexity": "edit",
+        "model": "gemini-3.8-flash-high",
+        "effort": "",
+        "price": 0.58
+      },
+      {
+        "role": "art",
+        "complexity": "study",
+        "model": "gemini-3.8-flash-high",
+        "effort": "",
+        "price": 1.52
+      },
+      {
+        "role": "art",
+        "complexity": "finish",
+        "model": "gemini-3.8-flash-high",
+        "effort": "",
+        "price": 2.1
+      },
+      {
+        "role": "art",
+        "complexity": "pipeline",
+        "model": "gemini-3.8-flash-high",
+        "effort": "",
+        "price": 2.19
+      },
+      {
+        "role": "art",
+        "complexity": "edit",
+        "model": "gpt-6.1-sol",
+        "effort": "medium",
+        "price": 0.29
+      },
+      {
+        "role": "art",
+        "complexity": "study",
+        "model": "gpt-6.1-sol",
+        "effort": "medium",
+        "price": 1.4
+      },
+      {
+        "role": "art",
+        "complexity": "finish",
+        "model": "gpt-6.1-sol",
+        "effort": "medium",
+        "price": 1.06
+      },
+      {
+        "role": "art",
+        "complexity": "pipeline",
+        "model": "gpt-6.1-sol",
+        "effort": "medium",
+        "price": 1.1
+      },
+      {
+        "role": "art",
+        "complexity": "generate",
+        "model": "gpt-6-luna",
+        "effort": "high",
+        "price": 0.024
+      },
+      {
+        "role": "art",
+        "complexity": "generate",
+        "model": "gemini-3.8-flash-high",
+        "effort": "",
+        "price": 0.58
+      },
+      {
+        "role": "critique",
+        "complexity": "any",
+        "model": "gpt-6.1-sol",
+        "effort": "xhigh",
+        "price": 1.33
+      },
+      {
+        "role": "test-run",
+        "complexity": "ordinary",
+        "model": "gemini-3.8-flash-medium",
+        "effort": "",
+        "price": 0.72
+      },
+      {
+        "role": "test-run",
+        "complexity": "ordinary",
+        "model": "sonnet",
+        "effort": "low",
+        "price": 0.18
+      },
+      {
+        "role": "test-run",
+        "complexity": "ordinary",
+        "model": "gpt-6-luna",
+        "effort": "high",
+        "price": 0.024
+      },
+      {
+        "role": "test-run",
+        "complexity": "ordinary",
+        "model": "haiku",
+        "effort": "medium",
+        "price": 0.02
+      }
+    ],
+    "own": [
+      {
+        "what": "coordinating a coding work",
+        "role": "coding",
+        "model": "opus",
+        "effort": "high",
+        "price": 1.25
+      },
+      {
+        "what": "coordinating a coding work",
+        "role": "coding",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 1.23
+      },
+      {
+        "what": "coordinating a review",
+        "role": "review",
+        "model": "opus",
+        "effort": "high",
+        "price": 0.25
+      },
+      {
+        "what": "coordinating a review",
+        "role": "review",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 0.25
+      },
+      {
+        "what": "coordinating a consultation",
+        "role": "consultation",
+        "model": "opus",
+        "effort": "high",
+        "price": 0.9
+      },
+      {
+        "what": "coordinating a consultation",
+        "role": "consultation",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 0.89
+      },
+      {
+        "what": "coordinating an art work",
+        "role": "art",
+        "model": "opus",
+        "effort": "high",
+        "price": 1.0
+      },
+      {
+        "what": "coordinating an art work",
+        "role": "art",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 0.99
+      },
+      {
+        "what": "coordinating a test run",
+        "role": "test-run",
+        "model": "opus",
+        "effort": "high",
+        "price": 0.55
+      },
+      {
+        "what": "coordinating a test run",
+        "role": "test-run",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 0.54
+      },
+      {
+        "what": "coordinating a critique",
+        "role": "critique",
+        "model": "opus",
+        "effort": "high",
+        "price": 0.75
+      },
+      {
+        "what": "coordinating a critique",
+        "role": "critique",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "price": 0.74
+      }
+    ]
+  }
+}

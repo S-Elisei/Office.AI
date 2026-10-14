@@ -177,6 +177,20 @@ def set_price_lists(conn, works: list[dict], own: list[dict], actor: str | None 
         _emit(conn, "settings", "setting", None, {"key": "price_list"}, actor=actor)
 
 
+#: The settings, price lists and price list note a new office starts with.
+_DEFAULTS_PATH = Path(__file__).parent / "defaults.json"
+
+
+def seed_defaults(conn) -> None:
+    """Write the default settings, price lists and price list note (defaults.json)."""
+    defaults = json.loads(_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    for key, value in defaults["settings"].items():
+        set_setting(conn, key, value)
+    price_list = defaults["price_list"]
+    set_price_lists(conn, price_list["works"], price_list["own"])
+    set_setting(conn, PRICE_LIST_NOTE_SETTING, price_list["note"])
+
+
 def work_roles(conn) -> list[str]:
     """The roles an executor may be hired with, in effect now: the distinct roles of the
     works price list, in order of first appearance; the defaults when it has no row."""

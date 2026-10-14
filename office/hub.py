@@ -110,8 +110,11 @@ async def lifespan(app: FastAPI):
     config = load_config()
     config.ensure_layout()
     _log_to_file(config)
+    new_office = not config.db_path.exists()
     conn = db.connect(config.db_path)
     db.init_schema(conn)
+    if new_office:
+        core.seed_defaults(conn)
 
     await asyncio.to_thread(marks.sweep, marks.office_scope(), "a previous life of this office")
     await asyncio.to_thread(stages.recover, conn, config)
