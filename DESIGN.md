@@ -1561,7 +1561,9 @@ Two numbers are normalised:
 - `reset_time` is always epoch seconds, UTC. Unparseable is `NULL`; no local zone is
   substituted. claude's `/usage` names no year: the one that puts the moment
   nearest to now is taken;
-- a bucket whose reset time has passed is stored as fully remaining, with no
+- a bucket's reset time is stored one minute (`RESET_MARGIN_SECONDS`) after the one
+  the vendor reports;
+- a bucket whose stored reset time has passed is stored as fully remaining, with no
   reset time — when a reading is saved, and in every polling round for buckets
   no reading has refreshed. The history keeps the vendor's figure.
 
@@ -1651,11 +1653,10 @@ computed from the settings, the stored buckets and the works' commitments:
   times the weekly limit, not below zero;
 - the 5h window limits only where its size is set and its `5h` bucket is stored: it lets
   through the bucket's remaining fraction times the window's size;
-- the amount of a period counts as available from one hour before its reset: the window
-  adds its whole size when the `5h` reset is no more than an hour away, the week adds the
-  share when the weekly reset is no more than an hour away; the **window cap** is what the
-  window lets through plus its addition (unbounded where it does not limit), the **week
-  cap** what is left of the week plus its addition;
+- a bucket whose reset time has passed counts as full: the window then lets through its
+  whole size, and what is left of the week is the share; the **window cap** is what the
+  window lets through (unbounded where it does not limit), the **week cap** what is left
+  of the week;
 - what the open works **commit** on a wallet is the sum of `works.price` where
   `price_wallet` is the wallet and of `works.coordination` where `coordination_wallet`
   is the wallet; the wallet counts the works that commit anything on it;
@@ -1664,15 +1665,15 @@ computed from the settings, the stored buckets and the works' commitments:
 - the **spare** is what may go to work that can wait: the lesser of what is available and
   what is left of the week less what is committed less the line, not below zero. The line
   is the share times 1 − e², where e is the part of the week gone: the weekly reset less
-  seven days, measured to now, over seven days; e is 0 when no weekly reset is stored.
+  seven days, measured to now, over seven days; e is 0 when no weekly reset is stored or
+  it has passed.
   While the spare is withheld it is 0, and it stays so until the owner clears it;
 - the **limiting window** is the week when the week cap is no greater than the window cap,
   its size the share; otherwise the 5h window, its size the window setting;
 - **more** becomes available at the time the cap that limits it next lets more through: when
-  the week cap is no greater than the window cap, the weekly reset less an hour, or, when
-  the week already has its addition, a week later; otherwise the `5h` reset less an hour,
-  or, when the window already has its addition, five hours later. It is absent when that
-  reset is not stored.
+  the week cap is no greater than the window cap, the weekly reset, or a week after it
+  when it has passed; otherwise the `5h` reset, or five hours after it when it has passed.
+  It is absent when that reset is not stored.
 
 `roster()` gives a manager, in its quota part, per wallet one line, labelled by the
 wallet's currency, its runtime and, for the two wallets of agy, its group, such as
@@ -1804,8 +1805,8 @@ table scrolls inside its own box.
 
 There is no notion of paid overflow: the vendors' overdraft fields are not read. An
 exhausted window of a vendor arrives as a turn error and is classified as `quota_exhausted`.
-Its time of return is the one the vendor's refusal names (`quota_reset`), worked
-out once per death. The work is paused, a message from `office`
+Its time of return is one minute (`RESET_MARGIN_SECONDS`) after the one the vendor's
+refusal names (`quota_reset`), worked out once per death. The work is paused, a message from `office`
 goes to whoever section 4 names for it, and the owner gets a plate (if it was the
 director's turn) or a journal line, naming the hold when there is one. The work
 resumes when its holder's next turn starts: after the time of return, a message to

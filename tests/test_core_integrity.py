@@ -63,7 +63,7 @@ def test_a_bucket_whose_reset_has_passed_reads_as_unused(conn):
 
     assert core.record_quota(conn, polled) == 2
     stored = {r["label"]: (r["remaining_fraction"], r["reset_time"]) for r in core.quota_buckets(conn)}
-    assert stored == {"5h": (1.0, None), "week": (0.5, str(now + 3600))}
+    assert stored == {"5h": (1.0, None), "week": (0.5, str(now + 3600 + core.RESET_MARGIN_SECONDS))}
     history = db.query(conn, "SELECT label, remaining_fraction FROM quota_polls ORDER BY id")
     assert [(r["label"], r["remaining_fraction"]) for r in history] == [("5h", 0.2), ("week", 0.5)]
 
@@ -108,9 +108,7 @@ def test_a_work_is_committed_to_its_wallet_and_a_work_the_wallet_cannot_cover_is
         make_work(conn, second)
     assert db.query_one(conn, "SELECT COUNT(*) AS n FROM works")["n"] == 1
 
-    core.record_quota(
-        conn,
-        [QuotaSnapshot(runtime="claude", label="5h", remaining_fraction=1.0, reset_time=now + 1800)],
-        partial=True,
-    )
-    assert db.query_one(conn, "SELECT * FROM works WHERE id = ?", (make_work(conn, second),)) is not None
+    # An emptied window whose stored reset passes with no new reading counts as full.
+    db.execute(conn, "UPDATE quota SET remaining_fraction = 0.0, reset_time = ? WHERE label = '5h'",
+               (str(int(time.time()) - 1),))
+    assert wallets.available(conn, "claude")["available"] == 4.0

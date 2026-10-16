@@ -50,9 +50,6 @@ _WEEK_SECONDS = 7 * 24 * 3600
 #: The span of one 5h window.
 WINDOW_SECONDS = 5 * 3600
 
-#: How long before a bucket's reset its next period's amount counts as available.
-CREDIT_SECONDS = 3600
-
 
 def of_model(conn, runtime: str, model: str) -> Wallet:
     """The wallet a model on `runtime` draws on: `argon` for an agy model whose catalogue
@@ -116,6 +113,16 @@ def week_remaining(conn, wallet: str) -> float | None:
     )
 
 
+def _refilled(bucket, now: float) -> bool:
+    """Whether a stored bucket's reset time has passed."""
+    return bucket["reset_time"] is not None and int(bucket["reset_time"]) <= now
+
+
+def _remaining(bucket, now: float) -> float:
+    """A stored bucket's remaining fraction, 1 once its reset time has passed."""
+    return 1.0 if _refilled(bucket, now) else bucket["remaining_fraction"]
+
+
 def units(value: float) -> str:
     """A wallet figure: whole units from a hundred up, one decimal from ten, two below."""
     if abs(value) >= 100:
@@ -149,44 +156,36 @@ def _wallet(conn, wallet: Wallet, buckets: dict, now: float, leaving: int | None
     to work that can wait: what is left above the line the share times 1 - e² draws,
     e being the part of the week gone; 0
     while the owner withholds it), `more_at` (epoch seconds when what limits it
-    next lets more through, None when that reset is not stored), and `window` and
+    next lets more through: its reset, or one period after a reset that has passed;
+    None when that reset is not stored), and `window` and
     `window_size` (the period that limits `available` — "5h window" or "week" — and its
     size: the window's setting, or the week's limit less the reserve).
 
-    The window limits only when its size is set and its bucket is stored. The
-    amount of a period counts as available from CREDIT_SECONDS before its reset.
+    The window limits only when its size is set and its bucket is stored. A bucket
+    whose reset time has passed counts as full.
     """
     limit = _number(core.get_setting(conn, week_key(wallet.id)))
     week = buckets.get((wallet.runtime, wallet.week_bucket))
     if not limit or week is None:
         return None
     reserve = (_number(core.get_setting(conn, reserve_key(wallet.id))) or 0) / 100
-    left = max(0, week["remaining_fraction"] * limit - reserve * limit)
+    left = max(0, _remaining(week, now) * limit - reserve * limit)
     share = limit * (1 - reserve)
     size = _number(core.get_setting(conn, window_key(wallet.id))) if wallet.window_bucket else None
     five_hours = buckets.get((wallet.runtime, wallet.window_bucket))
-    window_cap = math.inf
-    window_credit = 0
-    if size and five_hours is not None:
-        window_cap = five_hours["remaining_fraction"] * size
-        if five_hours["reset_time"] and int(five_hours["reset_time"]) - now <= CREDIT_SECONDS:
-            window_credit = size
-        window_cap += window_credit
-    week_credit = share if week["reset_time"] and int(week["reset_time"]) - now <= CREDIT_SECONDS else 0
-    week_cap = left + week_credit
+    window_cap = _remaining(five_hours, now) * size if size and five_hours is not None else math.inf
     committed, works = _committed(conn, wallet.id, leaving)
-    available = max(0, min(window_cap, week_cap) - committed)
-    gone = 1 - min(1, (int(week["reset_time"]) - now) / _WEEK_SECONDS) if week["reset_time"] else 0
+    available = max(0, min(window_cap, left) - committed)
+    week_ends = week["reset_time"] is not None and not _refilled(week, now)
+    gone = 1 - min(1, (int(week["reset_time"]) - now) / _WEEK_SECONDS) if week_ends else 0
     withheld = core.get_setting(conn, withhold_key(wallet.id)) == "1"
-    if week_cap <= window_cap:
-        reset, credit, period = week["reset_time"], week_credit, _WEEK_SECONDS
-        window, window_size = "week", share
+    if left <= window_cap:
+        limiting, period, window, window_size = week, _WEEK_SECONDS, "week", share
     else:
-        reset, credit, period = five_hours["reset_time"], window_credit, WINDOW_SECONDS
-        window, window_size = "5h window", size
+        limiting, period, window, window_size = five_hours, WINDOW_SECONDS, "5h window", size
     more_at = None
-    if reset:
-        more_at = int(reset) - CREDIT_SECONDS + (period if credit else 0)
+    if limiting["reset_time"]:
+        more_at = int(limiting["reset_time"]) + (period if _refilled(limiting, now) else 0)
     return {
         "id": wallet.id,
         "currency": wallet.currency,

@@ -1182,6 +1182,7 @@ class Bus:
                 # The time of return, once per death, as the vendor's refusal names it.
                 resume_after = turn.adapter.quota_reset(turn.death.error)
                 if resume_after is not None:
+                    resume_after += core.RESET_MARGIN_SECONDS
                     core.hold_for_quota(self.conn, runtime, model, resume_after)
             self._close_turn(name, reason, resume_after)
             agent = db.query_one(self.conn, "SELECT id FROM agents WHERE name = ?", (name,))

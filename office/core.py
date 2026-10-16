@@ -1185,6 +1185,10 @@ def start_new_session(conn, agent_id: int) -> dict:
 
 
 
+#: Added to every reset time a vendor reports before the office stores or acts on it.
+RESET_MARGIN_SECONDS = 60
+
+
 def record_quota(
     conn, snapshots, *, partial: bool = False, keep: tuple[str, ...] = ()
 ) -> int:
@@ -1195,8 +1199,9 @@ def record_quota(
     Emits only when a figure actually moved. Returns how many rows changed, a
     deletion counted as a change like any other.
 
-    A bucket whose reset time has passed is stored as fully remaining, with no
-    reset time. quota_polls gets every reading whose figure differs from the one
+    A bucket's reset time is stored RESET_MARGIN_SECONDS after the one the vendor
+    reports; a bucket whose stored reset time has passed is stored as fully
+    remaining, with no reset time. quota_polls gets every reading whose figure differs from the one
     before it for its bucket, exactly as it came. A change of `read_at` alone is
     stored in the row, is not counted as a change and adds no history entry.
 
@@ -1229,8 +1234,9 @@ def record_quota(
                 )
         for snap in snapshots:
             live_labels.setdefault(snap.runtime, set()).add(snap.label)
-            passed = snap.reset_time is not None and snap.reset_time <= now
-            reset = str(snap.reset_time) if snap.reset_time and not passed else None
+            reset_at = snap.reset_time + RESET_MARGIN_SECONDS if snap.reset_time else None
+            passed = reset_at is not None and reset_at <= now
+            reset = str(reset_at) if reset_at and not passed else None
             fraction = 1.0 if passed else snap.remaining_fraction
             current = db.query_one(
                 conn,
