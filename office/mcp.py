@@ -1234,23 +1234,23 @@ def _other_work_lines(snap, seen: set[int]) -> list[str]:
 
 
 def _committed_suffix(work: dict) -> str:
-    """The end of a roster line for a work: what it commits, one amount per currency;
-    empty for a work that commits nothing."""
+    """The end of a roster line for a work: what it commits, one amount per wallet, in
+    the wallet's currency; empty for a work that commits nothing."""
     amounts: dict[str, float] = {}
-    for runtime, amount in (
-        (work["price_runtime"], work["price"]), (work["coordination_runtime"], work["coordination"])
+    for wallet, amount in (
+        (work["price_wallet"], work["price"]), (work["coordination_wallet"], work["coordination"])
     ):
-        if runtime is not None:
-            amounts[runtime] = amounts.get(runtime, 0) + amount
+        if wallet is not None:
+            amounts[wallet] = amounts.get(wallet, 0) + amount
     if not amounts:
         return ""
     return " — " + " + ".join(
-        f"{wallets.units(amount)} {wallets.CURRENCY[runtime]}" for runtime, amount in amounts.items()
+        f"{wallets.units(amount)} {wallets.BY_ID[wallet].currency}" for wallet, amount in amounts.items()
     ) + " committed"
 
 
 def _wallet_lines(conn) -> list[str]:
-    """roster()'s wallets, one line per runtime with a weekly limit."""
+    """roster()'s wallets, one line per wallet with a weekly limit."""
     owned = wallets.overview(conn)
     if not owned:
         return []
@@ -1261,7 +1261,7 @@ def _wallet_lines(conn) -> list[str]:
             if w["works"] else "nothing committed"
         )
         line = (
-            f"    {w['currency']} ({w['runtime']}): {wallets.units(w['available'])} available "
+            f"    {w['currency']} ({w['name']}): {wallets.units(w['available'])} available "
             f"({_share(w['available'], w)} of its {w['window']}), "
             f"{committed}, spare {wallets.units(w['spare'])}"
         )
@@ -1280,21 +1280,26 @@ def _share(amount: float, wallet: dict) -> str:
 def _price_list_lines(conn) -> list[str]:
     """roster()'s price list: the two lists, each as its column names and its rows with
     the cells joined by ` | `. A works row also carries its price as a share of the window
-    that limits its model's runtime's wallet; an own row carries its currency and that
-    share. The share is empty where the runtime has no wallet."""
-    runtime_of = {m["model_id"]: m["runtime"] for m in core.list_models(conn)}
-    wallet_of = {w["runtime"]: w for w in wallets.overview(conn)}
+    that limits its model's wallet; an own row carries its currency and that share. The
+    share is empty where the model's wallet has no line in roster()'s wallets."""
+    catalogue = {m["model_id"]: m for m in core.list_models(conn)}
+    shown = {w["id"]: w for w in wallets.overview(conn)}
+
+    def wallet_of(row) -> wallets.Wallet | None:
+        model = catalogue.get(row["model"])
+        return wallets.of_model(conn, model["runtime"], model["model_id"]) if model else None
 
     def cell(value) -> str:
         return f"{value:g}" if isinstance(value, float) else value or ""
 
     def currency(row) -> str:
-        runtime = runtime_of.get(row["model"])
-        return wallets.CURRENCY[runtime] if runtime else ""
+        wallet = wallet_of(row)
+        return wallet.currency if wallet else ""
 
     def share(row) -> str:
-        wallet = wallet_of.get(runtime_of.get(row["model"]))
-        return f"{_share(row['price'], wallet)} of the {wallet['runtime']} {wallet['window']}" if wallet else ""
+        wallet = wallet_of(row)
+        line = shown.get(wallet.id) if wallet else None
+        return f"{_share(row['price'], line)} of the {line['name']} {line['window']}" if line else ""
 
     def table(columns, rows, extra) -> list[str]:
         if not rows:
@@ -1307,8 +1312,8 @@ def _price_list_lines(conn) -> list[str]:
 
     return [
         "Price list (the average price of a work, from brief to close, in the currency of its "
-        "model's runtime; share: the price as a part of the window that limits its runtime's "
-        "wallet, the one the wallet's line names):",
+        "model's wallet; share: the price as a part of the window that limits that wallet, "
+        "the one the wallet's line names):",
         "  Works you assign:",
         *table(core.PRICE_WORKS_COLUMNS, core.price_works(conn), [("share", share)]),
         "  Committed to your own wallet for each work you assign to an executor, by the "
@@ -2163,7 +2168,8 @@ _TOOLS: dict[str, types.Tool] = {
         "for a pause, the earliest it can resume; the running and paused works not listed, by "
         "runtime, each with its holder's model and effort, its role and complexity, who assigned "
         "it and what it commits; per "
-        "runtime, its wallet in the runtime's currency (CL claude, CD codex, GM agy): what is "
+        "wallet, in its own currency (CL claude, CD codex, GM agy's Gemini Flash and Pro "
+        "models, AR agy's Gemini 4 Argon models): what is "
         "available now, what is committed to open works, its spare (what may go to work that can "
         "wait) and when more becomes available; the owner's "
         "price list; each runtime and "

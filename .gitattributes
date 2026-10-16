@@ -2,3 +2,5 @@
 
 # Verbatim captures of vendor output. Stored byte for byte.
 tests/fixtures/streams/*.jsonl -text
+tests/fixtures/streams/agy_usage_capture.json -text
+tests/fixtures/streams/agy_models_capture.txt -text

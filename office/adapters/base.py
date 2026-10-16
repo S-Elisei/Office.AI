@@ -67,30 +67,20 @@ def _read_label(label: str) -> tuple[str | None, str]:
 
 
 def name_quota_windows(snapshots: list[QuotaSnapshot]) -> list[QuotaSnapshot]:
-    """Rename one poll's buckets to the office's window names. Anything unrecognised is returned exactly as it came.
-
-    Takes the whole poll rather than one bucket. Idempotent.
+    """Rename one poll's buckets to the office's window names, each keeping the
+    qualifier the vendor gave it as `<window> (<qualifier>)`. Anything unrecognised is
+    returned exactly as it came. Idempotent.
     """
-    named: list[tuple[QuotaSnapshot, str | None, str]] = []
+    out: list[QuotaSnapshot] = []
     for snapshot in snapshots:
         window, qualifier = _read_label(snapshot.label)
-        named.append((snapshot, window, qualifier))
-
-    counts: dict[str, int] = {}
-    for _, window, _q in named:
-        if window:
-            counts[window] = counts.get(window, 0) + 1
-
-    out: list[QuotaSnapshot] = []
-    for snapshot, window, qualifier in named:
         if window is None:
             out.append(snapshot)
             continue
-        label = f"{window} ({qualifier})" if qualifier and counts[window] > 1 else window
         out.append(
             QuotaSnapshot(
                 runtime=snapshot.runtime,
-                label=label,
+                label=f"{window} ({qualifier})" if qualifier else window,
                 remaining_fraction=snapshot.remaining_fraction,
                 reset_time=snapshot.reset_time,
                 read_at=snapshot.read_at,

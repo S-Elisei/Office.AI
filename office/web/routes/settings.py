@@ -148,6 +148,15 @@ def _model_fields(
     }
 
 
+def _price_wallet(wallet: wallets.Wallet) -> dict:
+    """What the price tables' validation reads of a model's wallet: its currency and the
+    name of the field holding its 5h window, None where it has no 5h window."""
+    return {
+        "currency": wallet.currency,
+        "window": wallets.window_key(wallet.id),
+    }
+
+
 def _context(
     request: Request,
     error: str | None = None,
@@ -172,17 +181,17 @@ def _context(
         or _fmt_minutes(SILENCE_NOTICE_DEFAULT_MINUTES),
         "wallet_rows": [
             {
-                "runtime": runtime,
-                "currency": currency,
-                "week_key": wallets.week_key(runtime),
-                "window_key": wallets.window_key(runtime),
-                "reserve_key": wallets.reserve_key(runtime),
-                "withhold_key": wallets.withhold_key(runtime),
-                "withheld": core.get_setting(conn, wallets.withhold_key(runtime)) == "1",
-                "remaining": wallets.week_remaining(conn, runtime),
+                "id": wallet.id,
+                "currency": wallet.currency,
+                "week_key": wallets.week_key(wallet.id),
+                "window_key": wallets.window_key(wallet.id),
+                "reserve_key": wallets.reserve_key(wallet.id),
+                "withhold_key": wallets.withhold_key(wallet.id),
+                "withheld": core.get_setting(conn, wallets.withhold_key(wallet.id)) == "1",
+                "remaining": wallets.week_remaining(conn, wallet.id),
             }
-            for runtime, currency in wallets.CURRENCY.items()
-            if installed(runtime, get_config(request))
+            for wallet in wallets.WALLETS
+            if installed(wallet.runtime, get_config(request))
         ],
         "price_list_note": core.get_setting(conn, core.PRICE_LIST_NOTE_SETTING, "") or "",
         "price_list_works": _editor(
@@ -194,9 +203,10 @@ def _context(
             [_cells(row, core.PRICE_OWN_COLUMNS) for row in core.price_own(conn)],
         ),
         "work_roles": core.work_roles(conn),
-        # Each catalogue model's runtime and the setting that holds its 5h window.
-        "price_runtimes": {
-            row["model_id"]: {"runtime": row["runtime"], "window": wallets.window_key(row["runtime"])}
+        # Each catalogue model's wallet: its currency, and the setting that holds its 5h
+        # window (None where the wallet has none).
+        "price_wallets": {
+            row["model_id"]: _price_wallet(wallets.of_model(conn, row["runtime"], row["model_id"]))
             for row in core.list_models(conn)
         },
         "window_emulated_key": wallets.WINDOW_EMULATED_KEY,
@@ -254,15 +264,15 @@ async def save_settings(request: Request):
     core.set_setting(conn, "owner_name", owner_name, actor=owner_name)
     # Written verbatim, empty string included.
     core.set_setting(conn, SILENCE_NOTICE_SETTING, silence_minutes, actor=owner_name)
-    # Only the runtimes whose rows the page drew posted theirs.
+    # Only the wallets whose rows the page drew posted theirs.
     for key in wallets.SETTING_KEYS:
         if key in data:
             core.set_setting(conn, key, data[key].strip(), actor=owner_name)
     # An unticked box posts nothing, so a drawn row is told by its weekly limit.
-    for runtime in wallets.CURRENCY:
-        if wallets.week_key(runtime) in data:
-            withhold = "1" if wallets.withhold_key(runtime) in data else ""
-            core.set_setting(conn, wallets.withhold_key(runtime), withhold, actor=owner_name)
+    for wallet in wallets.WALLETS:
+        if wallets.week_key(wallet.id) in data:
+            withhold = "1" if wallets.withhold_key(wallet.id) in data else ""
+            core.set_setting(conn, wallets.withhold_key(wallet.id), withhold, actor=owner_name)
     if wallets.week_key("codex") in data:
         emulated = "1" if wallets.WINDOW_EMULATED_KEY in data else ""
         core.set_setting(conn, wallets.WINDOW_EMULATED_KEY, emulated, actor=owner_name)

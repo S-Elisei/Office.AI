@@ -431,22 +431,22 @@
     validatePriceLists(editor.closest("form"));
   });
 
-  // A works or own row priced above the 5h window of its model's runtime, and an own
+  // A works or own row priced above the 5h window of its model's wallet, and an own
   // row whose role, model and effort another own row has, cannot be saved. The form's
-  // data-price-runtimes maps a model to its runtime and to the name of the field holding
-  // that runtime's window.
+  // data-price-wallets maps a model to its wallet's currency and to the name of the field
+  // holding that wallet's window (null where the wallet has none).
   function validatePriceLists(form) {
-    if (!form || !form.dataset.priceRuntimes) return;
-    const runtimes = JSON.parse(form.dataset.priceRuntimes);
+    if (!form || !form.dataset.priceWallets) return;
+    const wallets = JSON.parse(form.dataset.priceWallets);
     for (const list of ["works", "own"]) {
       for (const price of form.querySelectorAll(`input[name="${list}_price"]`)) {
         const model = price.closest("tr").querySelector(`input[name="${list}_model"]`).value.trim();
-        const entry = runtimes[model];
-        const window = entry && form.elements[entry.window];
+        const entry = wallets[model];
+        const window = entry && entry.window && form.elements[entry.window];
         const size = window ? Number(window.value) : 0;
         price.setCustomValidity(
           size && Number(price.value) > size
-            ? `A price on ${model} cannot be more than the ${size} of the 5h window of ${entry.runtime}.`
+            ? `A price on ${model} cannot be more than the ${size} of the 5h window of the ${entry.currency} wallet.`
             : ""
         );
       }
@@ -494,7 +494,7 @@
   document.addEventListener("input", (e) => validateEmulatedWindow(e.target.form));
   document.addEventListener("htmx:afterSwap", () => {
     syncAllRequired(document);
-    for (const form of document.querySelectorAll("form[data-price-runtimes]")) {
+    for (const form of document.querySelectorAll("form[data-price-wallets]")) {
       validatePriceLists(form);
       validateEmulatedWindow(form);
     }

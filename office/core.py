@@ -1613,7 +1613,7 @@ def roster(conn) -> dict:
     books - a row exists exactly as long as the work is open, so there is no
     status filter here at all - with its assigner, its role and complexity
     (None for a work not assigned to an executor), what it commits (price and
-    coordination, each with its runtime; None where it commits nothing), the
+    coordination, each with its wallet; None where it commits nothing), the
     reason it stopped and, for a pause, the earliest it could resume. `resources`
     is held_resources().
     """
@@ -1625,8 +1625,8 @@ def roster(conn) -> dict:
             "SELECT works.id, works.agent_id, agents.name AS agent_name, "
             "works.assigned_by_agent_id, assigner.name AS assigner_name, works.brief, "
             "works.branch, works.status, works.fail_reason, works.pause_reason, "
-            "works.resume_after, works.price, works.price_runtime, works.coordination, "
-            "works.coordination_runtime, work_log.role, work_log.complexity "
+            "works.resume_after, works.price, works.price_wallet, works.coordination, "
+            "works.coordination_wallet, work_log.role, work_log.complexity "
             "FROM works JOIN agents ON agents.id = works.agent_id "
             "JOIN agents assigner ON assigner.id = works.assigned_by_agent_id "
             "LEFT JOIN work_log ON work_log.work_id = works.id ORDER BY works.id",
@@ -1990,15 +1990,16 @@ def _commitment(
 ) -> dict:
     """The works columns a work for `agent`, assigned by `caller`, commits: the
     works price list's price for its role and complexity on the agent's model and
-    effort, on the agent's runtime, and the own price list's price for its role and the
-    caller's model and effort, on the caller's runtime; no such row, no coordination.
+    effort, on the wallet of the agent's model, and the own price list's price for its
+    role and the caller's model and effort, on the wallet of the caller's model; no such
+    row, no coordination.
     All NULL for a work with no role, for one whose assignee is
     not an executor, and while the works price list is empty.
 
     Refuses when the price list has no price for the work, and when a wallet it draws
     has less available than the work costs, the work `leaving` committing nothing.
     """
-    nothing = {"price": None, "price_runtime": None, "coordination": None, "coordination_runtime": None}
+    nothing = {"price": None, "price_wallet": None, "coordination": None, "coordination_wallet": None}
     if (
         agent["kind"] != "executor" or role is None
         or db.query_one(conn, "SELECT 1 FROM price_works LIMIT 1") is None
@@ -2024,24 +2025,27 @@ def _commitment(
             f"{what} on {name(agent['model'], agent['effort'])}; it prices it on "
             f"{', '.join(name(r['model'], r['effort']) for r in rows)}."
         )
-    # runtime -> what the work draws on its wallet, as (whose spending, amount)
-    draws = {agent["runtime"]: [("the executor", priced["price"])]}
+    executor_wallet = wallets.of_model(conn, agent["runtime"], agent["model"]).id
+    # wallet id -> what the work draws on it, as (whose spending, amount)
+    draws = {executor_wallet: [("the executor", priced["price"])]}
     coordination = db.query_one(
         conn,
         "SELECT price FROM price_own WHERE role = ? AND model = ? AND effort = ?",
         (role, caller["model"], caller["effort"] or ""),
     )
+    caller_wallet = None
     if coordination is not None:
-        draws.setdefault(caller["runtime"], []).append(("your coordination", coordination["price"]))
+        caller_wallet = wallets.of_model(conn, caller["runtime"], caller["model"]).id
+        draws.setdefault(caller_wallet, []).append(("your coordination", coordination["price"]))
     short = []
-    for runtime, parts in draws.items():
+    for wallet_id, parts in draws.items():
         cost = sum(amount for _, amount in parts)
-        wallet = wallets.available(conn, runtime, leaving)
+        wallet = wallets.available(conn, wallet_id, leaving)
         if wallet is not None and round(cost, 6) > round(wallet["available"], 6):
             unit = wallet["currency"]
             split = " and ".join(f"{wallets.units(amount)} for {whose}" for whose, amount in parts)
             text = (
-                f"{runtime} has {wallets.units(wallet['available'])} {unit} available now; "
+                f"{wallet['name']} has {wallets.units(wallet['available'])} {unit} available now; "
                 f"this work costs {wallets.units(cost)} {unit} on it: {split}."
             )
             if wallet["more_at"] is not None:
@@ -2050,9 +2054,9 @@ def _commitment(
     if short:
         raise ValueError(" ".join(short))
     return {
-        "price": priced["price"], "price_runtime": agent["runtime"],
+        "price": priced["price"], "price_wallet": executor_wallet,
         "coordination": coordination["price"] if coordination is not None else None,
-        "coordination_runtime": caller["runtime"] if coordination is not None else None,
+        "coordination_wallet": caller_wallet,
     }
 
 
@@ -2113,7 +2117,7 @@ def assign_work(
         cur = db.execute(
             conn,
             "INSERT INTO works (task_id, agent_id, assigned_by_agent_id, brief, branch, "
-            "workspace_id, status, price, price_runtime, coordination, coordination_runtime) "
+            "workspace_id, status, price, price_wallet, coordination, coordination_wallet) "
             "VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)",
             (task_id, agent_id, caller["id"], brief, branch, workspace_id, *committed.values()),
         )
@@ -2521,7 +2525,7 @@ def reassign_work(
             conn,
             "UPDATE works SET agent_id = ?, assigned_by_agent_id = ?, workspace_id = ?, "
             "status = 'running', fail_reason = NULL, pause_reason = NULL, resume_after = NULL, "
-            "price = ?, price_runtime = ?, coordination = ?, coordination_runtime = ? "
+            "price = ?, price_wallet = ?, coordination = ?, coordination_wallet = ? "
             "WHERE id = ?",
             (to_agent_id, caller["id"], new_ws["id"], *committed.values(), work_id),
         )
@@ -2545,7 +2549,7 @@ def _reassigned_commitment(conn, caller: dict, work_id: int, to_agent: dict) -> 
     unchanged and unchecked, when `to_agent` already holds it."""
     work = _row(conn, "works", "id", work_id)
     if work["agent_id"] == to_agent["id"]:
-        return {c: work[c] for c in ("price", "price_runtime", "coordination", "coordination_runtime")}
+        return {c: work[c] for c in ("price", "price_wallet", "coordination", "coordination_wallet")}
     log = db.query_one(conn, "SELECT role, complexity FROM work_log WHERE work_id = ?", (work_id,))
     return _commitment(conn, caller, to_agent, log["role"], log["complexity"], leaving=work_id)
 

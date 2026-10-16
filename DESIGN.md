@@ -1550,8 +1550,9 @@ The key is the pair (runtime, `label`). The office names the **window** and noth
 else: `5h` or `week`, taken from the vendor's own `window_minutes` where there is
 one and from unambiguous words in its label where there is not. Anything
 unrecognised keeps the vendor's text untouched. Whatever else the vendor said stays
-as a parenthesised qualifier where it distinguishes two buckets of one runtime —
-`week (Fable)` against `week (all models)`.
+as a parenthesised qualifier: `week (Fable)`, `week (all models)`, `5h (Gemini Models)`.
+The labels of agy are `week (Gemini Models)`, `5h (Gemini Models)` and
+`week (Gemini 4 Argon)`.
 
 Two numbers are normalised:
 
@@ -1595,9 +1596,9 @@ has never answered has no row, and `health()` says so.
 before it for its bucket, as the vendor gave it. What the office computes itself is not
 kept.
 
-Only Gemini models are used from agy: its quota keeps the Gemini group alone, and its
-model catalogue (below) the models whose id starts with `gemini` — the one place where
-part of a vendor's answer is not shown.
+Only Gemini models are used from agy: its quota keeps the groups whose name contains
+`gemini` (Gemini Models and Gemini 4 Argon), and its model catalogue (below) the models
+whose id starts with `gemini` — the one place where part of a vendor's answer is not shown.
 
 The buckets carry no derived figure, except codex's emulated `5h` window (below); the
 wallets below are derived from them.
@@ -1608,24 +1609,41 @@ through `roster()`.
 
 ### Wallets
 
-Each runtime's subscription is a **wallet** in its own currency — CL for claude, CD
-for codex, GM for agy — where one unit is one dollar at the vendor's API list prices.
+A **wallet** is a pool of a vendor's quota, counted in its own currency, where one unit
+is one dollar at the vendor's API list prices. There are four, each currency belonging
+to one:
+
+| wallet | runtime | currency | weekly bucket | `5h` bucket |
+|---|---|---|---|---|
+| `claude` | claude | CL | `week (all models)` | `5h` |
+| `codex` | codex | CD | `week` | `5h` |
+| `agy` | agy | GM | `week (Gemini Models)` | `5h (Gemini Models)` |
+| `argon` | agy | AR | `week (Gemini 4 Argon)` | none |
+
+The weekly and the 5h bucket of agy's two wallets are those of the vendor's quota groups
+Gemini Models and Gemini 4 Argon, and the two pools are independent. The **wallet of a
+model** is `argon` for an agy model whose display name in the model catalogue starts with
+the name of the Argon group, "Gemini 4 Argon", and the wallet named by the model's
+runtime otherwise; `wallets.of_model` answers it, and every mapping of a model or an
+agent to a wallet goes through it.
+
 The weekly bucket limits what the team may draw over the week; the 5-hour window limits
 what may be drawn now. A work assigned to an executor **commits** a price to the wallets
 it draws (below). What a work has already spent is not tracked: a running work counts
 both in the vendor's remaining quota and in its commitment.
 
-The owner sets, on the settings page, per runtime a total weekly limit (the worth of the
-weekly bucket, in units) and a 5h window (the worth of the `5h` bucket; empty when the
-subscription has none), and a reserve: a percentage of the week the team leaves
-untouched, 0 by default; and whether the spare is withheld. The settings are
-`wallet_<runtime>_week`, `wallet_<runtime>_window`, `wallet_<runtime>_reserve` and
-`wallet_<runtime>_withhold` ("1" while withheld, empty otherwise). A runtime with no weekly limit, or with no weekly bucket
-stored, shows no wallet. A runtime with no 5h window set, or with no `5h` bucket stored,
-shows its weekly part only. The weekly bucket is `week (all models)` for claude and `week`
-for codex and agy.
+The owner sets, on the settings page, per wallet a total weekly limit (the worth of the
+weekly bucket, in units) and, for a wallet with a `5h` bucket, a 5h window (the worth of
+the `5h` bucket; empty when the subscription has none), and a reserve: a percentage of
+the week the team leaves untouched, 0 by default; and whether the spare is withheld. The
+settings are `wallet_<wallet>_week`, `wallet_<wallet>_window`, `wallet_<wallet>_reserve`
+and `wallet_<wallet>_withhold` ("1" while withheld, empty otherwise), the wallet being
+its id: `wallet_agy_week` is the weekly limit of GM, `wallet_argon_week` that of AR. A
+wallet with no weekly limit, or with no weekly bucket stored, is not shown. A wallet with
+no 5h window set, or with no `5h` bucket stored, shows its weekly part only; AR has no
+`5h` bucket and no window setting.
 
-A wallet (`wallets.overview` for all of them, `wallets.available` for one runtime) is
+A wallet (`wallets.overview` for all of them, `wallets.available` for one, by id) is
 computed from the settings, the stored buckets and the works' commitments:
 
 - the **share** is the weekly limit times one less the reserve; what is **left** of the
@@ -1639,8 +1657,8 @@ computed from the settings, the stored buckets and the works' commitments:
   window lets through plus its addition (unbounded where it does not limit), the **week
   cap** what is left of the week plus its addition;
 - what the open works **commit** on a wallet is the sum of `works.price` where
-  `price_runtime` is the runtime and of `works.coordination` where `coordination_runtime`
-  is the runtime; the wallet counts the works that commit anything on it;
+  `price_wallet` is the wallet and of `works.coordination` where `coordination_wallet`
+  is the wallet; the wallet counts the works that commit anything on it;
 - what is **available** is the lesser of the two caps less what is committed, not below
   zero;
 - the **spare** is what may go to work that can wait: the lesser of what is available and
@@ -1656,19 +1674,21 @@ computed from the settings, the stored buckets and the works' commitments:
   or, when the window already has its addition, five hours later. It is absent when that
   reset is not stored.
 
-`roster()` gives a manager, in its quota part, per wallet one line, such as
-`CL (claude): 31 available (28% of its 5h window), 46 committed to 7 works, spare 12; more available at <time>`,
+`roster()` gives a manager, in its quota part, per wallet one line, labelled by the
+wallet's currency, its runtime and, for the two wallets of agy, its group, such as
+`CL (claude): 31 available (28% of its 5h window), 46 committed to 7 works, spare 12; more available at <time>`
+or `AR (agy · Gemini 4 Argon): 20 available (60% of its week), nothing committed, spare 5`,
 the percentage being what is available over the size of the limiting window, which the line names:
 "nothing committed" stands where no work commits on it, and the last clause is absent where
 more has no time. The quota buckets themselves are not listed; the holds are.
 
-The settings page shows, for each runtime whose CLI this machine has, its total weekly limit, 5h window and reserve; the reserve is a control: a thin bar that is the whole
+The settings page shows, for each wallet whose runtime's CLI this machine has, its total weekly limit, 5h window (where the wallet has a `5h` bucket) and reserve; the reserve is a control: a thin bar that is the whole
 weekly bucket, its filled part at the right being the remaining fraction and draining to
 the left, with a slider (0 to 100) over it. The reserve is 100 less the slider's value, so
 a slider at the right edge is a reserve of 0. A label beside it gives the reserve in percent
-and in units of the runtime's currency, and follows the slider and the weekly limit field. A
-runtime with no weekly reading stored has a bar with no fill and a working slider. The
-reserve is saved with the rest of the form. Beside the 5h window is a "Withhold spare"
+and in units of the wallet's currency, and follows the slider and the weekly limit field. A
+wallet with no weekly reading stored has a bar with no fill and a working slider. The
+reserve is saved with the rest of the form. After the limit fields is a "Withhold spare"
 box, saved with the rest of the form. On the codex row an "Emulate 5h window" box stands
 beside it, saved with the rest of the form; while it is ticked, the form cannot be
 submitted unless the codex total weekly limit and 5h window are each above 0.
@@ -1712,16 +1732,16 @@ interrupted.
 
 Right after the quota part, `roster()` gives a manager the **price list**: a header
 saying its prices are the average price of a work, from brief to close, in the currency
-of its model's runtime; "Works you assign:" and, indented, the line of its column names
+of its model's wallet; "Works you assign:" and, indented, the line of its column names
 `role | complexity | model | effort | price | share` and the rows of the table
 `price_works` with their cells in that order (`(empty)` alone when it has none). The
-share is the row's price over the size of the limiting window of the wallet of its model's
-runtime, written as `<percent> of the <runtime> <window>`, and empty where that runtime has
-no wallet; the header says so. "Committed
+share is the row's price over the size of the limiting window of the wallet of its model,
+written as `<percent> of the <runtime, and group where the wallet has one> <window>`, and
+empty where that wallet is not shown; the header says so. "Committed
 to your own wallet for each work you assign to an executor, by the work's role and your
 model and effort", and `price_own` the same way, its columns
 `what | role | model | effort | price | currency | share`: the currency of the row's
-model's runtime, and the share as in the works table.
+model's wallet, and the share as in the works table.
 Prices are shown as numbers. An executor does not see it.
 
 The office reads these rows in three ways. The **roles in effect** are the distinct
@@ -1737,17 +1757,18 @@ price. A row with no role is spending not tied to a work, and the office decides
 from it.
 
 **Commitment.** When `assign` gives a work to an executor and `price_works` has a row, the
-work's price is committed to the wallet of the assignee's runtime and its coordination
-price, where there is one, to the wallet of the assigner's runtime; both amounts stand
-on the `works` row (`price`, `price_runtime`, `coordination`, `coordination_runtime`, NULL
-where nothing is committed) until the row is deleted, which `work_close` and
+work's price is committed to the wallet of the assignee's model and its coordination
+price, where there is one, to the wallet of the assigner's model; both amounts stand
+on the `works` row (`price`, `price_wallet`, `coordination`, `coordination_wallet`, NULL
+where nothing is committed, the wallets as ids) until the row is deleted, which `work_close` and
 `work_dismiss` do. A work for a lead or the director, and any work while `price_works` has
 no row, commits nothing. `assign` is refused when the price list has no price for the
 work's role and complexity on the assignee's model and effort, naming the models and
 efforts it does price, and when a wallet it draws has less available than the work costs
-(the two amounts of one runtime summed), naming the amount available and, where the wallet
+(the two amounts of one wallet summed), naming the wallet, as `agy · Gemini 4 Argon` or
+`claude`, the amount available and, where the wallet
 has one, the time more becomes available. The check and the insert are one transaction; a
-runtime with no wallet is not checked. `work_reassign` prices the work anew for the
+wallet that is not shown is not checked. `work_reassign` prices the work anew for the
 recipient and the caller, the work's own commitment counting as nothing, on the same
 terms, and writes the new amounts; a work with no role commits nothing. Moving an agent to
 another model or runtime leaves the commitment of its open work as written.
@@ -1755,7 +1776,7 @@ another model or runtime leaves the commitment of its open work as written.
 The two price lists are stored as the tables `price_works` (position, role, complexity,
 model, effort, price) and `price_own` (position, what, role, model, effort, price); `price`
 is a number, the average price of a work from brief to close in `price_works`, the
-coordination of a work in `price_own`, in both in the currency of the runtime of the row's
+coordination of a work in `price_own`, in both in the currency of the wallet of the row's
 model; `effort` is an empty string for no effort (agy); `price_own.role` is NULL for
 spending not tied to a work, and no two rows have the same role, model and effort. `position` is the order
 the owner set. The setting `price_list_note` holds the owner's free text on the price
@@ -1773,10 +1794,10 @@ datalist. Every row posts its cells as repeated fields in document
 order: `works_role`, `works_complexity`, `works_model`, `works_effort` and `works_price` for
 the works table; `own_what`, `own_role`, `own_model`, `own_effort` and `own_price` for the
 own table. The page refuses to save a works row or an own row whose price exceeds the 5h
-window of its model's runtime (the model's runtime is read from the model catalogue, the
-window from the form's own field), naming the window, and two own rows with the same role,
+window of its model's wallet (the model's wallet is read from the model catalogue, the
+window from the form's own field; a wallet with no 5h window sets no limit), naming the window, and two own rows with the same role,
 model and effort. Saving zips each table's fields into rows, trims every cell, and replaces
-both tables in one transaction, prices stored as numbers and an empty own role as NULL; the note is written as posted. The wallet fields are written only for the runtimes the page
+both tables in one transaction, prices stored as numbers and an empty own role as NULL; the note is written as posted. The wallet fields are written only for the wallets the page
 shows; the emulation setting only when the codex row was posted, "1" when its box was and
 empty otherwise. A
 table scrolls inside its own box.
@@ -2433,7 +2454,7 @@ All times are shown local and stored UTC.
    marked process that survived being killed, and open works that nothing moves and
    nobody above their agent has moved.
 11. **Settings** — the owner's name, the director's standing instructions, the
-    silence threshold, the wallets' weekly limits, 5h windows and reserve, whether codex's 5h window is emulated, the two price lists (a table each) and their note, and the director's runtime/model/effort with the cost shown
+    silence threshold, the wallets' weekly limits, 5h windows, reserve and withheld spare, whether codex's 5h window is emulated, the two price lists (a table each) and their note, and the director's runtime/model/effort with the cost shown
     before confirmation. Also the delivery address, the outcome of the last delivery,
     and — while the owner's repository is missing `receive.denyCurrentBranch` — the
     "Set up delivery" button that writes it back.
@@ -2529,9 +2550,10 @@ stays where the reader left it.
 owner_name              the owner's name (default "Owner")
 silence_notice_minutes  the silence threshold; 0 or less means never report
 switch_timer            the pending timer of the office's switch: "run" or "pause", a space, an epoch second; empty means none
-wallet_<runtime>_week   the total weekly limit of a runtime's wallet, in units; empty means no wallet
-wallet_<runtime>_window the 5h window of a runtime's wallet, in units; empty means none
-wallet_<runtime>_reserve the percentage of the week the team leaves untouched; empty means 0
+wallet_<wallet>_week    the total weekly limit of a wallet, in units; empty means no wallet
+wallet_<wallet>_window  the 5h window of a wallet that has a 5h bucket, in units; empty means none
+wallet_<wallet>_reserve the percentage of the week the team leaves untouched; empty means 0
+wallet_<wallet>_withhold "1" while the spare of a wallet is withheld; empty otherwise
 wallet_codex_window_emulated "1" while the office keeps codex's 5h window itself; empty otherwise
 price_list_note         the owner's note on the price list, in the director's and the leads' system prompts; plain text
 delivery_last           the outcome of the last delivery (JSON), for the settings page

@@ -102,12 +102,13 @@ CREATE TABLE IF NOT EXISTS works (
     output_tail TEXT,
     started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     -- What the work commits until it is closed: the price list's price of the work
-    -- on the assignee's runtime, and the assigner's coordination price on the
-    -- assigner's runtime. NULL where the work commits nothing.
+    -- on the wallet of the assignee's model, and the assigner's coordination price on
+    -- the wallet of the assigner's model. The wallets are ids of office/wallets.py.
+    -- NULL where the work commits nothing.
     price REAL,
-    price_runtime TEXT,
+    price_wallet TEXT,
     coordination REAL,
-    coordination_runtime TEXT
+    coordination_wallet TEXT
 );
 
 -- Delivery read tracking lives on agents (last_seen_message_id). The owner's
@@ -321,7 +322,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender, id);
 
 -- The owner's price list of the works a manager assigns, in the order the owner
 -- set; the distinct roles are the roles hire accepts. `price` is the average
--- price of a work, from brief to close, in the currency of the runtime of the
+-- price of a work, from brief to close, in the currency of the wallet of the
 -- row's model. An empty `effort` means no effort (agy).
 CREATE TABLE IF NOT EXISTS price_works (
     position INTEGER PRIMARY KEY,
@@ -334,7 +335,7 @@ CREATE TABLE IF NOT EXISTS price_works (
 
 -- The owner's price list of what a lead spends on its own, in the order the
 -- owner set. A row with a `role` is the coordination of a work of that role by an
--- assigner running on the row's model and effort, in the currency of the runtime
+-- assigner running on the row's model and effort, in the currency of the wallet
 -- of that model, and at most one row has a given role, model and effort; a NULL
 -- `role` is spending not tied to a work. An empty `effort` means no effort (agy).
 CREATE TABLE IF NOT EXISTS price_own (
