@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import tomllib
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -10,7 +11,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from office import core, wallets
-from office.adapters import shared
 from office.adapters.agy import AgyAdapter, parse_models_output, reset_seconds
 from office.adapters.agy import parse_usage_payload as parse_agy_usage
 from office.adapters.base import name_quota_windows
@@ -164,6 +164,18 @@ def test_codex_quota_is_the_reading_stamped_latest_not_the_one_in_the_newest_fil
     assert CodexAdapter(bin_path="codex").poll_quota([unstamped]) is None
 
 
+def test_codex_profile_parses_back_to_the_system_prompt_it_was_given(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    # Invented: every character that has to be escaped, or that a TOML string may
+    # not hold raw, in one text.
+    text = "quote \" triple ''' back \\ line\nbreak\ttab nul \x00 unit \x1f del \x7f Привет \U0001F600"
+
+    CodexAdapter(bin_path="codex").install_system_prompt(str(tmp_path / "ws" / "agent"), text)
+
+    profile = tmp_path / "office-agent.config.toml"
+    assert tomllib.loads(profile.read_text(encoding="utf-8")) == {"developer_instructions": text}
+
+
 def test_claude_session_requests_carry_the_output_the_stream_does_not():
     lines = (STREAMS / "claude_session_capture.jsonl").read_text(encoding="utf-8").splitlines()
 
@@ -194,7 +206,7 @@ def test_a_compaction_carries_every_flag_of_a_resumed_turn_but_its_input(tmp_pat
     adapter = ClaudeAdapter(bin_path="claude")
     ws = str(tmp_path)
     adapter.prepare_session(ws, "agent")
-    shared.system_prompt_path(ws).write_text("the role", encoding="utf-8")
+    adapter.install_system_prompt(ws, "the role")
     session = ("opus", "high", "http://127.0.0.1:7777/mcp/agent/")
 
     turn = adapter.build_command(ws, *session, "sid", resume=True)

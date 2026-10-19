@@ -77,7 +77,6 @@ def hook_warning(agent: str, ws: str | Path) -> str | None:
 
 class AgyAdapter:
     runtime = "agy"
-    takes_system_prompt = False
 
     def __init__(self, bin_path: str) -> None:
         self.bin_path = bin_path
@@ -108,6 +107,11 @@ class AgyAdapter:
                 "available, so the hook will not run and delivery falls back to the next turn",
                 agent, spaced,
             )
+
+    def install_system_prompt(self, ws: str, text: str) -> None:
+        """Write `text` as the workspace's AGENTS.md. Runs after prepare_session,
+        which creates the directory."""
+        (Path(ws) / HOOKS_DIR / "AGENTS.md").write_text(text, encoding="utf-8")
 
     def build_command(
         self,

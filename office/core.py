@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from office import db, git, wallets
+from office.adapters import codex
 from office.config import Config
 
 log = logging.getLogger(__name__)
@@ -1542,8 +1543,8 @@ def delete_workspace(conn, config: Config, workspace_id: str) -> None:
 
     Refuses one with an owner, one a work is on, and one whose tree holds
     uncommitted changes or commits, other than merges, that no remote branch has. Then removes its directory, its sandbox
-    (which holds its wiki files and its stage artifacts) and its stage refs in
-    project.git, and then its rows in one transaction. A failure while removing
+    (which holds its wiki files and its stage artifacts), its codex profile file
+    and its stage refs in project.git, and then its rows in one transaction. A failure while removing
     files raises and leaves the rows.
 
     Blocking: call this off the event loop.
@@ -1581,6 +1582,7 @@ def delete_workspace(conn, config: Config, workspace_id: str) -> None:
         )
     git._rmtree(config.scratch_dir / workspace_id)
     git._rmtree(tree)
+    codex.profile_path(tree).unlink(missing_ok=True)
     git.delete_stage_refs(config, workspace_id)
     with db.transaction(conn):
         db.execute(conn, "DELETE FROM wiki_copies WHERE workspace_id = ?", (workspace_id,))
@@ -3476,9 +3478,8 @@ def _announce_rule(
     """Tell the agents a rule of any of `audiences` is for that the project's rules
     have changed.
 
-    A rule reaches an agent through its system prompt, which a session reads when
-    it is created and, on claude, after a compaction; a session already open sees
-    the change through this line.
+    A rule reaches an agent through its system prompt; a session already open
+    sees the change through this line.
 
     Never raises: the rule is written either way.
     """

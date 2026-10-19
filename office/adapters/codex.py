@@ -47,6 +47,21 @@ def codex_home() -> Path:
     return Path(override) if override else Path.home() / ".codex"
 
 
+def profile_name(ws: str | Path) -> str:
+    """The codex profile that carries one workspace's agent's system prompt."""
+    return f"office-{Path(ws).name}"
+
+
+def profile_path(ws: str | Path) -> Path:
+    """The file codex layers over its base config for `profile_name(ws)`."""
+    return codex_home() / f"{profile_name(ws)}.config.toml"
+
+
+def _toml_string(text: str) -> str:
+    """`text` as a TOML basic string."""
+    return json.dumps(text, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
 def _sessions_dir() -> Path:
     return codex_home() / "sessions"
 
@@ -325,7 +340,6 @@ def shim_warning(bin_path: str | None) -> str | None:
 
 class CodexAdapter:
     runtime = "codex"
-    takes_system_prompt = False
 
     def __init__(self, bin_path: str) -> None:
         self.bin_path = native_binary(bin_path)
@@ -357,6 +371,14 @@ class CodexAdapter:
         """
         shared.claim_owner(ws, agent)
 
+    def install_system_prompt(self, ws: str, text: str) -> None:
+        """Write `text` as the workspace's profile; build_command selects that
+        profile.
+        """
+        profile_path(ws).write_text(
+            f"developer_instructions = {_toml_string(text)}\n", encoding="utf-8"
+        )
+
     def build_command(
         self,
         ws: str,
@@ -366,7 +388,8 @@ class CodexAdapter:
         session_id: str | None,
         resume: bool = False,
     ) -> list[str]:
-        cmd = [self.bin_path, "exec"]
+        # The profile selector comes before `resume`.
+        cmd = [self.bin_path, "exec", "-p", profile_name(ws)]
         resuming = bool(resume and session_id)
         if resuming:
             cmd += ["resume", session_id]
@@ -374,12 +397,11 @@ class CodexAdapter:
             "--json",
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
-            # Mid-turn delivery. All three parts are load-bearing.
+            # The office's hooks for this invocation.
             "--dangerously-bypass-hook-trust",
             "-c",
             "features.hooks=true",
-            "-c",
-            shared.codex_hook_config(ws),
+            *[arg for config in shared.codex_hook_configs(ws) for arg in ("-c", config)],
             "-m",
             model,
         ]

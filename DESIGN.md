@@ -105,7 +105,7 @@ Continuing a session means a new process:
 | Runtime | First turn | Continuation |
 |---|---|---|
 | claude | `--session-id <our uuid>` | `--resume <the same uuid>` |
-| codex | `codex exec` | `codex exec resume <thread_id>` |
+| codex | `codex exec -p <profile>` | `codex exec -p <profile> resume <thread_id>` |
 | agy | no id | `--conversation=<id>` |
 
 Only claude's session id is ours. codex and agy mint their own, read back out of
@@ -119,7 +119,8 @@ Agent statuses: `provisioning` → `ready` → `running` ⇄ `idle`. `assign` ag
 
 **There is no wall-clock limit, no threshold on context and nothing that ends a
 turn on its own.** A turn that has started stops only when somebody asks for it
-to stop.
+to stop, with one exception: a codex turn whose system prompt has changed is ended
+before a compaction inside it, and a turn is owed at once (section 4).
 
 The office sets the vendors' own timeouts out of the way:
 
@@ -163,11 +164,11 @@ killed.
 
 ```python
 runtime: str
-takes_system_prompt: bool
 build_command(ws, model, effort, office_url, session_id, resume=False) -> list[str]
 encode_message(text) -> str
 parse_line(line) -> Event | None
 prepare_session(ws, agent) -> None
+install_system_prompt(ws, text) -> None
 poll_quota(session_ids=()) -> list[QuotaSnapshot] | None
 quota_reset(error) -> int | None
 list_models() -> list[ModelInfo] | None
@@ -384,14 +385,20 @@ and they re-read themselves immediately after a successful report.
 | Runtime | Events | Config | Injection point |
 |---|---|---|---|
 | claude | `PostToolUse` | `<ws>/.office/claude-settings.json`, passed with `--settings` | tool call |
-| codex | `PostToolUse` | inline `-c hooks.PostToolUse=…` on the invocation | tool call |
+| codex | `PostToolUse`, `PreCompact` | inline `-c hooks.PostToolUse=…` and `-c hooks.PreCompact=…` on the invocation | tool call; before a compaction |
 | agy | `PreInvocation`, `PostInvocation` | `<ws>/.agents/hooks.json` | model call |
 
-The hook's reply for claude and codex is `hookSpecificOutput.additionalContext`;
-for agy it is `injectSteps[].ephemeralMessage`, plus
+The hook's reply for claude and for codex's `PostToolUse` is
+`hookSpecificOutput.additionalContext`; for agy it is
+`injectSteps[].systemMessage.systemMessage`, plus
 `terminationBehavior: "force_continue"` on `PostInvocation`. An empty queue
 returns `{}` for codex and agy, and nothing at all for claude; for agy that `{}`
 is what stops `force_continue` continuing the turn forever.
+
+codex's `PreCompact` hook posts to the hub's `POST /turns/<agent>/prompt-current`,
+addressed by the `OFFICE_MCP_URL` and `OFFICE_AGENT` the turn runs with, and the hub
+answers `{"current": true|false}` (`Bus.prompt_still_current`). The hook replies `{}`
+when the prompt is current, and `{"continue": false, "stopReason": …}` when it is not.
 
 The injected text opens with one line saying that these are office messages that
 arrived during the turn.
@@ -400,8 +407,9 @@ agy needs no tool call: its boundary is a model call, so an agy agent that only
 ever thinks still gets its messages inside the turn. On a weak model a turn can
 fit in a single model call, and then the message rides the next turn.
 
-For claude and codex the hook is a process per tool call, so the command starts
-with a shell test for the inbox file's existence. The hook config is rewritten at
+For claude and codex the hook is a process per tool call, so the command of
+claude's and of codex's `PostToolUse` starts with a shell test for the inbox
+file's existence. The hook config is rewritten at
 the start of every turn: the command carries absolute paths to the interpreter,
 to this copy of the office and to the workspace. The hook script imports the
 standard library and `shared.py` beside it, and `shared.py` imports the standard
@@ -423,7 +431,8 @@ a participant, `office` included, or from a local service answering an expectati
 
 A third shape rides the common channel: **a quiet line**, a common-channel row that
 names one recipient. It buys no turn, rides the next one, and is shown to nobody
-else. The office uses it for what somebody must not go on believing but need not be
+else; the line of a turn ended for its changed system prompt rides the turn the
+office owes (section 4), as a retry's line does. The office uses it for what somebody must not go on believing but need not be
 woken for.
 
 The delivered text says which is which: `[common chat, from X]`, `[direct message
@@ -438,7 +447,8 @@ ones were left out and which `chat(before_id=…)` call can read them, and that 
 several announcements of one rule it carries only the latest. Wakes coalesce over a
 3-second window; the bus ticks once a second; the fuse allows at most 6 wakes per
 agent in 300 seconds, with extras collapsing while the queue keeps growing. The
-environment never interrupts a turn that has started. A quota hold (section 10)
+environment interrupts a turn that has started in one case only: a codex turn whose
+system prompt has changed is ended before a compaction inside it (section 4). A quota hold (section 10)
 also defers a turn; the messages wait. So does a paused office (below).
 
 ### The switch
@@ -462,9 +472,11 @@ While the office is paused:
   keep-alive, a restart notice — except that a direct message **from the owner** starts
   its addressee's turn as it would when running, and that turn delivers whatever the
   agent has unread. A common-chat post by the owner, and a message from `office` or a
-  service, start nothing;
-- turns already running go on to their end; nothing is stopped or killed, and the hook
-  and the piggyback deliver into them as ever;
+  service, start nothing. The turn owed to an agent whose codex turn was ended for its
+  changed system prompt (section 4) starts as it would when running;
+- turns already running go on to their end; nothing is stopped or killed but a codex
+  turn whose system prompt has changed (section 4), and the hook and the piggyback
+  deliver into them as ever;
 - messages are still accepted and stored, and reminders and expectations still come due
   and become messages; they wait, and buy their turns once the office runs;
 - the progress check and the director's "nothing in the office is moving" notice do not
@@ -658,7 +670,7 @@ director's own dead turn is on the owner's plate (section 15). The compensation
 is observability, which is the rule the whole tool surface obeys: **no state may
 be knowable only from a message that was received.**
 
-Seven more things the office says buy nobody a turn:
+Eight more things the office says, which buy no turn of their own:
 
 | Occasion | Told to | Shape |
 |---|---|---|
@@ -670,11 +682,12 @@ Seven more things the office says buy nobody a turn:
 | You have been moved, with the name of your new manager | the moved agent, and nobody else | quiet line |
 | A service's message died with your turn | the agent whose turn it was | quiet line |
 | Your previous turn died, with its cause (the vendor's own error text for a failure) and that everything it started stopped and its run handles are gone | the agent whose turn died, unless it died with the hub | quiet line |
+| Your previous turn was ended before it finished, and that everything it started stopped and its run handles are gone (a codex turn stopped before a compaction, below) | the agent whose turn it was | quiet line; the office owes the turn it rides, which starts at once, paused or not |
 
 The second, third and fourth exist because a system prompt is read only at certain
 moments (below): a rule, an instruction or a workspace path written today is
-invisible to a session already open until that session is replaced, or, on claude,
-compacted.
+invisible to a session already open until that session is replaced, until its
+runtime reads the prompt again, or, on claude and codex, until it is compacted.
 The fifth and the sixth exist because a brief and a manager arrive in the snapshot a
 session opened with, the brief also as a message, and neither changes when the work
 ends or the agent is moved.
@@ -682,13 +695,32 @@ ends or the agent is moved.
 ### What a wake carries
 
 - **An existing session** → the messages that accumulated.
-- **A new session** → the system prompt (for agy and codex as the first message)
-  plus one full state snapshot.
+- **A new session** → one full state snapshot.
 
-**A system prompt is read when its session is created, and on claude also on the
-first turn after a compaction.** claude is handed `--append-system-prompt-file` on
-every turn and applies it at session creation and on the first turn after each
-compaction; agy and codex take theirs in the first message of a session. There are three system
+**The system prompt is written before every turn, a keep-alive included, to the place
+its runtime reads it; no runtime is handed it in a message.** Each runtime reads it at
+its own moments:
+
+| Runtime | Written to | Read |
+|---|---|---|
+| claude | `<ws>/.office/system.md`, handed over as `--append-system-prompt-file` | at session creation and on the first turn after a compaction |
+| codex | `office-<workspace id>.config.toml` in codex's home (`$CODEX_HOME`, else `~/.codex`), holding the one key `developer_instructions`, selected with `-p` | at session creation and at each compaction |
+| agy | `<ws>/.agents/AGENTS.md` | every turn |
+
+**A codex turn whose system prompt has gone stale is stopped before it compacts.**
+The bus keeps the prompt each turn was launched with. When the `PreCompact` hook asks
+(above), the bus renders the agent's prompt afresh and compares; on a difference the
+hook answers that the turn does not continue, and codex ends it without compacting,
+exits with a non-zero code and writes no turn-end event. The office treats that end as
+a clean one: no death is recorded, no work is failed or paused, the session id stays,
+no retry is planned, the owner's journal has no line, the usage row reads `clean`, and
+what the turn took stays delivered. The agent gets a quiet line saying its previous
+turn was ended, that its work stands and that everything it started stopped, and a
+turn is owed at once; it starts while the office is paused, writes the current prompt
+before codex starts, and its compaction reads it. A keep-alive ended this way, and a
+turn killed before its process exited, stay what their exit makes them and owe nothing.
+
+There are three system
 prompts, one per role: director, lead and executor. Each carries the agent's own
 name, the owner's name,
 the rules that are for the agent (section 9), the standing instructions of the
@@ -718,7 +750,9 @@ a fresh session would otherwise have no way to learn that one is waiting on it.
 ## 5. Sessions and context
 
 **Context is managed by the vendor's own auto-compaction. The office has no
-continuation mechanism of its own.** claude gets `--autocompact auto` on every
+continuation mechanism of its own.** The one turn it ends is a codex turn whose
+system prompt has changed, before a compaction inside it (section 4); a turn is owed
+at once. claude gets `--autocompact auto` on every
 turn; codex has its own; agy has a budget in its agent definition.
 
 **The environment has no thresholds.** It does not ask an agent to write anything,
@@ -758,6 +792,11 @@ which `health()` says out loud; an estimate is never substituted.
 A turn that dies at or above 85 % of the window is read as `context_overflow` and
 the agent's `session_id` and `context_used` are cleared. This is a diagnosis: nothing consults the
 figure while a turn is alive.
+
+A turn the office ended because its system prompt changed (section 4) is not a death
+and is read before any reason here. What marks it is the hub having answered "not
+current" for that turn, not the exit code. A keep-alive ended that way stays what its
+exit makes it and owes nothing.
 
 ### When a session ends
 
@@ -945,7 +984,7 @@ on (a failed work of an agent that has since moved to another workspace), naming
 work, and one whose
 working tree holds uncommitted changes or commits, other than merges, that no remote
 branch has, naming the count and, for the commits, the branches. It removes the sandbox, the
-workspace directory and the workspace's stage refs in every stage
+workspace directory, the workspace's codex profile file (section 4) and the workspace's stage refs in every stage
 (`refs/office/stage/<stage>/<workspace-id>` in `project.git`), and then the
 workspace's rows, its `wiki_copies` included, in one transaction. A failure
 removing the files raises and leaves the rows.
@@ -993,7 +1032,9 @@ workspace and sandbox paths (section 4).
 | `killed` | stopped by a manager above the agent or by the owner |
 | `hub_restart` | the turn died with the hub |
 
-The reason is decided in this order: `killed` from the kill flag;
+A turn the hub answered "not current" for (section 4) is no death and has no reason;
+it is read before the order below. A keep-alive ended that way, and a turn killed
+before its process exited, are read by the order below and owe nothing. The reason is decided in this order: `killed` from the kill flag;
 `quota_exhausted` by a regular expression over the vendor's error text;
 `context_overflow` by window occupancy; `vendor_error` when there is error text;
 otherwise `crash`.
@@ -1523,9 +1564,9 @@ unchanged when `update` does; a value outside these four forms, or a role not in
 effect, is refused naming the values allowed. The owner's form for a rule carries the
 same field.
 
-Each rule goes verbatim into the system prompts of the agents it is for, as it stood
-when the session was created, which means a change takes effect in the prompt from an
-agent's next session: the director's prompt carries every rule, each line led by its
+Each rule goes verbatim into the system prompts of the agents it is for, as it stands
+when the prompt is written (section 4), which means a change takes effect in a session's
+prompt at the next moment its runtime reads it: the director's prompt carries every rule, each line led by its
 audience; a lead's carries the rules for `everyone` and `managers`; an executor's those
 for `everyone`, `executors` and its own role. The office tells the sessions already open
 that a rule is for with a quiet line (section 4) — those the rule was for before the
@@ -2281,7 +2322,7 @@ complexity, its state, its assigner and what it commits; each wallet (section 10
 model on which no turn starts before its time of return; the model catalogue; and
 workspaces that belong to nobody. The director alone additionally gets the
 directories under `ws/` the office did not create. Apart from the caller's own paths,
-which its system prompt carries as they stood when the session was created, none of
+which its system prompt carries as they stood when its runtime last read it, none of
 that is in any system prompt.
 
 `remind` is the only alarm in the system. Apart from the keep-alive (section 4), a turn
@@ -2319,7 +2360,7 @@ places in line, and walks the line of every resource it held or waited for.
 `all` is not accepted as a recipient: a post to the common chat wakes nobody, so a
 deferred one would arrive at the appointed moment and do nothing. The ceiling is
 seven days. It takes an offset, not an absolute instant: an agent's notion of "now"
-comes from a system prompt read when the session was created or last compacted. `cancel` takes back
+comes from a system prompt read only at the moments section 4 names. `cancel` takes back
 a deferred message its caller set that has not gone yet; the owner cancels any on
 the works page. Either deletes only a row that has not come due.
 

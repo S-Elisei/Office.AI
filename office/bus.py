@@ -112,6 +112,15 @@ class _AgentState:
     # The next turn that starts clears it.
     retry_deaths: int = 0
     retry_at: float | None = None
+    # The system prompt the turn now running (or last run) was started with.
+    launched_prompt: str | None = None
+    # Set by prompt_still_current when it answered False for the turn now running;
+    # _watch reads and clears it when that turn is over.
+    prompt_cut: bool = False
+    # Set with owes_turn when a turn was ended for its stale system prompt;
+    # _tick_agent then starts the owed turn while the office is paused. Cleared
+    # by the next turn that starts.
+    cut_owed: bool = False
 
 
 class Bus:
@@ -125,7 +134,8 @@ class Bus:
         self._director_stopped = False
         # The office's switch. A bus that has not been started runs; start() pauses it.
         # While it is False, _tick_agent starts no turn but one for an owner's direct
-        # message, and the progress check does not run. In memory.
+        # message and one owed after a cut turn (_AgentState.cut_owed), and the
+        # progress check does not run. In memory.
         self.running = True
         # The progress check's chains, by stuck agent (_check_progress), and the id
         # of the last message telling the director that nothing moves. In memory.
@@ -497,7 +507,8 @@ class Bus:
                 Setting the state it is already in does nothing.
 
                 Paused, no turn starts, for a keep-alive or any message, except a
-                direct message from the owner to its addressee; turns already running
+                direct message from the owner to its addressee and the turn owed after
+                a cut turn (_AgentState.cut_owed); turns already running
                 go on, and messages are still stored and wait. Switching to running
                 drops the progress check's chains and puts its first check a full
                 interval away.
@@ -550,6 +561,20 @@ class Bus:
         means the same text reached the agent a moment earlier.
         """
         return shared.claim_inbox(self._workspace_of(agent_name), agent_name)
+
+    def prompt_still_current(self, name: str) -> bool:
+        """Whether the system prompt the agent's running turn was started with is the
+        one rendered now. True while no turn runs. On False the turn is marked cut,
+        and _watch treats its end as no death.
+        """
+        state = self._state(name)
+        if state.turn is None:
+            return True
+        agent = db.query_one(self.conn, "SELECT * FROM agents WHERE name = ?", (name,))
+        if self._system_prompt(dict(agent)) == state.launched_prompt:
+            return True
+        state.prompt_cut = True
+        return False
 
     # -- delivery ----------------------------------------------------------
     #
@@ -646,7 +671,7 @@ class Bus:
 
             if (
                 state.owes_turn and state.drain_at is not None and now >= state.drain_at
-                and (self.running or pending.from_owner)
+                and (self.running or pending.from_owner or state.cut_owed)
             ):
                 # The timer is cleared only by a turn that actually started,
                 # and re-armed in a finally.
@@ -656,6 +681,7 @@ class Bus:
                 finally:
                     if started:
                         state.owes_turn = False
+                        state.cut_owed = False
                         state.drain_at = None
                     else:
                         # Mid-turn, fused, not provisioned yet, or a raised
@@ -1062,14 +1088,11 @@ class Bus:
 
             session_id, resume = self._session_for(agent)
             system = self._system_prompt(agent)
-            if adapter.takes_system_prompt:
-                # Written every turn; claude reads it when a session is created and
-                # on the first turn after a compaction.
-                shared.system_prompt_path(ws).write_text(system, encoding="utf-8")
-                system = ""
+            # Written before every turn, a keep-alive included; the adapter says where.
+            adapter.install_system_prompt(str(ws), system)
 
             fresh = _Pending() if ping else self._undelivered(agent)
-            prompt = KEEP_ALIVE_PROMPT if ping else self._compose(agent, fresh, resume, system)
+            prompt = KEEP_ALIVE_PROMPT if ping else self._compose(agent, fresh, resume)
             if not prompt:
                 # Nothing left to send: the hook took it mid-turn. The debt
                 # is discharged, not deferred.
@@ -1102,6 +1125,7 @@ class Bus:
             )
             if agent["runtime"] == "codex":
                 self._codex_turn_launched()
+            state.launched_prompt = system
             state.turn = turn
             state.pinging = ping
             state.retry_at = None
@@ -1171,9 +1195,21 @@ class Bus:
         # Everything else this turn started, at any depth.
         marks.sweep(marks.agent_scope(name), name)
 
+        state = self._state(name)
+        # Read and cleared before anything reads the turn's death.
+        cut = state.prompt_cut
+        state.prompt_cut = False
+        # A turn the office ended because its system prompt went stale is no death,
+        # unless it was killed. A keep-alive's end stays as its exit made it.
+        stopped = (
+            cut and turn.death is not None and not state.pinging
+            and turn.death.reason != "killed"
+        )
+        if stopped:
+            _log.info("%s's turn ended because its system prompt changed", name)
+            turn.death = None
         reason = turn.death.reason if turn.death is not None else None
         runtime, model = usage.row["runtime"], usage.row["model"]
-        state = self._state(name)
         # Everything up to the finally happens while state.turn still names this
         # turn, which is what _start_turn refuses on.
         try:
@@ -1197,6 +1233,13 @@ class Bus:
                 state.retry_deaths = 0
             # Before the turn is let go: _keep_alive_due reads the row.
             self._record_usage(usage, turn)
+            if stopped:
+                # The line buys no turn: one is owed at once, and starts while the
+                # office is paused (cut_owed).
+                core.tell_quietly(self.conn, name, _PROMPT_CUT_NOTICE)
+                state.owes_turn = True
+                state.cut_owed = True
+                state.drain_at = time.monotonic()
         finally:
             if runtime == "codex":
                 self._extend_codex_window()
@@ -2078,7 +2121,7 @@ class Bus:
         template = _template(agent["kind"])
         fields = {
             "name": agent["name"],
-            # Read when a session is created, and by claude after a compaction (_start_turn).
+            # Rendered before every turn (_start_turn).
             # The team, the quota and the model catalogue are roster()'s.
             "rules": _rules(self.conn, agent),
             "workspace": str(self._workspace_of(agent["name"]) or "(none yet)"),
@@ -2092,13 +2135,9 @@ class Bus:
         # mention.
         return template.format_map(fields)
 
-    def _compose(self, agent: dict, fresh: "_Pending", resume: bool, system: str) -> str:
+    def _compose(self, agent: dict, fresh: "_Pending", resume: bool) -> str:
         parts = []
         if not resume:
-            # For agy and codex the role text rides in the first message of the
-            # session. Once, not per turn.
-            if system:
-                parts.append(system)
             # A session that has never run gets the picture once and deltas forever
             # after.
             parts.append(_snapshot(self.conn, agent))
@@ -2376,10 +2415,21 @@ def _own_turn_died_notice(reason: str, error: str | None) -> str:
         if reason == "context_overflow"
         else "Your conversation goes on from where that turn ended."
     )
-    return (
-        f"[office] Your previous turn died: {cause}. Everything it started stopped with it: "
-        f"none of its commands or stage runs is still running, and its run handles are gone. {after}"
-    )
+    return f"[office] Your previous turn died: {cause}. {_STOPPED_WITH_TURN} {after}"
+
+
+#: What an agent is told in either account of a previous turn that ended unfinished.
+_STOPPED_WITH_TURN = (
+    "Everything it started stopped with it: none of its commands or stage runs is still "
+    "running, and its run handles are gone."
+)
+
+#: What the office tells an agent, in its next turn, about a turn it ended on purpose.
+_PROMPT_CUT_NOTICE = (
+    "[office] Your previous turn was ended before it finished; your work stands. "
+    f"{_STOPPED_WITH_TURN} Your conversation goes on from where that turn ended: carry on "
+    "with your work, and start again whatever it had running."
+)
 
 
 def _fmt_duration(seconds: float) -> str:

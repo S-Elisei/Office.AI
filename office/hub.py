@@ -265,6 +265,14 @@ async def events_stream(request: Request) -> StreamingResponse:
     return StreamingResponse(event_source(), media_type="text/event-stream")
 
 
+@app.post("/turns/{agent}/prompt-current")
+async def turn_prompt_current(request: Request, agent: str) -> dict[str, bool]:
+    """Whether the system prompt `agent`'s running turn was started with is still
+    the one rendered now. Asked by the PreCompact hook of a codex turn."""
+    bus: Bus = request.app.state.bus
+    return {"current": await asyncio.to_thread(bus.prompt_still_current, agent)}
+
+
 @app.post("/events/report")
 async def events_report(request: Request) -> Response:
     """Writes one page's account of its connection to the office log."""

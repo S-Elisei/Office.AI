@@ -183,23 +183,43 @@ def _ps_single_quoted(value: str | Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def codex_hook_command(ws: str | Path) -> str:
-    """Per-workspace hook command for codex."""
+def _codex_hook_invocation(ws: str | Path) -> str:
+    """The command that runs inbox_hook.py as codex's hook for `ws`."""
     if _IS_WINDOWS:
         return (
-            "if (!(Test-Path -LiteralPath " + _ps_single_quoted(inbox_path(ws)) + ")) "
-            "{ Write-Output '{}'; exit 0 }; "
             "& " + _ps_single_quoted(sys.executable)
             + " " + _ps_single_quoted(_HOOK_SCRIPT)
             + " 'codex' " + _ps_single_quoted(Path(ws))
         )
+    return f'"{_posix(sys.executable)}" "{_posix(_HOOK_SCRIPT)}" codex "{_posix(Path(ws))}"'
+
+
+def codex_hook_command(ws: str | Path) -> str:
+    """Per-workspace PostToolUse hook command for codex: the invocation, only
+    while the workspace's inbox holds something."""
+    if _IS_WINDOWS:
+        return (
+            "if (!(Test-Path -LiteralPath " + _ps_single_quoted(inbox_path(ws)) + ")) "
+            "{ Write-Output '{}'; exit 0 }; "
+            + _codex_hook_invocation(ws)
+        )
     return (
         f'[ -s "{_posix(inbox_path(ws))}" ] || {{ echo "{{}}"; exit 0; }}; '
-        f'"{_posix(sys.executable)}" "{_posix(_HOOK_SCRIPT)}" codex "{_posix(Path(ws))}"'
+        + _codex_hook_invocation(ws)
     )
 
 
-def codex_hook_config(ws: str | Path) -> str:
-    """The inline TOML that installs that hook for ONE invocation."""
-    handler = '{type="command", command=' + json.dumps(codex_hook_command(ws)) + ", timeout=15}"
-    return "hooks.PostToolUse=[{hooks=[" + handler + "]}]"
+def _codex_hook_config(event: str, command: str) -> str:
+    """The inline TOML that installs `command` for `event` for ONE invocation."""
+    handler = '{type="command", command=' + json.dumps(command) + ", timeout=15}"
+    return "hooks." + event + "=[{hooks=[" + handler + "]}]"
+
+
+def codex_hook_configs(ws: str | Path) -> list[str]:
+    """The inline TOML values for the hooks of ONE codex invocation, one per
+    `-c`: PostToolUse delivers the inbox, PreCompact asks the hub whether the
+    turn's system prompt is still current."""
+    return [
+        _codex_hook_config("PostToolUse", codex_hook_command(ws)),
+        _codex_hook_config("PreCompact", _codex_hook_invocation(ws)),
+    ]

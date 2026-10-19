@@ -77,8 +77,6 @@ _CHILD_ENV = {
 
 class ClaudeAdapter:
     runtime = "claude"
-    # --append-system-prompt-file, appended to claude's own
-    takes_system_prompt = True
 
     def __init__(self, bin_path: str) -> None:
         self.bin_path = bin_path
@@ -116,6 +114,10 @@ class ClaudeAdapter:
             ),
             encoding="utf-8",
         )
+
+    def install_system_prompt(self, ws: str, text: str) -> None:
+        """Write `text` where build_command's --append-system-prompt-file points."""
+        shared.system_prompt_path(ws).write_text(text, encoding="utf-8")
 
     def build_command(
         self,
