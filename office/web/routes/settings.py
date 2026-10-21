@@ -148,12 +148,12 @@ def _model_fields(
     }
 
 
-def _price_wallet(wallet: wallets.Wallet) -> dict:
-    """What the price tables' validation reads of a model's wallet: its currency and the
-    name of the field holding its 5h window, None where it has no 5h window."""
+def _price_wallet(runtime: str) -> dict:
+    """What the price tables' validation reads of a runtime's wallet: its currency and the
+    name of the field holding its 5h window."""
     return {
-        "currency": wallet.currency,
-        "window": wallets.window_key(wallet.id),
+        "currency": wallets.BY_ID[runtime].currency,
+        "window": wallets.window_key(runtime),
     }
 
 
@@ -191,7 +191,7 @@ def _context(
                 "remaining": wallets.week_remaining(conn, wallet.id),
             }
             for wallet in wallets.WALLETS
-            if installed(wallet.runtime, get_config(request))
+            if installed(wallet.id, get_config(request))
         ],
         "price_list_note": core.get_setting(conn, core.PRICE_LIST_NOTE_SETTING, "") or "",
         "price_list_works": _editor(
@@ -204,11 +204,8 @@ def _context(
         ),
         "work_roles": core.work_roles(conn),
         # Each catalogue model's wallet: its currency, and the setting that holds its 5h
-        # window (None where the wallet has none).
-        "price_wallets": {
-            row["model_id"]: _price_wallet(wallets.of_model(conn, row["runtime"], row["model_id"]))
-            for row in core.list_models(conn)
-        },
+        # window.
+        "price_wallets": {row["model_id"]: _price_wallet(row["runtime"]) for row in core.list_models(conn)},
         "window_emulated_key": wallets.WINDOW_EMULATED_KEY,
         "window_emulated": core.get_setting(conn, wallets.WINDOW_EMULATED_KEY) == "1",
         # The stored value of every wallet field, by its setting key.

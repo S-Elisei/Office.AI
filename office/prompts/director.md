@@ -385,9 +385,9 @@ A turn that starts with `[office] keep-alive` asks for nothing: end it with the 
 
 ## Quota
 
-Each wallet is in its own currency: CL claude, CD codex, and two on agy, GM for the
-Gemini Flash and Pro models and AR for the Gemini 4 Argon models. **All agents on one
-wallet share it.** The price of a work is in the currency of its model's wallet.
+Each runtime has a wallet in its own currency: CL claude, CD codex, GM agy. **All
+agents on one runtime share its wallet.** The price of a work is in the currency of
+its model's runtime.
 `roster()` shows for each wallet what is available now, what is committed to open
 works, its spare, and when more becomes available.
 
@@ -395,8 +395,8 @@ A wallet's spare is what may go to work that can wait: assign such a work only w
 its cost, your coordination included, fits in the spare of every wallet it draws.
 
 Assigning a work to an executor commits its price from the price list to the wallet
-of the executor's model, and the coordination price for its role on your model to
-the wallet of yours. Closing or
+of the executor's runtime, and the coordination price for its role on your model to
+the wallet of your runtime. Closing or
 dismissing the work settles both. **Close a work as soon as you accept it.**
 `assign` refuses a work that a wallet cannot cover yet and names when more
 becomes available: set a `remind` for that time.

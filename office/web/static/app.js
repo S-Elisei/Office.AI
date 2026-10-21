@@ -434,7 +434,7 @@
   // A works or own row priced above the 5h window of its model's wallet, and an own
   // row whose role, model and effort another own row has, cannot be saved. The form's
   // data-price-wallets maps a model to its wallet's currency and to the name of the field
-  // holding that wallet's window (null where the wallet has none).
+  // holding that wallet's window.
   function validatePriceLists(form) {
     if (!form || !form.dataset.priceWallets) return;
     const wallets = JSON.parse(form.dataset.priceWallets);
@@ -442,7 +442,7 @@
       for (const price of form.querySelectorAll(`input[name="${list}_price"]`)) {
         const model = price.closest("tr").querySelector(`input[name="${list}_model"]`).value.trim();
         const entry = wallets[model];
-        const window = entry && entry.window && form.elements[entry.window];
+        const window = entry && form.elements[entry.window];
         const size = window ? Number(window.value) : 0;
         price.setCustomValidity(
           size && Number(price.value) > size

@@ -102,8 +102,8 @@ CREATE TABLE IF NOT EXISTS works (
     output_tail TEXT,
     started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     -- What the work commits until it is closed: the price list's price of the work
-    -- on the wallet of the assignee's model, and the assigner's coordination price on
-    -- the wallet of the assigner's model. The wallets are ids of office/wallets.py.
+    -- on the wallet of the assignee's runtime, and the assigner's coordination price on
+    -- the wallet of the assigner's runtime. The wallets are ids of office/wallets.py.
     -- NULL where the work commits nothing.
     price REAL,
     price_wallet TEXT,

@@ -1261,7 +1261,7 @@ def _wallet_lines(conn) -> list[str]:
             if w["works"] else "nothing committed"
         )
         line = (
-            f"    {w['currency']} ({w['name']}): {wallets.units(w['available'])} available "
+            f"    {w['currency']} ({w['id']}): {wallets.units(w['available'])} available "
             f"({_share(w['available'], w)} of its {w['window']}), "
             f"{committed}, spare {wallets.units(w['spare'])}"
         )
@@ -1287,7 +1287,7 @@ def _price_list_lines(conn) -> list[str]:
 
     def wallet_of(row) -> wallets.Wallet | None:
         model = catalogue.get(row["model"])
-        return wallets.of_model(conn, model["runtime"], model["model_id"]) if model else None
+        return wallets.BY_ID[model["runtime"]] if model else None
 
     def cell(value) -> str:
         return f"{value:g}" if isinstance(value, float) else value or ""
@@ -1299,7 +1299,7 @@ def _price_list_lines(conn) -> list[str]:
     def share(row) -> str:
         wallet = wallet_of(row)
         line = shown.get(wallet.id) if wallet else None
-        return f"{_share(row['price'], line)} of the {line['name']} {line['window']}" if line else ""
+        return f"{_share(row['price'], line)} of the {line['id']} {line['window']}" if line else ""
 
     def table(columns, rows, extra) -> list[str]:
         if not rows:
@@ -2168,8 +2168,7 @@ _TOOLS: dict[str, types.Tool] = {
         "for a pause, the earliest it can resume; the running and paused works not listed, by "
         "runtime, each with its holder's model and effort, its role and complexity, who assigned "
         "it and what it commits; per "
-        "wallet, in its own currency (CL claude, CD codex, GM agy's Gemini Flash and Pro "
-        "models, AR agy's Gemini 4 Argon models): what is "
+        "wallet, in its own currency (CL claude, CD codex, GM agy): what is "
         "available now, what is committed to open works, its spare (what may go to work that can "
         "wait) and when more becomes available; the owner's "
         "price list; each runtime and "

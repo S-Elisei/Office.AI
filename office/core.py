@@ -1998,8 +1998,8 @@ def _commitment(
 ) -> dict:
     """The works columns a work for `agent`, assigned by `caller`, commits: the
     works price list's price for its role and complexity on the agent's model and
-    effort, on the wallet of the agent's model, and the own price list's price for its
-    role and the caller's model and effort, on the wallet of the caller's model; no such
+    effort, on the wallet of the agent's runtime, and the own price list's price for its
+    role and the caller's model and effort, on the wallet of the caller's runtime; no such
     row, no coordination.
     All NULL for a work with no role, for one whose assignee is
     not an executor, and while the works price list is empty.
@@ -2033,7 +2033,7 @@ def _commitment(
             f"{what} on {name(agent['model'], agent['effort'])}; it prices it on "
             f"{', '.join(name(r['model'], r['effort']) for r in rows)}."
         )
-    executor_wallet = wallets.of_model(conn, agent["runtime"], agent["model"]).id
+    executor_wallet = agent["runtime"]
     # wallet id -> what the work draws on it, as (whose spending, amount)
     draws = {executor_wallet: [("the executor", priced["price"])]}
     coordination = db.query_one(
@@ -2043,7 +2043,7 @@ def _commitment(
     )
     caller_wallet = None
     if coordination is not None:
-        caller_wallet = wallets.of_model(conn, caller["runtime"], caller["model"]).id
+        caller_wallet = caller["runtime"]
         draws.setdefault(caller_wallet, []).append(("your coordination", coordination["price"]))
     short = []
     for wallet_id, parts in draws.items():
@@ -2053,7 +2053,7 @@ def _commitment(
             unit = wallet["currency"]
             split = " and ".join(f"{wallets.units(amount)} for {whose}" for whose, amount in parts)
             text = (
-                f"{wallet['name']} has {wallets.units(wallet['available'])} {unit} available now; "
+                f"{wallet['id']} has {wallets.units(wallet['available'])} {unit} available now; "
                 f"this work costs {wallets.units(cost)} {unit} on it: {split}."
             )
             if wallet["more_at"] is not None:

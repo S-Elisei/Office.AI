@@ -16,7 +16,7 @@
   </div>
   <div class="form-row mb-0" style="margin-top: 16px;">
     <label>Wallets</label>
-    <span class="hint">Each wallet's weekly limit and 5h window in its currency (CL claude, CD codex, GM agy's Gemini Flash and Pro models, AR agy's Gemini 4 Argon models; AR has no 5h window), empty when there is none; the slider sets the share of the week the team leaves untouched; while Withhold spare is ticked, the team sees no spare on that wallet; while Emulate 5h window is ticked, the office keeps codex's 5h window itself from its weekly use, at the size in its 5h window field.</span>
+    <span class="hint">Each wallet's weekly limit and 5h window in its currency (CL claude, CD codex, GM agy), empty when there is none; the slider sets the share of the week the team leaves untouched; while Withhold spare is ticked, the team sees no spare on that wallet; while Emulate 5h window is ticked, the office keeps codex's 5h window itself from its weekly use, at the size in its 5h window field.</span>
     {% for row in wallet_rows %}
     {% set reserve = (wallet_values[row.reserve_key] or 0)|float %}
     <div data-wallet data-currency="{{ row.currency }}" style="margin-top: 10px;">
@@ -25,11 +25,9 @@
         <label for="s-{{ row.week_key }}" style="margin: 0;">Total weekly limit</label>
         <input id="s-{{ row.week_key }}" name="{{ row.week_key }}" type="number" step="any" min="0"
                value="{{ wallet_values[row.week_key] }}" style="width: 110px;" data-week>
-        {% if row.window_key %}
         <label for="s-{{ row.window_key }}" style="margin: 0;">5h window</label>
         <input id="s-{{ row.window_key }}" name="{{ row.window_key }}" type="number" step="any" min="0"
                value="{{ wallet_values[row.window_key] }}" style="width: 110px;" data-window>
-        {% endif %}
         <label style="margin: 0;"><input type="checkbox" name="{{ row.withhold_key }}" value="1"{{ ' checked' if row.withheld }}> Withhold spare</label>
         {% if row.id == 'codex' %}
         <label style="margin: 0;"><input type="checkbox" name="{{ window_emulated_key }}" value="1"{{ ' checked' if window_emulated }} data-emulate> Emulate 5h window</label>
@@ -55,11 +53,11 @@
   </div>
   {{ m.table_editor(
     price_list_works, "Price list: works a manager assigns",
-    "Shown to the director and the leads; the price is the average of a work from brief to close, in the currency of the model's wallet, and cannot exceed that wallet's 5h window where it has one; its roles are what a hire accepts as an executor's role, and each role's complexities are what assign accepts, and with no rows the defaults apply and nothing is committed; leave Effort empty for agy."
+    "Shown to the director and the leads; the price is the average of a work from brief to close, in the currency of the model's wallet, and cannot exceed that wallet's 5h window; its roles are what a hire accepts as an executor's role, and each role's complexities are what assign accepts, and with no rows the defaults apply and nothing is committed; leave Effort empty for agy."
   ) }}
   {{ m.table_editor(
     price_list_own, "Price list: what a lead spends on its own",
-    "Shown to the director and the leads; a row with a role is what an assigner running on its model and effort commits for coordinating a work of that role, in the currency of the model's wallet, and cannot exceed that wallet's 5h window where it has one; no two rows share a role, model and effort; leave Effort empty for agy."
+    "Shown to the director and the leads; a row with a role is what an assigner running on its model and effort commits for coordinating a work of that role, in the currency of the model's wallet, and cannot exceed that wallet's 5h window; no two rows share a role, model and effort; leave Effort empty for agy."
   ) }}
   <datalist id="s-works-roles">{% for role in work_roles %}<option value="{{ role }}">{% endfor %}</datalist>
   <div class="form-actions">

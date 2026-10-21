@@ -16,5 +16,4 @@ to `REDACTED`.
 | `agy_failing_command_capture.jsonl` | agy, gemini-3.6-flash-low |
 | `agy_tool_error_capture.jsonl` | agy, gemini-3.6-flash-low |
 | `agy_quota_capture.jsonl` | agy, gemini-3.8-flash-high: the `result` line of a turn refused for quota |
-| `agy_usage_capture.json` | agy: the stdout of `agy --output-format json --print /usage` |
-| `agy_models_capture.txt` | agy: the stdout of `agy models` |
+| `agy_usage_capture.json` | agy: the stdout of `agy --output-format json --print /usage`, copied verbatim |

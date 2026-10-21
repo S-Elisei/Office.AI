@@ -8,10 +8,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import pytest
-
-from office import core, wallets
-from office.adapters.agy import AgyAdapter, parse_models_output, reset_seconds
+from office import wallets
+from office.adapters.agy import AgyAdapter, reset_seconds
 from office.adapters.agy import parse_usage_payload as parse_agy_usage
 from office.adapters.base import name_quota_windows
 from office.adapters.claude import AUTOCOMPACT, ClaudeAdapter, parse_usage_payload, session_requests
@@ -287,27 +285,10 @@ def test_a_turn_keeps_the_tool_calls_the_vendor_started_and_has_not_ended():
         assert counts[-1] == 0
 
 
-def test_the_agy_usage_capture_yields_the_buckets_the_agy_wallets_read():
+def test_the_agy_usage_capture_yields_the_two_buckets_the_agy_wallet_reads():
     payload = json.loads((STREAMS / "agy_usage_capture.json").read_text(encoding="utf-8"))
 
-    named = {s.label: s for s in name_quota_windows(parse_agy_usage(payload))}
+    named = {s.label: s.remaining_fraction for s in name_quota_windows(parse_agy_usage(payload))}
 
-    gemini, argon = wallets.BY_ID["agy"], wallets.BY_ID["argon"]
-    assert set(named) == {gemini.week_bucket, gemini.window_bucket, argon.week_bucket}
-    assert named[gemini.week_bucket].remaining_fraction == pytest.approx(0.3254393935203552)
-    assert named[gemini.window_bucket].remaining_fraction == pytest.approx(0.9863394498825073)
-    assert named[argon.week_bucket].remaining_fraction == pytest.approx(0.9898666739463806)
-
-
-def test_the_agy_model_catalogue_puts_the_argon_models_on_the_argon_wallet(conn):
-    models = parse_models_output((STREAMS / "agy_models_capture.txt").read_text(encoding="utf-8"))
-    core.record_models(conn, "agy", models)
-
-    drawn = {m["model_id"]: wallets.of_model(conn, "agy", m["model_id"]).id for m in core.list_models(conn, "agy")}
-
-    assert {model for model, wallet in drawn.items() if wallet == "argon"} == {
-        "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high",
-    }
-    assert {model for model, wallet in drawn.items() if wallet == "agy"} == {
-        "gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high",
-    }
+    agy = wallets.BY_ID["agy"]
+    assert named == {agy.week_bucket: 1.0, agy.window_bucket: 1.0}

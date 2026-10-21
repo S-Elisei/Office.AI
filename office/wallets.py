@@ -13,33 +13,21 @@ from office.adapters.base import QUOTA_5H, QUOTA_WEEK
 
 @dataclass(frozen=True)
 class Wallet:
-    """One pool of quota. `week_bucket` and `window_bucket` are the labels of its weekly
-    and its 5h quota buckets (no `window_bucket`: the pool has no 5h limit); `group` is
-    the vendor's name for the models that share the pool, where a runtime has several."""
+    """One runtime's pool of quota, whose id is the runtime. `week_bucket` and
+    `window_bucket` are the labels of its weekly and its 5h quota buckets."""
 
     id: str
-    runtime: str
     currency: str
     week_bucket: str
-    window_bucket: str | None
-    group: str | None = None
-
-    @property
-    def name(self) -> str:
-        """The runtime, and its group where it has one: "agy · Gemini 4 Argon"."""
-        return f"{self.runtime} · {self.group}" if self.group else self.runtime
+    window_bucket: str
 
 
 _GEMINI_GROUP = "Gemini Models"
-_ARGON_GROUP = "Gemini 4 Argon"
 
-#: The wallet of each runtime's models is the one whose id is the runtime; the
-#: models of the Argon group draw on `argon` instead.
 WALLETS = (
-    Wallet("claude", "claude", "CL", f"{QUOTA_WEEK} (all models)", QUOTA_5H),
-    Wallet("codex", "codex", "CD", QUOTA_WEEK, QUOTA_5H),
-    Wallet("agy", "agy", "GM", f"{QUOTA_WEEK} ({_GEMINI_GROUP})", f"{QUOTA_5H} ({_GEMINI_GROUP})", _GEMINI_GROUP),
-    Wallet("argon", "agy", "AR", f"{QUOTA_WEEK} ({_ARGON_GROUP})", None, _ARGON_GROUP),
+    Wallet("claude", "CL", f"{QUOTA_WEEK} (all models)", QUOTA_5H),
+    Wallet("codex", "CD", QUOTA_WEEK, QUOTA_5H),
+    Wallet("agy", "GM", f"{QUOTA_WEEK} ({_GEMINI_GROUP})", f"{QUOTA_5H} ({_GEMINI_GROUP})"),
 )
 
 BY_ID = {wallet.id: wallet for wallet in WALLETS}
@@ -51,28 +39,14 @@ _WEEK_SECONDS = 7 * 24 * 3600
 WINDOW_SECONDS = 5 * 3600
 
 
-def of_model(conn, runtime: str, model: str) -> Wallet:
-    """The wallet a model on `runtime` draws on: `argon` for an agy model whose catalogue
-    display name starts with the Argon group's name, the runtime's own wallet otherwise."""
-    argon = BY_ID["argon"]
-    if runtime == argon.runtime:
-        row = db.query_one(
-            conn, "SELECT display_name FROM models WHERE runtime = ? AND model_id = ?", (runtime, model)
-        )
-        if row is not None and (row["display_name"] or "").startswith(argon.group):
-            return argon
-    return BY_ID[runtime]
-
-
 def week_key(wallet: str) -> str:
     """The setting holding a wallet's weekly limit, in units."""
     return f"wallet_{wallet}_week"
 
 
-def window_key(wallet: str) -> str | None:
-    """The setting holding a wallet's 5h window, in units; None for a wallet without a 5h
-    bucket."""
-    return f"wallet_{wallet}_window" if BY_ID[wallet].window_bucket else None
+def window_key(wallet: str) -> str:
+    """The setting holding a wallet's 5h window, in units."""
+    return f"wallet_{wallet}_window"
 
 
 def reserve_key(wallet: str) -> str:
@@ -90,12 +64,11 @@ def withhold_key(wallet: str) -> str:
 WINDOW_EMULATED_KEY = "wallet_codex_window_emulated"
 
 
-#: Every setting the owner edits per wallet: weekly limit, 5h window (of a wallet with
-#: a 5h bucket) in units, reserve in percent.
+#: Every setting the owner edits per wallet: weekly limit and 5h window in units,
+#: reserve in percent.
 SETTING_KEYS = tuple(
     key for wallet in WALLETS
     for key in (week_key(wallet.id), window_key(wallet.id), reserve_key(wallet.id))
-    if key is not None
 )
 
 
@@ -105,10 +78,9 @@ def _number(raw: str | None) -> float | None:
 
 def week_remaining(conn, wallet: str) -> float | None:
     """The remaining fraction of a wallet's weekly bucket, or None when none is stored."""
-    pool = BY_ID[wallet]
     return next(
         (q["remaining_fraction"] for q in core.quota_buckets(conn)
-         if q["runtime"] == pool.runtime and q["label"] == pool.week_bucket),
+         if q["runtime"] == wallet and q["label"] == BY_ID[wallet].week_bucket),
         None,
     )
 
@@ -149,12 +121,11 @@ def _wallet(conn, wallet: Wallet, buckets: dict, now: float, leaving: int | None
     stored. `buckets` is the stored quota by (runtime, label); the work `leaving`, if
     any, commits nothing.
 
-    Each carries `id`, `currency`, `name` (the wallet's runtime and group),
-    `available` (what may be committed to a new work now: the lesser of what the 5h
-    window and the week let it draw, less what is committed), `committed` and `works`
-    (what the open works commit on this wallet, and how many do), `spare` (what may go
-    to work that can wait: what is left above the line the share times 1 - e² draws,
-    e being the part of the week gone; 0
+    Each carries `id`, `currency`, `available` (what may be committed to a new work now:
+    the lesser of what the 5h window and the week let it draw, less what is committed),
+    `committed` and `works` (what the open works commit on this wallet, and how many do),
+    `spare` (what may go to work that can wait: what is left above the line the share
+    times 1 - e² draws, e being the part of the week gone; 0
     while the owner withholds it), `more_at` (epoch seconds when what limits it
     next lets more through: its reset, or one period after a reset that has passed;
     None when that reset is not stored), and `window` and
@@ -165,14 +136,14 @@ def _wallet(conn, wallet: Wallet, buckets: dict, now: float, leaving: int | None
     whose reset time has passed counts as full.
     """
     limit = _number(core.get_setting(conn, week_key(wallet.id)))
-    week = buckets.get((wallet.runtime, wallet.week_bucket))
+    week = buckets.get((wallet.id, wallet.week_bucket))
     if not limit or week is None:
         return None
     reserve = (_number(core.get_setting(conn, reserve_key(wallet.id))) or 0) / 100
     left = max(0, _remaining(week, now) * limit - reserve * limit)
     share = limit * (1 - reserve)
-    size = _number(core.get_setting(conn, window_key(wallet.id))) if wallet.window_bucket else None
-    five_hours = buckets.get((wallet.runtime, wallet.window_bucket))
+    size = _number(core.get_setting(conn, window_key(wallet.id)))
+    five_hours = buckets.get((wallet.id, wallet.window_bucket))
     window_cap = _remaining(five_hours, now) * size if size and five_hours is not None else math.inf
     committed, works = _committed(conn, wallet.id, leaving)
     available = max(0, min(window_cap, left) - committed)
@@ -189,7 +160,6 @@ def _wallet(conn, wallet: Wallet, buckets: dict, now: float, leaving: int | None
     return {
         "id": wallet.id,
         "currency": wallet.currency,
-        "name": wallet.name,
         "available": available,
         "committed": committed,
         "works": works,
