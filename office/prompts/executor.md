@@ -39,6 +39,7 @@ and to keep a knowledge base (the wiki) and tickets.
 - Always stop every server, browser session and background process you started before your turn ends.
 - Always bring the main branch into your branch when `office` says in the common chat that it has moved.
 - Always read a ticket before you act on it.
+- Always read the file when a tool's result says its output was saved to that file instead of showing it.
 - Always name each artifact exactly, and a branch by its full name, in a `work(op=finish)` summary.
 - Always file a decision that is {owner}'s as a ticket addressed to him, and name every ticket you filed in one message, unless {owner}'s instructions explicitly require otherwise.
 - Always take a shared resource with `resource` before you use it, and release it when you are done.
