@@ -1,4 +1,4 @@
-"""Message bus: delivers messages to agents through a hook, a piggyback, or a turn."""
+"""Message bus: delivers messages to agents through a hook or a turn."""
 
 from __future__ import annotations
 
@@ -550,17 +550,6 @@ class Bus:
             return
         self.cancel_switch_timer()
         self.set_running(timer[0] == "run", "by the timer")
-
-    # -- the free piggyback drain -----------------------------------------
-
-    def piggyback(self, agent_name: str) -> str | None:
-        """Whatever is queued, to be appended to an office tool's result.
-
-        The cheapest drain there is: the agent is already paying for this round
-        trip. Returns None when the hook got there first, which is fine — it
-        means the same text reached the agent a moment earlier.
-        """
-        return shared.claim_inbox(self._workspace_of(agent_name), agent_name)
 
     def prompt_still_current(self, name: str) -> bool:
         """Whether the system prompt the agent's running turn was started with is the
@@ -1788,9 +1777,10 @@ class Bus:
                 other side of one of them, running or due (_turn_due); a direct message it has not read; a
                 deferred message it set or will get, or an expectation it holds open;
                 a place on a held resource's waiting list;
-                a running work it assigned to somebody else; or a direct message of
-                its own that its addressee has not taken yet — for the owner, one he
-                has not written back after.
+                a running work it assigned to somebody else; a direct message of
+                its own to another agent that the addressee has not taken yet; or a
+                ticket it filed to the owner that is still open. A direct message to
+                the owner moves nothing.
         """
         name = agent["name"]
         if self._turn_due(name):
@@ -1815,6 +1805,12 @@ class Bus:
         ) is not None:
             return True
         owner = core.get_owner_name(self.conn)
+        if db.query_one(
+            self.conn,
+            "SELECT 1 FROM tickets WHERE author = ? AND addressee = ? AND status = 'open'",
+            (name, owner),
+        ) is not None:
+            return True
         by_name = {a["name"]: a for a in agents.values()}
         for sent in db.query(
             self.conn,
@@ -1822,15 +1818,6 @@ class Bus:
             "AND recipient != ? GROUP BY recipient",
             (name, name),
         ):
-            if sent["recipient"] == owner:
-                if db.query_one(
-                    self.conn,
-                    "SELECT 1 FROM messages WHERE channel = 'dm' AND sender = ? AND recipient = ? "
-                    "AND id > ?",
-                    (owner, name, sent["id"]),
-                ) is None:
-                    return True
-                continue
             other = by_name.get(sent["recipient"])
             if other is None:
                 continue

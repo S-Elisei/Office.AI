@@ -286,19 +286,18 @@ Only a claude session is recoverable across a restart — only its id is ours.
 
 ## 4. The message bus
 
-**One queue per participant. Three drains, never two for one message.**
+**One queue per participant. Two drains, never two for one message.**
 
 | Drain | Cost | When |
 |---|---|---|
 | Hook | 0 | Inside a running turn, on the agent's own activity |
-| Piggyback | 0 | Inside a running turn, on the result of an office MCP tool call |
 | Turn | one turn | Agent outside a turn: a process started with the message in its prompt |
 
-The first two work only for an agent whose turn is running. For an agent outside
-a turn the message rides the prompt of the next turn — the third drain.
+The hook works only for an agent whose turn is running. For an agent outside
+a turn the message rides the prompt of the next turn — the second drain.
 
-The hook and the piggyback take the queue with the same atomic rename
-(`shared.claim_inbox`): one gets the bytes, the other gets nothing. Starting a
+Hook processes take the queue with an atomic rename (`shared.claim_inbox`): of
+two that run at once, one gets the bytes and the other gets nothing. Starting a
 turn reads the database only.
 
 Starting a turn and delivering a message are one action. An agent outside a turn
@@ -475,8 +474,8 @@ While the office is paused:
   service, start nothing. The turn owed to an agent whose codex turn was ended for its
   changed system prompt (section 4) starts as it would when running;
 - turns already running go on to their end; nothing is stopped or killed but a codex
-  turn whose system prompt has changed (section 4), and the hook and the piggyback
-  deliver into them as ever;
+  turn whose system prompt has changed (section 4), and the hook
+  delivers into them as ever;
 - messages are still accepted and stored, and reminders and expectations still come due
   and become messages; they wait, and buy their turns once the office runs;
 - the progress check and the director's "nothing in the office is moving" notice do not
@@ -621,9 +620,9 @@ Something **moves** an agent's works when it has a turn running, owed, or a retr
 dead turn pending (section 6), or the other side of one of them does; a direct message it has not read; a deferred message it set
 or will receive, or an expectation it holds open; a place on a held resource's waiting
 list; a running work it assigned to
-somebody else; or a direct message of its own that its addressee has not taken —
-unread, or inside the addressee's running turn — and, for one to the owner, that
-he has not written back after. The director has one more while the owner has
+somebody else; a direct message of its own to another agent that its addressee has
+not taken — unread, or inside the addressee's running turn; or a ticket of its own to
+the owner that is still open. A direct message to the owner moves nothing. The director has one more while the owner has
 stopped it. An agent that answers for works and has none of these is **stuck**.
 
 About a stuck agent the check says one thing at a time along a chain: level 0 is the
@@ -2210,8 +2209,7 @@ Identity is the path `/mcp/<agent>/` and nothing else. The role is read from
 `agents.kind` on every call; an unknown name gets the executor role.
 
 Four seams to the supervisor, all installed by the hub at startup because `mcp.py`
-holds no `Bus`: the piggyback drain, stopping a turn, compaction, and firing. The
-first is a question with no consequences and defaults to silence; the other three
+holds no `Bus`: stopping a turn, compaction, a new session, and firing. All four
 are actions and default to refusing.
 
 Shared by everyone:

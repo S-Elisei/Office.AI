@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -140,35 +139,7 @@ def tick_until(bus: Bus, ready, seconds: float) -> bool:
     return ready()
 
 
-# --------------------------------------------------------------------------- delivery: piggyback
-
-
-def test_the_common_chat_reaches_a_running_turn_through_the_tool_drain(
-    conn, config, monkeypatch, tmp_path
-):
-    agent_id = make_agent(conn, "exec1")
-    make_workspace(config, conn, agent_id, "ws-1")
-    bus = Bus(conn, config)
-    monkeypatch.setattr(
-        busmod,
-        "adapter_for",
-        lambda runtime, cfg: StubClaudeAdapter(
-            dump_path=tmp_path / "dump.txt", sleep=TURN_SECONDS
-        ),
-    )
-
-    core.send_message(conn, "director", "exec1", "the first errand")
-    start_turn(bus, conn, "exec1")
-
-    core.send_message(conn, "director", "all", "a word to the room")
-    bus._tick()
-
-    first = bus.piggyback("exec1")
-    assert first is not None
-    assert "a word to the room" in first
-    assert bus.piggyback("exec1") is None
-
-    finish_turn(bus, "exec1")
+# --------------------------------------------------------------------------- delivery: the pending queue
 
 
 def test_of_several_announcements_of_one_rule_only_the_latest_is_handed_over(conn, config):
@@ -657,20 +628,45 @@ def test_nothing_moving_tells_the_director_once(conn, config):
     assert len(office_bodies(conn, "director1")) == 1
 
 
+def test_only_an_open_ticket_to_the_owner_moves_the_works_of_an_agent_waiting_on_him(conn, config):
+    a_lead_with_a_failed_work(conn)
+    owner = core.get_owner_name(conn)
+
+    def lead_is_told() -> bool:
+        read_everything(conn)
+        before = len(office_bodies(conn, "lead1"))
+        Bus(conn, config)._check_progress()
+        return len(office_bodies(conn, "lead1")) > before
+
+    core.send_message(conn, "lead1", owner, "should I go on?")
+    assert lead_is_told()
+
+    core.create_ticket(
+        conn, title="a question", body=None, author="lead1", addressee="director1", kind="question"
+    )
+    assert lead_is_told()
+
+    ticket = core.create_ticket(
+        conn, title="a question", body=None, author="lead1", addressee=owner, kind="question"
+    )
+    assert not lead_is_told()
+
+    core.resolve_ticket(conn, ticket["id"], resolved_by=owner, resolution="go on")
+    assert lead_is_told()
+
+
 # --------------------------------------------------------------------------- no double delivery
 
 
-def test_no_double_delivery_when_hook_and_piggyback_claims_race(config):
+def test_no_double_delivery_when_two_hooks_claim_at_once(config):
     ws = config.ws_dir / "ws-race"
     ws.mkdir(parents=True)
     shared.claim_owner(ws, "agent1")
 
     for i in range(20):
         shared.deliver(ws, f"msg-{i}", "agent1", 0)
-        proc_holder: list[subprocess.Popen | None] = [None]
-
-        def start_hook() -> None:
-            proc_holder[0] = subprocess.Popen(
+        hooks = [
+            subprocess.Popen(
                 [sys.executable, "-S", "-E", str(HOOK_SCRIPT), "claude", str(ws)],
                 cwd=str(ws),
                 env={**os.environ, "OFFICE_AGENT": "agent1"},
@@ -678,19 +674,15 @@ def test_no_double_delivery_when_hook_and_piggyback_claims_race(config):
                 stderr=subprocess.PIPE,
                 text=True,
             )
+            for _ in range(2)
+        ]
+        outputs = [hook.communicate(timeout=10)[0] for hook in hooks]
 
-        t = threading.Thread(target=start_hook)
-        t.start()
-        bus_side = shared.claim_inbox(ws, "agent1")
-        t.join()
-        out, _err = proc_holder[0].communicate(timeout=10)
-
-        hook_side = None
-        if out.strip():
-            hook_side = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-
-        winners = [w for w in (bus_side, hook_side) if w]
-        assert len(winners) == 1, f"trial {i}: expected exactly one winner, got bus={bus_side!r} hook={hook_side!r}"
+        winners = [
+            json.loads(out)["hookSpecificOutput"]["additionalContext"]
+            for out in outputs if out.strip()
+        ]
+        assert len(winners) == 1, f"trial {i}: expected exactly one winner, got {outputs!r}"
         assert f"msg-{i}" in winners[0]
 
 

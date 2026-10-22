@@ -13,25 +13,6 @@ from starlette.concurrency import run_in_threadpool
 
 from office import commands, core, db, stages, wallets, wiki_files
 
-# --------------------------------------------------------------------------- the free drain seam
-
-
-def _default_drain_hook(agent_name: str) -> str | None:
-    return None
-
-
-_drain_hook = _default_drain_hook
-
-
-def set_drain_hook(fn) -> None:
-    """Call once, at hub startup, with a sync callable(agent_name) -> str | None
-    returning whatever free-drain text is pending for that participant (the
-    bus's Bus.piggyback). Appended to every tool result before it goes back
-    over the wire. Passing None restores the no-op.
-    """
-    global _drain_hook
-    _drain_hook = fn or _default_drain_hook
-
 
 def _no_supervisor(agent_name: str, actor: str) -> dict:
     """The default of the seams whose subject is a live session."""
@@ -2490,11 +2471,6 @@ async def on_call_tool(ctx, params) -> types.CallToolResult:
     except Exception as exc:  # noqa: BLE001 - still a readable tool error, never a bare 500
         return _error_result(f"{name} failed: {exc}")
 
-    # _drain_hook is Bus.piggyback -- file I/O (an atomic rename under
-    # <ws>/.office/inbox), run off the loop.
-    drained = await run_in_threadpool(_drain_hook, agent_name)
-    if drained:
-        text = f"{text}\n\n{drained}"
     return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
 
 

@@ -135,7 +135,6 @@ async def lifespan(app: FastAPI):
 
     core.set_notifier(_notify)
     marks.set_survivor_hook(lambda text: core.record_notice(conn, "info", text))
-    mcp.set_drain_hook(bus.piggyback)
     mcp.set_stop_hook(bus.stop_agent)
     mcp.set_compact_hook(bus.compact)
     mcp.set_new_session_hook(bus.new_session)
@@ -155,7 +154,6 @@ async def lifespan(app: FastAPI):
 
     core.set_notifier(None)
     marks.set_survivor_hook(None)
-    mcp.set_drain_hook(None)
     mcp.set_stop_hook(None)
     mcp.set_compact_hook(None)
     mcp.set_new_session_hook(None)
