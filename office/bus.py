@@ -42,6 +42,10 @@ COMMON_CHAT_DELIVERED = 50
 SILENCE_NOTICE_SETTING = "silence_notice_minutes"
 SILENCE_NOTICE_DEFAULT_MINUTES = 20.0
 
+# The folder the wiki export mirror keeps a copy of every page in
+# (wiki_files.mirror_all); empty or unset keeps none.
+WIKI_EXPORT_SETTING = "wiki_export_dir"
+
 # Quota is a property of the vendor account, not of a turn: the office polls
 # it on its own schedule, takes it from a turn's own stream where the vendor
 # reports it there, and no agent spends a turn to learn it.
@@ -152,6 +156,12 @@ class Bus:
         # emulated 5h window (_extend_codex_window and the methods beside it), and
         # never while an agent's state.lock is being taken.
         self._codex_quota_lock = threading.Lock()
+        # The wiki export mirror's memory: the folder it last mirrored to and the
+        # stamp of each page it wrote there (_mirror_wiki), and whether its last
+        # pass failed. In memory.
+        self._mirrored_folder: str | None = None
+        self._mirrored: dict[str, wiki_files.Stamp] = {}
+        self._mirror_failing = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -619,6 +629,28 @@ class Bus:
                 self._check_progress()
             except Exception:
                 _log.exception("progress check failed")
+        self._mirror_wiki()
+
+    def _mirror_wiki(self) -> None:
+        """Bring the export folder up to the wiki: a full pass when the setting names
+        another folder than the last mirrored one, an incremental pass otherwise;
+        nothing while the setting is empty. A failed pass leaves what it did not reach
+        to the next one, and is logged once until a pass succeeds."""
+        folder = core.get_setting(self.conn, WIKI_EXPORT_SETTING, "")
+        if not folder:
+            return
+        try:
+            if folder != self._mirrored_folder:
+                self._mirrored = wiki_files.mirror_all(self.conn, Path(folder))
+                self._mirrored_folder = folder
+            else:
+                wiki_files.mirror_changes(self.conn, Path(folder), self._mirrored)
+        except OSError as exc:
+            if not self._mirror_failing:
+                _log.warning("wiki export to %s failed: %s", folder, exc)
+            self._mirror_failing = True
+        else:
+            self._mirror_failing = False
 
     def _tick_agent(self, agent: dict, now: float, max_message: int) -> None:
             state = self._state(agent["name"])

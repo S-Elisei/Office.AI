@@ -15,6 +15,11 @@
     <span class="hint">Minutes an agent may print nothing before its manager is told; 0 never tells, empty uses the default.</span>
   </div>
   <div class="form-row mb-0" style="margin-top: 16px;">
+    <label for="s-wiki-export-dir">Wiki export folder</label>
+    <input id="s-wiki-export-dir" name="wiki_export_dir" type="text" value="{{ wiki_export_dir }}">
+    <span class="hint">The folder the office keeps a copy of every wiki page in, one .md file per page; empty keeps no copy.</span>
+  </div>
+  <div class="form-row mb-0" style="margin-top: 16px;">
     <label>Wallets</label>
     <span class="hint">Each wallet's weekly limit and 5h window in its currency (CL claude, CD codex, GM agy), empty when there is none; the slider sets the share of the week the team leaves untouched; while Withhold spare is ticked, the team sees no spare on that wallet; while Emulate 5h window is ticked, the office keeps codex's 5h window itself from its weekly use, at the size in its 5h window field.</span>
     {% for row in wallet_rows %}

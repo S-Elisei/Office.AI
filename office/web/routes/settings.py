@@ -1,4 +1,5 @@
-"""Settings: owner_name, the silence threshold and the wallets (core.set_setting),
+"""Settings: owner_name, the silence threshold, the wiki export folder and the wallets
+(core.set_setting),
 the two price lists (core.set_price_lists) and their note, the director's standing
 instructions (core.set_instructions), and the director's live runtime/model/effort
 (core.update_agent_model).
@@ -12,7 +13,9 @@ from fastapi import APIRouter, Request
 
 from office import core, db, git, wallets
 from office.adapters import installed
-from office.bus import SILENCE_NOTICE_DEFAULT_MINUTES, SILENCE_NOTICE_SETTING
+from office.bus import (
+    SILENCE_NOTICE_DEFAULT_MINUTES, SILENCE_NOTICE_SETTING, WIKI_EXPORT_SETTING
+)
 from office.web.deps import (
     get_bus, get_config, get_db, get_owner_name, read_form, read_form_lists
 )
@@ -179,6 +182,7 @@ def _context(
         # The stored row, or the default when there is no row.
         "silence_minutes": core.get_setting(conn, SILENCE_NOTICE_SETTING, "")
         or _fmt_minutes(SILENCE_NOTICE_DEFAULT_MINUTES),
+        "wiki_export_dir": core.get_setting(conn, WIKI_EXPORT_SETTING, ""),
         "wallet_rows": [
             {
                 "id": wallet.id,
@@ -249,8 +253,8 @@ def settings_fragment(request: Request):
 
 @router.post("/settings")
 async def save_settings(request: Request):
-    """Owner-facing config only: owner_name, the silence threshold, the wallets'
-    weekly limits, 5h windows, reserve, withheld spare and codex's emulated 5h window, and
+    """Owner-facing config only: owner_name, the silence threshold, the wiki export
+    folder, the wallets' weekly limits, 5h windows, reserve, withheld spare and codex's emulated 5h window, and
     the two price lists with their note.
     """
     conn = get_db(request)
@@ -258,9 +262,11 @@ async def save_settings(request: Request):
     lists = await read_form_lists(request)
     owner_name = data.get("owner_name", "").strip()
     silence_minutes = data.get("silence_minutes", "").strip()
+    wiki_export_dir = data.get("wiki_export_dir", "").strip()
     core.set_setting(conn, "owner_name", owner_name, actor=owner_name)
     # Written verbatim, empty string included.
     core.set_setting(conn, SILENCE_NOTICE_SETTING, silence_minutes, actor=owner_name)
+    core.set_setting(conn, WIKI_EXPORT_SETTING, wiki_export_dir, actor=owner_name)
     # Only the wallets whose rows the page drew posted theirs.
     for key in wallets.SETTING_KEYS:
         if key in data:

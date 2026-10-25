@@ -1551,6 +1551,23 @@ it. A comment wakes nobody.
 
 A page's `path` is also the path of its file under `wiki/`.
 
+**The export mirror** keeps in the folder named by the setting `wiki_export_dir`
+(empty: none) a one-way copy of every page. Page `a/b` is
+`<folder>/a/b.md`, holding `# {title}`, a blank line, `Category: {category}`, a blank
+line and the body, with LF line ends, in UTF-8 without a BOM. The office only writes
+there; nothing in the folder is read back as content. In every tick of the bus the
+mirror is brought up to the wiki, and a file is written only when its text differs
+from the page's. The bus remembers the folder it last mirrored to and the id and
+version of each page it wrote there. When the setting names another folder than the
+remembered one, the hub's start included, it makes a full pass: every page's file is
+written, every `.md` file under the folder that is not a page's is removed, and then
+every directory under the folder left empty; files that are not `.md` are left alone.
+Otherwise it makes an incremental pass: the file of each page new or with another id or
+version is written, and the file of each page gone is removed with the directories
+under the folder it leaves empty. Every write to a page raises its version. The
+folder is created when missing. A pass that meets an `OSError` leaves what it did not
+reach to the next tick and logs the error once until a pass succeeds.
+
 **Rules are the director's to write and everyone's to read.** `note(kind=rule)` has
 `list` for everyone, and `create`, `update` and `delete`, which it refuses for any
 role but the director; `title` is required on create and optional on update.
@@ -2485,7 +2502,7 @@ All times are shown local and stored UTC.
    marked process that survived being killed, and open works that nothing moves and
    nobody above their agent has moved.
 11. **Settings** — the owner's name, the director's standing instructions, the
-    silence threshold, the wallets' weekly limits, 5h windows, reserve and withheld spare, whether codex's 5h window is emulated, the two price lists (a table each) and their note, and the director's runtime/model/effort with the cost shown
+    silence threshold, the wiki export folder, the wallets' weekly limits, 5h windows, reserve and withheld spare, whether codex's 5h window is emulated, the two price lists (a table each) and their note, and the director's runtime/model/effort with the cost shown
     before confirmation. Also the delivery address, the outcome of the last delivery,
     and — while the owner's repository is missing `receive.denyCurrentBranch` — the
     "Set up delivery" button that writes it back.
@@ -2580,6 +2597,7 @@ stays where the reader left it.
 ```
 owner_name              the owner's name (default "Owner")
 silence_notice_minutes  the silence threshold; 0 or less means never report
+wiki_export_dir         the folder the export mirror keeps a copy of every wiki page in (section 9); empty means none
 switch_timer            the pending timer of the office's switch: "run" or "pause", a space, an epoch second; empty means none
 wallet_<wallet>_week    the total weekly limit of a wallet, in units; empty means no wallet
 wallet_<wallet>_window  the 5h window of a wallet, in units; empty means none

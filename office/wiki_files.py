@@ -1,10 +1,15 @@
-"""The wiki as files: a copy of every page in each workspace's sandbox, and
-publishing a page from its file.
+"""The wiki as files: a copy of every page in each workspace's sandbox, publishing
+a page from its file, and the export mirror.
 
 A page `a/b` is `<sandbox>/wiki/a/b.md`, holding the page's body. `wiki_copies`
 keeps, per workspace, the version and the body the office last wrote into each
 file; a file whose text differs from that body holds edits not published, and
 the office leaves it as it is.
+
+The mirror is a one-way copy of every page in one folder, as `<folder>/a/b.md`
+holding the page's title, category and body. The office only writes there, and
+reads a file only to compare it with what it would write. The mirror shares
+nothing with the sandbox copies but `_write`.
 """
 
 from __future__ import annotations
@@ -184,6 +189,70 @@ def publish(
         f"made since your copy of v{copy['version']} (last written by {page['updated_by']}). "
         f"Your file now holds v{version + 1}."
     )
+
+
+#: What the mirror remembers of a page: its row id and its version.
+Stamp = tuple[int, int]
+
+
+def _stamp(page) -> Stamp:
+    return page["id"], page["version"]
+
+
+def _mirror_file(folder: Path, path: str) -> Path:
+    return folder / f"{path}.md"
+
+
+def _mirror_page(folder: Path, page) -> None:
+    """Write the page's file unless it holds that text already."""
+    text = f"# {page['title']}\n\nCategory: {page['category']}\n\n{page['body']}"
+    file = _mirror_file(folder, page["path"])
+    if _read(file) != text:
+        _write(file, text)
+
+
+def _prune(folder: Path, directory: Path) -> None:
+    """Remove `directory` and each directory above it, up to `folder`, while empty."""
+    while directory != folder and not any(directory.iterdir()):
+        directory.rmdir()
+        directory = directory.parent
+
+
+def mirror_all(conn, folder: Path) -> dict[str, Stamp]:
+    """The full pass: write every page's file, remove every `.md` file under
+    `folder` that is not a page's, then every directory left empty. Answers the
+    stamp of every page."""
+    pages = db.query(conn, "SELECT * FROM wiki")
+    for page in pages:
+        _mirror_page(folder, page)
+    files = {_mirror_file(folder, page["path"]) for page in pages}
+    for file in folder.rglob("*.md"):
+        if file not in files:
+            file.unlink()
+    for directory in sorted(folder.rglob("*"), reverse=True):
+        if directory.is_dir():
+            _prune(folder, directory)
+    return {page["path"]: _stamp(page) for page in pages}
+
+
+def mirror_changes(conn, folder: Path, seen: dict[str, Stamp]) -> None:
+    """The incremental pass over the stamps `seen` holds, which it updates as each
+    page is done: remove the file of every page gone, write the file of every page
+    new or with another stamp."""
+    stamps = {r["path"]: _stamp(r) for r in db.query(conn, "SELECT id, path, version FROM wiki")}
+    for path in [p for p in seen if p not in stamps]:
+        file = _mirror_file(folder, path)
+        file.unlink()
+        _prune(folder, file.parent)
+        del seen[path]
+    for path, stamp in stamps.items():
+        if seen.get(path) != stamp:
+            page = db.query_one(conn, "SELECT * FROM wiki WHERE path = ?", (path,))
+            if page is None:
+                # Deleted since the stamps were read; the next pass settles it.
+                continue
+            _mirror_page(folder, page)
+            seen[path] = _stamp(page)
 
 
 def _merge(mine: str, base: str, theirs: str, base_version: int, version: int) -> tuple[str, int]:

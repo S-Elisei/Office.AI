@@ -1261,3 +1261,74 @@ def test_a_week_that_reset_between_two_codex_readings_counts_from_full(conn, con
     # The answered week's reset has passed: nothing was drawn.
     codex_reading(bus, tmp_path, 4, 0.5, int(time.time()) - 1)
     assert round(codex_buckets(conn)["5h"]["remaining_fraction"], 2) == 0.85
+
+
+# --------------------------------------------------------------------------- wiki export mirror
+
+
+def folder_files(folder: Path) -> dict[str, str]:
+    """Every file under `folder`, by its path relative to it, with its text."""
+    return {
+        f.relative_to(folder).as_posix(): f.read_text(encoding="utf-8")
+        for f in sorted(folder.rglob("*")) if f.is_file()
+    }
+
+
+def test_the_export_folder_follows_every_kind_of_write_to_the_wiki(conn, config, tmp_path):
+    # Invented: pages, categories and bodies.
+    def write(path, body, *, version=None, title="T", category="c"):
+        core.note_wiki(
+            conn, path=path, category=category, title=title, body=body, updated_by="owner",
+            expected_version=version,
+        )
+
+    export = tmp_path / "export"
+    core.set_setting(conn, busmod.WIKI_EXPORT_SETTING, str(export))
+    bus = Bus(conn, config)
+    write("a/b", "one")
+    write("a/c", "two")
+    write("solo", "three")
+    bus._mirror_wiki()
+    assert folder_files(export) == {
+        "a/b.md": "# T\n\nCategory: c\n\none",
+        "a/c.md": "# T\n\nCategory: c\n\ntwo",
+        "solo.md": "# T\n\nCategory: c\n\nthree",
+    }
+
+    write("a/b", "one, edited", version=1, title="Renamed", category="d")
+    write("a/c", "two, edited", version=1)
+    core.undo_wiki_page(conn, "a/c")
+    core.delete_wiki_page(conn, "solo", 1)
+    bus._mirror_wiki()
+    assert folder_files(export) == {
+        "a/b.md": "# Renamed\n\nCategory: d\n\none, edited",
+        "a/c.md": "# T\n\nCategory: c\n\ntwo",
+    }
+
+    core.delete_wiki_page(conn, "a/b", 2)
+    core.delete_wiki_page(conn, "a/c", 3)
+    bus._mirror_wiki()
+    assert not (export / "a").exists()
+
+    # A page deleted and written again at the same path and version between two passes.
+    write("a/b", "first")
+    bus._mirror_wiki()
+    core.delete_wiki_page(conn, "a/b", 1)
+    write("a/b", "second")
+    bus._mirror_wiki()
+    assert folder_files(export) == {"a/b.md": "# T\n\nCategory: c\n\nsecond"}
+
+
+def test_a_full_pass_clears_what_is_not_a_page_but_leaves_other_files(conn, config, tmp_path):
+    # Invented: the leftovers.
+    export = tmp_path / "export"
+    (export / "old" / "deep").mkdir(parents=True)
+    (export / "old" / "deep" / "gone.md").write_text("stray", encoding="utf-8")
+    (export / "keep.txt").write_text("not a page", encoding="utf-8")
+    core.note_wiki(
+        conn, path="p", category="c", title="T", body="b", updated_by="owner", expected_version=None
+    )
+    core.set_setting(conn, busmod.WIKI_EXPORT_SETTING, str(export))
+    Bus(conn, config)._mirror_wiki()
+    assert folder_files(export) == {"keep.txt": "not a page", "p.md": "# T\n\nCategory: c\n\nb"}
+    assert not (export / "old").exists()
