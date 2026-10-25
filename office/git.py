@@ -1294,9 +1294,10 @@ def merge(
 
         msg = message or f"Merge branch '{source_branch}' into {target_branch}"
         commit = _out(
-            ["commit-tree", f"{source}^{{tree}}", "-p", target, "-p", source, "-m", msg],
+            ["commit-tree", f"{source}^{{tree}}", "-p", target, "-p", source],
             project,
             env_extra=_OFFICE_IDENTITY,
+            input=msg,
         )
 
         if target_branch == main:
