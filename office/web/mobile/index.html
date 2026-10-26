@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#162d27">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Office.AI</title>
+  <link rel="manifest" href="/assets/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/assets/icon-192.png">
+  <link rel="stylesheet" href="/assets/mobile.css">
+  <script src="/assets/mobile.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Office<span>.AI</span></a>
+    <span id="connection" role="status">Connecting</span>
+    <button id="device-button" type="button" class="quiet">Device</button>
+  </header>
+  <main>
+    <section id="connect-panel" class="connect-panel">
+      <span class="eyebrow">YOUR OFFICE, IN YOUR POCKET</span>
+      <h1>Connect this phone.</h1>
+      <p>Copy this phone's public key into <strong>Settings → Mobile access</strong> on your computer, then connect.</p>
+      <label for="pairing-key">Public key</label>
+      <textarea id="pairing-key" class="public-key" rows="4" readonly spellcheck="false"></textarea>
+      <button type="button" class="copy-key secondary">Copy public key</button>
+      <button id="connect-button" type="button">Connect to office</button>
+      <p id="connect-status" role="status">Preparing this phone's key…</p>
+    </section>
+    <section id="workspace" class="workspace" hidden>
+      <aside class="conversations">
+        <div class="section-heading"><h1>Conversations</h1><span>TEAM</span></div>
+        <nav id="conversations" aria-label="Conversations"></nav>
+      </aside>
+      <section class="chat" aria-label="Chat">
+        <header class="chat-heading">
+          <button id="back-button" class="quiet" type="button" aria-label="Back to conversations">←</button>
+          <div><h2 id="chat-title">Select a conversation</h2><span id="chat-subtitle"></span></div>
+        </header>
+        <div id="message-scroll" class="message-scroll" tabindex="0">
+          <button id="older-button" class="secondary" type="button" hidden>Load older messages</button>
+          <div id="messages" role="log" aria-live="polite"></div>
+          <p id="empty-chat" class="empty" hidden>No messages yet. Start the conversation.</p>
+        </div>
+        <form id="composer" class="composer">
+          <label class="sr-only" for="message-body">Message</label>
+          <textarea id="message-body" rows="3" placeholder="Write to your team…" required maxlength="12000"></textarea>
+          <div class="composer-foot"><span id="send-status" role="status"></span><button id="send-button" type="submit">Send</button></div>
+        </form>
+      </section>
+    </section>
+    <p id="error" class="error" role="alert" hidden></p>
+  </main>
+  <dialog id="device-dialog">
+    <div class="dialog-heading"><h2>This phone</h2><button id="close-device" class="quiet" type="button">Close</button></div>
+    <p>Register this public key in the office's local Settings.</p>
+    <textarea id="device-key" class="public-key" rows="4" readonly spellcheck="false" aria-label="Phone public key"></textarea>
+    <p id="fingerprint" class="fingerprint"></p>
+    <button type="button" class="copy-key secondary">Copy public key</button>
+    <p>Revoke this device from your computer to end its access.</p>
+    <button id="logout-button" class="secondary" type="button">Sign out</button>
+  </dialog>
+</body>
+</html>

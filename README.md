@@ -163,6 +163,79 @@ You change its model and its standing instructions later on the settings page.
 
 ---
 
+## Mobile chat
+
+The mobile app provides direct messages with the team and the common chat.
+It installs from the phone's browser as a PWA. The computer runs the office and
+an HTTPS tunnel. The phone needs no VPN, password, or screen lock.
+
+### Start the mobile listener
+
+Install [ngrok](https://ngrok.com/download) and connect it to your ngrok account.
+Use the development domain assigned to that account.
+
+Set `OFFICE_ROOT` as in **Run**, then start the hub with the public HTTPS origin:
+
+```powershell
+$env:OFFICE_MOBILE_ORIGIN = "https://your-assigned-domain.ngrok-free.app"
+uv run python -m office.hub
+```
+
+The origin contains no path or trailing slash. The local interface listens on
+`127.0.0.1:7777`; the mobile listener listens on `127.0.0.1:7778`.
+`OFFICE_MOBILE_PORT` selects another mobile port.
+Without `OFFICE_MOBILE_ORIGIN`, only the local listener starts.
+
+In another terminal, start the tunnel to the mobile listener:
+
+```powershell
+ngrok http 7778 --url https://your-assigned-domain.ngrok-free.app --inspect=false
+```
+
+Keep the public Host header unchanged. Point the tunnel at the mobile port.
+The computer's local interface, MCP, hooks and file routes are not mobile routes.
+
+### Register a phone
+
+1. Open the HTTPS address on the phone.
+2. On ngrok's free plan, pass the warning page with **Visit Site**. The warning
+   page returns every seven days.
+3. Copy the public key shown on the connection screen.
+4. On the computer, open **Settings → Mobile access**, name the phone, paste
+   its public key and click **Register phone**.
+5. On the phone, tap **Connect to office**.
+6. Use the browser's **Install app** or **Add to Home Screen** action.
+
+The phone keeps its private key in browser storage, non-exportable through Web
+Crypto. Sign-in is automatic. The device list in local Settings contains a
+**Revoke access** button for each phone. Revocation ends that phone's sessions
+and pending sign-ins. Accepted agent work continues.
+
+An unlocked phone grants access until revoked. Clearing site data removes its
+key; register the replacement key and revoke the old device.
+Browser storage belongs to the HTTPS origin.
+
+An unconfirmed send stays on the phone with its send identifier. **Retry send**
+checks delivery using that identifier, including after a page reload or hub
+restart. Nothing sends pending messages automatically. Chat history is fetched
+from the office and is not stored in the PWA cache.
+
+### Use another tunnel
+
+The office authenticates devices itself. The tunnel provides public HTTPS and
+forwards requests to `http://127.0.0.1:7778`, preserving Host and Origin and
+streaming SSE responses.
+
+For a persistent Cloudflare Tunnel, configure its published hostname to use that
+local URL. Set `OFFICE_MOBILE_ORIGIN` to the new HTTPS origin and restart the
+hub. A change of origin requires registering the phone at the new address and
+revoking its old registration. Cloudflare Quick Tunnels do not support SSE.
+
+The HTTPS tunnel provider can read traffic. Device signatures authenticate the
+phone; they do not encrypt chat content from the tunnel provider.
+
+---
+
 ## What the office does
 
 **A team you hire.** You hire one director; the director hires the rest. The

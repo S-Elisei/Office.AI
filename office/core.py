@@ -226,7 +226,10 @@ def get_owner_name(conn) -> str:
 # module never imports office.bus.
 
 
-def send_message(conn, sender: str, recipient: str, body: str, actor: str | None = None) -> dict:
+def send_message(
+    conn, sender: str, recipient: str, body: str, actor: str | None = None,
+    *, request_key: str | None = None,
+) -> dict:
     """say(to, text).
 
     `recipient` is a participant name, or 'all' for the common chat; the channel
@@ -235,12 +238,30 @@ def send_message(conn, sender: str, recipient: str, body: str, actor: str | None
     """
     channel = "all" if recipient == "all" else "dm"
     recipient_col = None if channel == "all" else recipient
-    if channel == "dm":
-        _check_participant(conn, recipient_col)
     with db.transaction(conn):
+        if request_key is not None:
+            receipt = db.query_one(
+                conn,
+                "SELECT m.* FROM message_receipts r JOIN messages m ON m.id = r.message_id "
+                "WHERE r.request_key = ?",
+                (request_key,),
+            )
+            if receipt is not None:
+                if (receipt["sender"], receipt["recipient"], receipt["body"]) != (
+                    sender, recipient_col, body,
+                ):
+                    raise ValueError("This send already contains another message. Start a new send.")
+                return dict(receipt)
+        if channel == "dm":
+            _check_participant(conn, recipient_col)
         message_id = _write_message(
             conn, channel, sender, recipient_col, body, actor if actor is not None else sender
         )
+        if request_key is not None:
+            db.execute(
+                conn, "INSERT INTO message_receipts (request_key, message_id) VALUES (?, ?)",
+                (request_key, message_id),
+            )
     return _row(conn, "messages", "id", message_id)
 
 
@@ -302,6 +323,45 @@ def chat_history(conn, before_id: int | None = None, limit: int = CHAT_PAGE_SIZE
     )
     has_older = len(rows) > limit
     return [dict(r) for r in (rows[1:] if has_older else rows)], has_older
+
+
+def dm_threads(conn, owner_name: str) -> list[dict]:
+    """The owner's direct-message peers, newest conversation first."""
+    rows = db.query(
+        conn,
+        """
+        SELECT peer, MAX(id) AS id, body, created_at FROM (
+            SELECT id, body, created_at,
+                   CASE WHEN sender = ? THEN recipient ELSE sender END AS peer
+            FROM messages
+            WHERE channel = 'dm' AND (sender = ? OR recipient = ?)
+        )
+        WHERE peer IS NOT NULL AND peer <> ?
+        GROUP BY peer
+        ORDER BY id DESC
+        """,
+        (owner_name, owner_name, owner_name, owner_name),
+    )
+    return [{"peer": r["peer"], "preview": r["body"], "created_at": r["created_at"]} for r in rows]
+
+
+def dm_history(
+    conn, peer: str, owner_name: str, before_id: int | None = None, limit: int = CHAT_PAGE_SIZE,
+) -> tuple[list[sqlite3.Row], bool]:
+    """One page of the owner's direct messages with a peer, oldest first."""
+    where = "channel = 'dm' AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))"
+    params: list = [peer, owner_name, owner_name, peer]
+    if before_id is not None:
+        where += " AND id < ?"
+        params.append(before_id)
+    params.append(limit + 1)
+    rows = db.query(
+        conn,
+        f"SELECT * FROM (SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?) ORDER BY id ASC",
+        tuple(params),
+    )
+    has_older = len(rows) > limit
+    return (rows[1:] if has_older else rows), has_older
 
 
 def see_conversation(conn, *, channel: str, peer: str, up_to_message_id: int) -> None:

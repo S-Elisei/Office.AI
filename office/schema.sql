@@ -122,6 +122,18 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS mobile_devices (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    public_key BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS message_receipts (
+    request_key TEXT PRIMARY KEY,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE
+);
+
 -- How far the owner has READ each conversation: one row per conversation he can
 -- open, a direct-message thread or the common chat.
 --

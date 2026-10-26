@@ -41,19 +41,7 @@ def _messages(
     """
     if director is None:
         return [], False
-    where = "channel = 'dm' AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))"
-    params: list = [director["name"], owner_name, owner_name, director["name"]]
-    if before_id is not None:
-        where += " AND id < ?"
-        params.append(before_id)
-    params.append(limit + 1)
-    rows = db.query(
-        conn,
-        f"SELECT * FROM (SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?) ORDER BY id ASC",
-        tuple(params),
-    )
-    has_older = len(rows) > limit
-    return (rows[1:] if has_older else rows), has_older
+    return core.dm_history(conn, director["name"], owner_name, before_id, limit=limit)
 
 
 def _quota(conn: sqlite3.Connection) -> list[tuple[str, list[dict]]]:

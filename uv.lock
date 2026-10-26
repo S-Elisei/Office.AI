@@ -508,6 +508,7 @@ name = "office"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "jinja2" },
     { name = "markdown" },
@@ -524,6 +525,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=43" },
     { name = "fastapi" },
     { name = "jinja2" },
     { name = "markdown", specifier = ">=3.7" },

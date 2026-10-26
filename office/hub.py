@@ -280,9 +280,28 @@ async def events_report(request: Request) -> Response:
 
 
 if __name__ == "__main__":
+    from contextlib import ExitStack
+
     import uvicorn
 
+    from office.mobile import Entrypoints, create_app
+
     _config = load_config()
-    uvicorn.run(
-        "office.hub:app", host="127.0.0.1", port=_config.port, timeout_graceful_shutdown=5
+    _application = app
+    if _config.mobile_origin:
+        _application = Entrypoints(
+            app, create_app(app.state, _config.mobile_origin), _config.mobile_port
+        )
+    _server_config = uvicorn.Config(
+        _application, host="127.0.0.1", port=_config.port, timeout_graceful_shutdown=5,
+        proxy_headers=False,
     )
+    with ExitStack() as _sockets:
+        _listeners = [_sockets.enter_context(_server_config.bind_socket())]
+        if _config.mobile_origin:
+            _mobile_config = uvicorn.Config(_application, host="127.0.0.1", port=_config.mobile_port)
+            _listeners.append(_sockets.enter_context(_mobile_config.bind_socket()))
+        try:
+            uvicorn.Server(_server_config).run(sockets=_listeners)
+        except KeyboardInterrupt:
+            pass

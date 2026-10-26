@@ -1,0 +1,33 @@
+{% if mobile_origin %}
+<p><a href="{{ mobile_origin }}" target="_blank" rel="noopener noreferrer">{{ mobile_origin }}</a></p>
+<p class="hint">Tunnel target: http://127.0.0.1:{{ mobile_port }}</p>
+{% else %}
+<p class="hint">Set OFFICE_MOBILE_ORIGIN to your tunnel's HTTPS address and restart the hub.</p>
+{% endif %}
+
+{% for device in mobile_devices %}
+<div class="form-row">
+  <strong>{{ device.name }}</strong>
+  <code>{{ device.id[:16] }}</code>
+  <span class="hint">{{ device.created_at | fmt_time }}</span>
+  <form method="post" action="/settings/mobile/{{ device.id }}/revoke"
+        hx-post="/settings/mobile/{{ device.id }}/revoke" hx-target="#settings-mobile">
+    <button type="submit" class="small">Revoke access</button>
+  </form>
+</div>
+{% else %}
+<p class="hint">No phones registered.</p>
+{% endfor %}
+
+<form method="post" action="/settings/mobile" hx-post="/settings/mobile" hx-target="#settings-mobile">
+  <div class="form-row">
+    <label for="mobile-name">Device name</label>
+    <input id="mobile-name" name="name" required placeholder="My phone">
+  </div>
+  <div class="form-row">
+    <label for="mobile-key">Phone's public key</label>
+    <input id="mobile-key" name="public_key" required spellcheck="false" autocomplete="off"
+           pattern="office-p256:[A-Za-z0-9+/]{87}=" placeholder="office-p256:…">
+  </div>
+  <button type="submit">Register phone</button>
+</form>

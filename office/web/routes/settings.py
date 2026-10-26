@@ -20,6 +20,7 @@ from office.web.deps import (
     get_bus, get_config, get_db, get_owner_name, read_form, read_form_lists
 )
 from office.web.templating import templates
+from office.web.routes.mobile_devices import context as mobile_context
 
 router = APIRouter()
 
@@ -242,7 +243,7 @@ def _context(
 @router.get("/settings")
 def settings_page(request: Request):
     return templates.TemplateResponse(
-        request, "settings.html", {**_context(request), **_delivery_context(request)}
+        request, "settings.html", {**_context(request), **_delivery_context(request), **mobile_context(request)}
     )
 
 

@@ -15,6 +15,8 @@ class Config:
     claude_bin: str | None
     codex_bin: str | None
     agy_bin: str | None
+    mobile_origin: str | None = None
+    mobile_port: int = 7778
 
     @property
     def db_path(self) -> Path:
@@ -106,4 +108,6 @@ def load_config() -> Config:
         claude_bin=_detect_cli("OFFICE_CLAUDE_BIN", "claude", claude_fallback),
         codex_bin=_detect_cli("OFFICE_CODEX_BIN", "codex", None),
         agy_bin=_detect_cli("OFFICE_AGY_BIN", "agy", agy_fallback),
+        mobile_origin=os.environ.get("OFFICE_MOBILE_ORIGIN"),
+        mobile_port=int(os.environ.get("OFFICE_MOBILE_PORT", "7778")),
     )

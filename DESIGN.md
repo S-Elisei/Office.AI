@@ -2638,13 +2638,52 @@ Python 3.12 · FastAPI · SQLite (WAL) · Jinja2 + HTMX + SSE · python-markdown
 and no build step.
 
 One process: the web UI, MCP over HTTP at `/mcp/<agent>`, the hook at
-`/hooks/<token>`, and the process supervisor.
-It listens on `127.0.0.1` only, and before any route sees a request it refuses
+`/hooks/<token>`, the mobile HTTP application, and the process supervisor.
+The local listener binds to `127.0.0.1` only, and before any route sees a request it refuses
 one addressed to any name but `127.0.0.1` or `localhost`, and one that changes
 something — any method but `GET`, `HEAD` and `OPTIONS` — and carries an `Origin`
 other than the address it was sent to. A request with no `Origin`, as a service
-sends it, passes. Nothing authenticates a request.
-All state in one SQLite file.
+sends it, passes. The local listener does not authenticate requests.
+Durable state lives in one SQLite file.
+
+### Mobile access
+
+`OFFICE_MOBILE_ORIGIN` enables a second loopback listener, on
+`OFFICE_MOBILE_PORT` (default 7778). The accepted socket selects the application.
+Both listeners share one lifespan, database connection, broadcaster and bus.
+The mobile listener exposes its PWA assets, device sign-in, conversations,
+messages, reading marks and SSE. It has no MCP, hooks, local settings or file
+routes. An HTTPS reverse tunnel forwards the configured public origin to it.
+The mobile application requires that Host, and requires that Origin and
+`X-Office-Mobile: 1` on every changing request. Request bodies are bounded.
+
+The PWA generates an ECDSA P-256 key pair through Web Crypto. The private key
+is non-exportable and stored in IndexedDB. Local Settings registers the public
+key in `mobile_devices`, identified by its SHA-256 fingerprint. Device management
+is available only on the local listener.
+
+Sign-in signs a one-use, expiring challenge containing the public origin,
+device fingerprint and a random nonce. A verified signature opens an expiring
+server-side session, carried in a Secure, HttpOnly, SameSite=Strict host cookie.
+Challenges and sessions live in memory. Revocation drops the device's sessions and
+challenges and wakes its SSE streams. Streams check access on events and pings.
+An API 401 or a revoked stream triggers one silent sign-in attempt while connected.
+Sign-in requests do not trigger another attempt. Sign-out ends the connection.
+Silent sign-in preserves the open conversation, composer text and unconfirmed send.
+
+The mobile chat contains the owner's direct messages and public common messages.
+Agent-to-agent direct messages are not included. Text is rendered through
+`textContent`. The PWA cache contains only the application shell. An initiated,
+unconfirmed send and its UUID remain in IndexedDB until acknowledged.
+Sending and recording its receipt happen in one SQLite transaction;
+`message_receipts` keys each send by device fingerprint and UUID. Retrying a
+receipt returns the stored message. A changed payload with that receipt is refused.
+The PWA retries sends only on an explicit tap and catches up from message IDs after a
+connection interruption.
+
+The tunnel is independent of device authentication. Its provider terminates
+public HTTPS. A new public origin uses separate browser storage and device
+registration.
 
 Hard rules of the single process:
 

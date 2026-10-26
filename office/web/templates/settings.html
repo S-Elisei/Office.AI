@@ -3,6 +3,13 @@
 {% block content %}
 
   <section class="panel">
+    <header>Mobile access</header>
+    <div class="body" id="settings-mobile">
+      {% include "partials/settings_mobile.html" %}
+    </div>
+  </section>
+
+  <section class="panel">
     <div class="body" id="settings-form" hx-get="/fragments/settings" hx-trigger="office:settings[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
       {% include "partials/settings_form.html" %}
     </div>
