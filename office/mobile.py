@@ -223,7 +223,7 @@ def create_app(state, origin: str) -> FastAPI:
         owner = core.get_owner_name(conn)
         threads = {t["peer"]: t for t in core.dm_threads(conn, owner)}
         peers = [dict(r) for r in db.query(
-            conn, "SELECT name, kind, status FROM agents ORDER BY kind = 'director' DESC, name COLLATE NOCASE"
+            conn, "SELECT name, kind, status FROM agents ORDER BY name COLLATE NOCASE"
         )]
         names = {p["name"] for p in peers}
         peers.extend({"name": n, "kind": "", "status": ""} for n in threads if n not in names)
@@ -232,10 +232,11 @@ def create_app(state, origin: str) -> FastAPI:
             name = peer["name"]
             common = name == "all"
             last = db.query_one(
-                conn, "SELECT body FROM messages WHERE channel = 'all' AND recipient IS NULL "
+                conn, "SELECT id, body AS preview FROM messages WHERE channel = 'all' AND recipient IS NULL "
                 "ORDER BY id DESC LIMIT 1",
             ) if common else threads.get(name)
-            peer["preview"] = (last["body"] if common else last["preview"])[:160] if last else ""
+            peer["preview"] = last["preview"][:160] if last else ""
+            peer["last_id"] = last["id"] if last else 0
             peer["unread"] = db.query_one(
                 conn,
                 "SELECT COUNT(*) AS n FROM messages WHERE "
@@ -246,6 +247,7 @@ def create_app(state, origin: str) -> FastAPI:
                 ((owner,) if common else (name, owner)) + ("all" if common else "dm", "" if common else name),
             )["n"]
             peer["can_send"] = common or bool(peer["kind"])
+        peers.sort(key=lambda p: (p["kind"] != "director", -p["last_id"]))
         return {"owner": owner, "conversations": peers}
 
     @app.get("/api/messages", dependencies=[Depends(authenticated)])

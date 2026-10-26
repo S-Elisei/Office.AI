@@ -342,7 +342,10 @@ def dm_threads(conn, owner_name: str) -> list[dict]:
         """,
         (owner_name, owner_name, owner_name, owner_name),
     )
-    return [{"peer": r["peer"], "preview": r["body"], "created_at": r["created_at"]} for r in rows]
+    return [
+        {"peer": r["peer"], "id": r["id"], "preview": r["body"], "created_at": r["created_at"]}
+        for r in rows
+    ]
 
 
 def dm_history(
