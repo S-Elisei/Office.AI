@@ -1,8 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Team — Office.AI{% endblock %}
 {% block content %}
-  <p class="subtitle">Everyone hired, each under the agent they report to, and how much room they have left.</p>
-
   <section class="panel">
     <div class="body" id="team-table" hx-get="/fragments/team" hx-trigger="office:agents[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
       {% include "partials/team_table.html" %}

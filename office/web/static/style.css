@@ -147,9 +147,10 @@ code, pre, .mono {
 }
 
 main {
+  --page-top: 24px;
   flex: 1;
   min-width: 0;
-  padding: 24px 32px 40px;
+  padding: var(--page-top) 32px 40px;
   max-width: 1400px;
 }
 
@@ -157,12 +158,6 @@ main > h1 {
   margin: 0 0 10px;
   font-size: 19px;
   font-weight: 600;
-}
-
-main > .subtitle {
-  color: var(--text-dim);
-  font-size: 13px;
-  margin: 0 0 20px;
 }
 
 .panel {
@@ -1690,7 +1685,7 @@ button:disabled {
 #office-timer-form label { grid-column: 1 / -1; color: var(--sidebar-fg-dim); }
 #office-timer-form input[type="time"] { min-width: 0; width: 100%; padding: 4px; color: var(--sidebar-fg); background: var(--bg-sidebar); border: 1px solid var(--sidebar-fg-dim); color-scheme: dark; }
 #office-timer-pending { color: var(--sidebar-fg-dim); }
-.monitor-quota-panel { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; }
+.monitor-quota-panel { position: sticky; top: var(--page-top); max-height: calc(100vh - 2 * var(--page-top)); overflow-y: auto; }
 .work-card [data-work-field="live"] form { margin-left: auto; }
 .thread [data-feed-empty] { margin: 6px 0; }
 [hidden] { display: none !important; }

@@ -1,8 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Pull requests — Office.AI{% endblock %}
 {% block content %}
-  <p class="subtitle">Open only. Merged and closed PRs live in git history, not here.</p>
-
   <div id="prs-list" data-office-prs>
     {% include "partials/prs_list.html" %}
   </div>

@@ -1,8 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Knowledge — Office.AI{% endblock %}
 {% block content %}
-  <p class="subtitle">The wiki — the same for humans and agents.</p>
-
   <section class="panel">
     <header>Wiki</header>
     <div class="body" id="knowledge-wiki" hx-get="/fragments/knowledge-wiki?path={{ selected_path or '' }}" hx-trigger="office:wiki[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
