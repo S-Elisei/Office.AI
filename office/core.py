@@ -273,6 +273,15 @@ def _write_message(conn, channel: str, sender: str, recipient: str | None, body:
         "INSERT INTO messages (channel, sender, recipient, body) VALUES (?, ?, ?, ?)",
         (channel, sender, recipient, body),
     )
+    if channel == "dm" and recipient == get_owner_name(conn) and sender != recipient:
+        db.execute(
+            conn,
+            "INSERT INTO mobile_push_pending (device_id, peer, message_id) "
+            "SELECT device_id, ?, ? FROM mobile_push_subscriptions WHERE 1 "
+            "ON CONFLICT(device_id, peer) DO UPDATE SET message_id = excluded.message_id, "
+            "failures = 0, retry_at = 0",
+            (sender, cur.lastrowid),
+        )
     _emit(
         conn, "messages", "message", cur.lastrowid,
         {"channel": channel, "sender": sender, "recipient": recipient},

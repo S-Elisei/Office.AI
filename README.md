@@ -220,16 +220,51 @@ checks delivery using that identifier, including after a page reload or hub
 restart. Nothing sends pending messages automatically. Chat history is fetched
 from the office and is not stored in the PWA cache.
 
+### Direct-message notifications
+
+Open **Device → Enable notifications** on the phone and allow notifications in
+the browser's permission dialog. Incoming personal messages show the sender
+and an invitation to open Office.AI. Tapping a notification opens that chat.
+Notifications from the same sender share one notification slot.
+Messages in the conversation currently visible on that phone produce no push
+notification. Other conversations still notify. The conversation list, Device
+dialog, hidden page and closed app suppress no notifications. Each open window
+reports its own visible conversation.
+
+On Android, enable notifications for Chrome or the installed app in system
+settings. On iPhone and iPad, Web Push requires iOS/iPadOS 16.4 or newer and a
+Home Screen installation. Delivery requires the office computer and the phone
+to have internet access. The phone's notification and Focus settings apply.
+
+The office sends Web Push directly to the browser's push service. Push delivery
+uses no ngrok requests. Subscription endpoints must start with `https://`;
+other endpoints are refused without saving them or closing the chat connection.
+Failed deliveries stay queued; pending notifications
+and subscriptions belong to the registered device. **Device → Disable
+notifications** stops new pushes. **Sign out** closes the chat; notifications
+remain enabled until disabled or the device is revoked in local Settings.
+
+### Connections and traffic
+
+One WebSocket carries sign-in, messages, history, reading marks and subscription
+changes. Individual messages create no extra HTTP requests. The socket closes
+in the background and catches up from message IDs when the app returns.
+Reconnection uses increasing delays. The app shell uses a cache-first fetch
+handler. Each `/sw.js` request derives its cache name from the content of
+`index.html` and every file under the mobile assets directory. Changes to those
+files change the served worker automatically. Service-worker updates and
+WebSocket connections still use requests.
+
 ### Use another tunnel
 
 The office authenticates devices itself. The tunnel provides public HTTPS and
 forwards requests to `http://127.0.0.1:7778`, preserving Host and Origin and
-streaming SSE responses.
+supporting WebSocket upgrades.
 
 For a persistent Cloudflare Tunnel, configure its published hostname to use that
 local URL. Set `OFFICE_MOBILE_ORIGIN` to the new HTTPS origin and restart the
 hub. A change of origin requires registering the phone at the new address and
-revoking its old registration. Cloudflare Quick Tunnels do not support SSE.
+revoking its old registration.
 
 The HTTPS tunnel provider can read traffic. Device signatures authenticate the
 phone; they do not encrypt chat content from the tunnel provider.

@@ -8,7 +8,7 @@ import logging
 import os
 import sqlite3
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -131,6 +131,8 @@ async def lifespan(app: FastAPI):
 
     def _notify(kind: str, payload: dict[str, Any]) -> None:
         asyncio.run_coroutine_threadsafe(broadcaster.publish(kind, payload), loop)
+        if config.mobile_origin and kind == "messages":
+            loop.call_soon_threadsafe(app.state.mobile_push.wake.set)
         bus.notify(kind)
 
     core.set_notifier(_notify)
@@ -145,10 +147,15 @@ async def lifespan(app: FastAPI):
     async with mcp.session_manager.run():
         bus.recover_after_restart()
         bus.start()
+        push_task = asyncio.create_task(app.state.mobile_push.run()) if config.mobile_origin else None
 
         yield
 
         bus.stop()
+        if push_task is not None:
+            push_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await push_task
         watcher.cancel()
         await asyncio.to_thread(stages.shutdown)
 
@@ -295,6 +302,7 @@ if __name__ == "__main__":
     _server_config = uvicorn.Config(
         _application, host="127.0.0.1", port=_config.port, timeout_graceful_shutdown=5,
         proxy_headers=False,
+        ws_max_size=128 * 1024,
     )
     with ExitStack() as _sockets:
         _listeners = [_sockets.enter_context(_server_config.bind_socket())]

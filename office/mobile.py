@@ -5,24 +5,27 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import secrets
 import time
+from contextlib import suppress
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, utils
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from office import core, db
+from office.mobile_push import PushDelivery
 
 ASSETS = Path(__file__).parent / "web" / "mobile"
-COOKIE = "__Host-office_mobile"
 SESSION_SECONDS = 24 * 60 * 60
 
 
@@ -62,6 +65,28 @@ class SendRequest(Protocol):
 class SeenRequest(Protocol):
     peer: str
     message_id: int
+
+
+class ViewRequest(Protocol):
+    peer: str | None
+
+
+class HistoryRequest(Protocol):
+    peer: str
+    before_id: int | None = None
+    after_id: int | None = None
+
+
+class PushSubscription(Protocol):
+    endpoint: str
+    keys: dict[str, str]
+    expirationTime: float | None = None
+
+
+class SocketRequest(Protocol):
+    id: int
+    op: Literal["messages", "send", "seen", "view", "push", "push_subscribe", "push_unsubscribe"]
+    data: dict = Field(default_factory=dict)
 
 
 class MobileAuth:
@@ -124,10 +149,16 @@ class MobileBoundary:
         self.host = urlsplit(origin).netloc
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
+        if scope["type"] not in {"http", "websocket"}:
             await self.app(scope, receive, send)
             return
         headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]}
+        if scope["type"] == "websocket":
+            if headers.get("host") != self.host or headers.get("origin") != self.origin:
+                await send({"type": "websocket.close", "code": 1008})
+                return
+            await self.app(scope, receive, send)
+            return
 
         async def secured_send(message):
             if message["type"] == "http.response.start":
@@ -135,42 +166,16 @@ class MobileBoundary:
                     (b"cache-control", b"no-store"),
                     (b"x-content-type-options", b"nosniff"),
                     (b"referrer-policy", b"no-referrer"),
-                    (b"content-security-policy", b"default-src 'none'; script-src 'self'; "
-                     b"style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; "
-                     b"worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
+                    (b"content-security-policy", (
+                        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; "
+                        f"connect-src 'self' wss://{self.host}; manifest-src 'self'; "
+                        "worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+                    ).encode("ascii")),
                 ])
             await send(message)
 
         if headers.get("host") != self.host:
             await PlainTextResponse("Open the configured mobile address.", 403)(scope, receive, secured_send)
-            return
-        if scope["method"] not in {"GET", "HEAD"}:
-            if headers.get("origin") != self.origin or headers.get("x-office-mobile") != "1":
-                await PlainTextResponse("Open the mobile app and retry.", 403)(scope, receive, secured_send)
-                return
-            body = bytearray()
-            while True:
-                message = await receive()
-                if message["type"] == "http.disconnect":
-                    return
-                body.extend(message.get("body", b""))
-                if len(body) > 128 * 1024:
-                    await PlainTextResponse("Request too large. Send a shorter message.", 413)(
-                        scope, receive, secured_send
-                    )
-                    return
-                if not message.get("more_body", False):
-                    break
-
-            async def buffered_receive():
-                nonlocal body
-                if body is not None:
-                    result = {"type": "http.request", "body": bytes(body), "more_body": False}
-                    body = None
-                    return result
-                return await receive()
-
-            await self.app(scope, buffered_receive, secured_send)
             return
         await self.app(scope, receive, secured_send)
 
@@ -180,13 +185,8 @@ def create_app(state, origin: str) -> FastAPI:
     app.state = state
     auth = MobileAuth(state, origin)
     state.mobile_auth = auth
+    state.mobile_push = PushDelivery(state, origin)
     app.add_middleware(MobileBoundary, origin=origin)
-
-    async def authenticated(request: Request) -> str:
-        device = auth.current(request.cookies.get(COOKIE, ""))
-        if device is None:
-            raise HTTPException(401, "Session ended. Reconnect.")
-        return device
 
     @app.get("/")
     def index():
@@ -194,30 +194,21 @@ def create_app(state, origin: str) -> FastAPI:
 
     @app.get("/sw.js")
     def service_worker():
-        return FileResponse(ASSETS / "sw.js", media_type="text/javascript")
+        version = hashlib.sha256()
+        files = [ASSETS / "index.html", *sorted(p for p in (ASSETS / "assets").rglob("*") if p.is_file())]
+        for path in files:
+            version.update(path.relative_to(ASSETS).as_posix().encode())
+            version.update(b"\0")
+            version.update(path.read_bytes())
+            version.update(b"\0")
+        source = (ASSETS / "sw.js").read_text(encoding="utf-8")
+        return Response(
+            f'const CACHE = "office-mobile-{version.hexdigest()}";\n{source}',
+            media_type="text/javascript",
+        )
 
     app.mount("/assets", StaticFiles(directory=ASSETS / "assets"))
 
-    @app.post("/api/challenge")
-    async def challenge(data: ChallengeRequest):
-        return auth.challenge(data.device)
-
-    @app.post("/api/session")
-    async def session(data: ProofRequest, response: Response):
-        token = auth.prove(data)
-        response.set_cookie(
-            COOKIE, token, max_age=SESSION_SECONDS, secure=True, httponly=True, samesite="strict"
-        )
-        return {"connected": True}
-
-    @app.delete("/api/session", dependencies=[Depends(authenticated)])
-    async def logout(request: Request, response: Response):
-        token = request.cookies[COOKIE]
-        auth.sessions.pop(hashlib.sha256(token.encode()).hexdigest(), None)
-        response.delete_cookie(COOKIE, secure=True, httponly=True, samesite="strict")
-        return {"connected": False}
-
-    @app.get("/api/conversations", dependencies=[Depends(authenticated)])
     def conversations():
         conn = state.db
         owner = core.get_owner_name(conn)
@@ -250,7 +241,6 @@ def create_app(state, origin: str) -> FastAPI:
         peers.sort(key=lambda p: (p["kind"] != "director", -p["last_id"]))
         return {"owner": owner, "conversations": peers}
 
-    @app.get("/api/messages", dependencies=[Depends(authenticated)])
     def messages(peer: str, before_id: int | None = None, after_id: int | None = None):
         if after_id is not None:
             owner = core.get_owner_name(state.db)
@@ -269,8 +259,7 @@ def create_app(state, origin: str) -> FastAPI:
             rows, older = core.dm_history(state.db, peer, core.get_owner_name(state.db), before_id, limit=100)
         return {"messages": [dict(r) for r in rows], "has_older": older}
 
-    @app.post("/api/messages")
-    def send_message(data: SendRequest, device: str = Depends(authenticated)):
+    def send_message(data: SendRequest, device: str):
         try:
             request_key = f"{device}:{UUID(data.request_id)}"
         except ValueError:
@@ -283,39 +272,105 @@ def create_app(state, origin: str) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
 
-    @app.post("/api/seen", dependencies=[Depends(authenticated)])
     def seen(data: SeenRequest):
         common = data.peer == "all"
         core.see_conversation(
             state.db, channel="all" if common else "dm", peer="" if common else data.peer,
             up_to_message_id=data.message_id,
         )
-        return Response(status_code=204)
 
-    @app.get("/api/events", dependencies=[Depends(authenticated)])
-    async def events(request: Request):
+    @app.websocket("/api/socket")
+    async def socket(websocket: WebSocket):
+        await websocket.accept()
+        try:
+            hello = ChallengeRequest.model_validate_json(await asyncio.wait_for(websocket.receive_text(), timeout=30))
+            await websocket.send_json({"event": "challenge", "data": auth.challenge(hello.device)})
+            proof = ProofRequest.model_validate_json(await asyncio.wait_for(websocket.receive_text(), timeout=30))
+            token = auth.prove(proof)
+        except HTTPException as exc:
+            await websocket.send_json({"event": "error", "status": exc.status_code, "detail": exc.detail})
+            await websocket.close(code=4401)
+            return
+        except (ValidationError, asyncio.TimeoutError):
+            await websocket.close(code=1008, reason="Sign-in incomplete")
+            return
+        except WebSocketDisconnect:
+            return
         queue = state.broadcaster.subscribe()
-        token = request.cookies[COOKIE]
-
-        async def stream():
-            try:
-                yield "event: refresh\ndata: {}\n\n"
-                while not await request.is_disconnected():
+        receive = asyncio.create_task(websocket.receive_text())
+        update = asyncio.create_task(queue.get())
+        try:
+            await websocket.send_json({"event": "ready", "data": conversations()})
+            while True:
+                done, _ = await asyncio.wait({receive, update}, timeout=15, return_when=asyncio.FIRST_COMPLETED)
+                device = auth.current(token)
+                if device is None:
+                    await websocket.send_json({"event": "unauthorized", "detail": "Session ended. Reconnect."})
+                    await websocket.close(code=4401)
+                    return
+                if receive in done:
+                    raw = receive.result()
                     try:
-                        message = await asyncio.wait_for(queue.get(), timeout=15)
-                    except asyncio.TimeoutError:
-                        message = ""
-                    if auth.current(token) is None:
-                        yield "event: revoked\ndata: {}\n\n"
+                        request = SocketRequest.model_validate_json(raw)
+                    except ValidationError:
+                        await websocket.close(code=1008, reason="Invalid request")
                         return
-                    if message.startswith(("event: messages\n", "event: agents\n")):
-                        yield "event: refresh\ndata: {}\n\n"
+                    try:
+                        if request.op == "messages":
+                            result = messages(**HistoryRequest.model_validate(request.data).model_dump())
+                        elif request.op == "send":
+                            result = send_message(SendRequest.model_validate(request.data), device)
+                        elif request.op == "seen":
+                            result = seen(SeenRequest.model_validate(request.data))
+                        elif request.op == "view":
+                            view = ViewRequest.model_validate(request.data)
+                            state.mobile_push.views[token] = (device, view.peer)
+                            result = None
+                        elif request.op == "push":
+                            result = state.mobile_push.status(device)
+                        elif request.op == "push_subscribe":
+                            subscription = PushSubscription.model_validate(request.data)
+                            if not subscription.endpoint.startswith("https://"):
+                                raise HTTPException(400, "Push endpoint requires HTTPS. Enable notifications again.")
+                            state.mobile_push.subscribe(device, subscription.model_dump())
+                            result = state.mobile_push.status(device)
+                        else:
+                            state.mobile_push.unsubscribe(device)
+                            result = state.mobile_push.status(device)
+                    except ValidationError:
+                        await websocket.send_json({"id": request.id, "status": 422, "detail": "Request rejected. Refresh the app."})
+                    except HTTPException as exc:
+                        await websocket.send_json({"id": request.id, "status": exc.status_code, "detail": exc.detail})
                     else:
-                        yield ": ping\n\n"
-            finally:
-                state.broadcaster.unsubscribe(queue)
-
-        return StreamingResponse(stream(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+                        await websocket.send_json({"id": request.id, "status": 200, "data": result})
+                    receive = asyncio.create_task(websocket.receive_text())
+                if update in done:
+                    kind, encoded = update.result().split("\ndata: ", 1)
+                    update = asyncio.create_task(queue.get())
+                    if kind == "event: messages":
+                        payload = json.loads(encoded)
+                        if payload["subject_type"] != "message":
+                            continue
+                        row = db.query_one(state.db, "SELECT * FROM messages WHERE id = ?", (payload["subject_id"],))
+                        owner = core.get_owner_name(state.db)
+                        common = row["channel"] == "all" and row["recipient"] is None
+                        direct = row["channel"] == "dm" and owner in {row["sender"], row["recipient"]}
+                        if common or direct:
+                            peer = "all" if common else row["recipient"] if row["sender"] == owner else row["sender"]
+                            conversation = next(p for p in conversations()["conversations"] if p["name"] == peer)
+                            await websocket.send_json({"event": "message", "message": dict(row), "conversation": conversation})
+                    elif kind == "event: agents":
+                        await websocket.send_json({"event": "conversations", "data": conversations()})
+        except WebSocketDisconnect:
+            pass
+        finally:
+            state.mobile_push.views.pop(token, None)
+            auth.sessions.pop(hashlib.sha256(token.encode()).hexdigest(), None)
+            state.broadcaster.unsubscribe(queue)
+            for task in (receive, update):
+                task.cancel()
+                with suppress(asyncio.CancelledError, WebSocketDisconnect):
+                    await task
 
     return app
 
@@ -329,5 +384,5 @@ class Entrypoints:
         self.port = port
 
     async def __call__(self, scope, receive, send):
-        target = self.mobile if scope["type"] == "http" and scope["server"][1] == self.port else self.local
+        target = self.mobile if scope["type"] in {"http", "websocket"} and scope["server"][1] == self.port else self.local
         await target(scope, receive, send)

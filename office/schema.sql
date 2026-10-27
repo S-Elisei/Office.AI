@@ -134,6 +134,25 @@ CREATE TABLE IF NOT EXISTS message_receipts (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS mobile_push_identity (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    private_key BLOB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mobile_push_subscriptions (
+    device_id TEXT PRIMARY KEY REFERENCES mobile_devices(id) ON DELETE CASCADE,
+    subscription TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mobile_push_pending (
+    device_id TEXT NOT NULL REFERENCES mobile_push_subscriptions(device_id) ON DELETE CASCADE,
+    peer TEXT NOT NULL,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    failures INTEGER NOT NULL DEFAULT 0,
+    retry_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, peer)
+);
+
 -- How far the owner has READ each conversation: one row per conversation he can
 -- open, a direct-message thread or the common chat.
 --

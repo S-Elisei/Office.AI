@@ -12,6 +12,7 @@ dependencies = [
     "mcp>=2.2.0",
     "markdown>=3.7",
     "cryptography>=43",
+    "pywebpush>=2",
     # Windows ships no IANA tz database, so zoneinfo cannot resolve the zone
     # names claude prints in `/usage` ("Sep 12, 5:40am (Europe/Istanbul)").
     # Pure data, no build step. Without it every claude reset time is None.

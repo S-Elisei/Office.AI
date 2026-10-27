@@ -2651,25 +2651,31 @@ Durable state lives in one SQLite file.
 `OFFICE_MOBILE_ORIGIN` enables a second loopback listener, on
 `OFFICE_MOBILE_PORT` (default 7778). The accepted socket selects the application.
 Both listeners share one lifespan, database connection, broadcaster and bus.
-The mobile listener exposes its PWA assets, device sign-in, conversations,
-messages, reading marks and SSE. It has no MCP, hooks, local settings or file
-routes. An HTTPS reverse tunnel forwards the configured public origin to it.
-The mobile application requires that Host, and requires that Origin and
-`X-Office-Mobile: 1` on every changing request. Request bodies are bounded.
+The mobile listener exposes its PWA assets and `/api/socket`. It has no MCP,
+hooks, local settings or file routes. An HTTPS reverse tunnel forwards the
+configured public origin to it. HTTP requires that Host. WebSocket requires
+that Host and Origin. `ws_max_size` on the hub bounds WebSocket messages.
+
+Each `/sw.js` request hashes `index.html` and every file under the mobile assets
+directory, including their relative paths and contents in stable order. The
+response prepends the shell cache name derived from that SHA-256 hash to the
+service-worker source. Its shell fetch handler is cache-first.
 
 The PWA generates an ECDSA P-256 key pair through Web Crypto. The private key
 is non-exportable and stored in IndexedDB. Local Settings registers the public
 key in `mobile_devices`, identified by its SHA-256 fingerprint. Device management
 is available only on the local listener.
 
-Sign-in signs a one-use, expiring challenge containing the public origin,
-device fingerprint and a random nonce. A verified signature opens an expiring
-server-side session, carried in a Secure, HttpOnly, SameSite=Strict host cookie.
-Challenges and sessions live in memory. Revocation drops the device's sessions and
-challenges and wakes its SSE streams. Streams check access on events and pings.
-An API 401 or a revoked stream triggers one silent sign-in attempt while connected.
-Sign-in requests do not trigger another attempt. Sign-out ends the connection.
-Silent sign-in preserves the open conversation, composer text and unconfirmed send.
+Each WebSocket opens with the device fingerprint and a one-use, expiring
+challenge containing the public origin, fingerprint and a random nonce. The
+phone signs it through Web Crypto. A verified signature opens an expiring
+server-side session bound to that connection. Its token stays on the server.
+Challenges and sessions live in memory. The session ends with the connection.
+Revocation drops the device's sessions and challenges and wakes its connections.
+Access is checked before each operation and while idle. Expiry triggers a new
+connection and signature; a refused sign-in opens the connection screen.
+Sign-out stops reconnection. Reconnection preserves the open conversation,
+composer text and unconfirmed send.
 
 The mobile chat contains the owner's direct messages and public common messages.
 Agent-to-agent direct messages are not included. Text is rendered through
@@ -2678,8 +2684,43 @@ unconfirmed send and its UUID remain in IndexedDB until acknowledged.
 Sending and recording its receipt happen in one SQLite transaction;
 `message_receipts` keys each send by device fingerprint and UUID. Retrying a
 receipt returns the stored message. A changed payload with that receipt is refused.
-The PWA retries sends only on an explicit tap and catches up from message IDs after a
-connection interruption.
+The PWA retries sends only on an explicit tap and catches up from message IDs
+after a connection interruption. Messages, history, sends, reading marks and
+push subscriptions travel over the WebSocket. Each connection also reports its
+visible conversation: the peer only when the document and its chat panel are
+visible. The conversation list on the narrow layout, connection screen and
+other visible root sections or dialogs report none. Opening a conversation,
+returning to the list, changing document visibility or layout, opening or closing
+a dialog, and a ready socket update the report. Closing a socket removes its
+report. Each socket keeps its own report; a device may have several sockets.
+Live events carry the message
+and its conversation summary. Agent-to-agent messages and reminder scheduling
+events are not forwarded. The socket closes while the page is hidden and
+reopens on return. Network reconnection uses increasing delays.
+
+### Mobile notifications
+
+The phone enables Web Push from its Device dialog. Its subscription belongs to
+the registered device in `mobile_push_subscriptions`. `mobile_push_identity`
+stores the office's VAPID private key; its public key is derived from it.
+`push_subscribe` refuses endpoints that do not start with `https://`, returns
+the refusal as the operation's error reply and keeps the socket open.
+Incoming direct messages to the owner queue notifications inside the message's
+transaction. `mobile_push_pending` keeps the latest message per device and peer.
+The push worker deletes a pending row when any open socket of that device
+reports the row's peer as visible. Other peers and devices retain delivery.
+A conversation list, hidden page or closed app suppresses no notifications.
+The hub's push worker sends the other encrypted payloads directly to the browser's push
+service through pywebpush. Network and service failures remain queued with a
+retry time; expired subscriptions are deleted. A newer queued message is not
+deleted by an earlier delivery's completion. Revoking a device or disabling its
+notifications deletes its subscription and pending notifications.
+
+The service worker shows the sender and an invitation to open the office. It
+fetches no chat data in the background. Notifications replace earlier ones from
+the same peer, and tapping one opens that conversation. Sign-out closes the chat;
+notification subscriptions remain until disabled or revoked. The PWA shell is
+cached under its content hash, and chat data is not cached.
 
 The tunnel is independent of device authentication. Its provider terminates
 public HTTPS. A new public origin uses separate browser storage and device

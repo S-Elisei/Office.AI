@@ -3,9 +3,11 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   keys: null, publicKey: "", device: "", owner: "", peer: null, conversations: [],
-  messages: [], pending: null, connected: false, connecting: false, session: 0, sending: false, source: null,
-  view: 0, loading: false, refreshing: false, refreshAgain: false, refreshTimer: null, seenTimer: null,
-  seen: new Map(),
+  messages: [], pending: null, connected: false, connecting: null, active: true,
+  socket: null, ready: false, requests: new Map(), sequence: 0, sending: false,
+  view: 0, loading: false, seen: new Map(), retryTimer: null, retryDelay: 1000,
+  registration: null, push: null, pushBusy: false,
+  targetPeer: new URLSearchParams(location.hash.slice(1)).get("peer"),
 };
 let storage;
 
@@ -45,91 +47,214 @@ async function prepareKey() {
 }
 
 function showError(error) {
-  if (error.status === 401) return;
   $("error").textContent = error.message;
   $("error").hidden = false;
 }
 
+function rejectRequests(error) {
+  for (const request of state.requests.values()) {
+    clearTimeout(request.timer);
+    request.reject(error);
+  }
+  state.requests.clear();
+}
+
+function visiblePeer() {
+  if (document.visibilityState !== "visible") return null;
+  const panels = [...document.querySelectorAll("main > section, dialog[open]")]
+    .filter((panel) => panel.getClientRects().length);
+  const workspace = $("workspace");
+  return panels.length === 1 && panels[0] === workspace &&
+    workspace.querySelector(".chat").getClientRects().length ? state.peer : null;
+}
+
+function reportView(peer = visiblePeer()) {
+  if (!state.ready || state.socket.readyState !== WebSocket.OPEN) return;
+  state.socket.send(JSON.stringify({id: ++state.sequence, op: "view", data: {peer}}));
+}
+
+function stopSocket() {
+  reportView(null);
+  const socket = state.socket;
+  state.socket = null;
+  state.ready = false;
+  socket?.close();
+  rejectRequests(new Error("Connection interrupted. Retry the send to check delivery."));
+  updateComposer();
+  updatePush();
+}
+
 function sessionEnded(message) {
+  state.active = false;
   state.connected = false;
-  state.source?.close();
-  state.source = null;
+  clearTimeout(state.retryTimer);
+  stopSocket();
   $("workspace").hidden = true;
   $("connect-panel").hidden = false;
   $("connection").textContent = "Disconnected";
   $("connect-status").textContent = message;
 }
 
-async function reSignIn(session) {
-  if (state.connected && !state.connecting && session === state.session) await connect();
+function scheduleReconnect() {
+  clearTimeout(state.retryTimer);
+  if (!state.active || !navigator.onLine || document.visibilityState !== "visible") return;
+  state.retryTimer = setTimeout(connect, state.retryDelay);
+  state.retryDelay = Math.min(60000, state.retryDelay * 2);
 }
 
-async function api(path, method = "GET", data) {
-  const session = state.session;
-  const options = {method, cache: "no-store", signal: AbortSignal.timeout(20000)};
-  if (method !== "GET") {
-    options.headers = {"Content-Type": "application/json", "X-Office-Mobile": "1"};
-    options.body = JSON.stringify(data ?? {});
-  }
-  const response = await fetch(path, options);
-  if (!response.ok) {
-    let message = `Office returned ${response.status}. Reconnect and retry.`;
-    if (response.headers.get("content-type")?.includes("application/json")) {
-      const body = await response.json();
-      if (typeof body.detail === "string") message = body.detail;
-    }
-    if (response.status === 401) await reSignIn(session);
-    const error = new Error(message);
-    error.status = response.status;
-    throw error;
-  }
-  return response.status === 204 ? null : response.json();
+function request(op, data = {}) {
+  if (!state.ready) return Promise.reject(new Error("Connection unavailable. Reconnect and retry."));
+  const id = ++state.sequence;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      state.requests.delete(id);
+      reject(new Error("Reply not received. Retry the send to check delivery."));
+      state.socket?.close();
+    }, 20000);
+    state.requests.set(id, {resolve, reject, timer});
+    state.socket.send(JSON.stringify({id, op, data}));
+  });
 }
 
-async function connect() {
-  const silent = state.connected;
-  state.connecting = true;
-  state.source?.close();
-  state.source = null;
+function openSocket() {
+  stopSocket();
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(location.origin.replace(/^http/, "ws") + "/api/socket");
+    state.socket = socket;
+    const timer = setTimeout(() => {
+      reject(new Error("Connection timed out. Check your network."));
+      socket.close();
+    }, 20000);
+    socket.onopen = () => socket.send(JSON.stringify({device: state.device}));
+    socket.onmessage = async (event) => {
+      if (state.socket !== socket) return;
+      const message = JSON.parse(event.data);
+      if (message.event === "challenge") {
+        try {
+          const signature = await crypto.subtle.sign(
+            {name: "ECDSA", hash: "SHA-256"}, state.keys.privateKey,
+            new TextEncoder().encode(message.data.message)
+          );
+          socket.send(JSON.stringify({challenge: message.data.challenge,
+            signature: btoa(String.fromCharCode(...new Uint8Array(signature)))}));
+        } catch (error) { clearTimeout(timer); reject(error); socket.close(); }
+      } else if (message.event === "ready") {
+        clearTimeout(timer);
+        state.ready = true;
+        reportView();
+        resolve(message.data);
+      } else if (message.event === "error" || message.event === "unauthorized") {
+        clearTimeout(timer);
+        const error = new Error(message.detail);
+        error.status = message.status ?? 401;
+        if (state.ready) {
+          stopSocket();
+          connect();
+        } else reject(error);
+      } else if (message.event === "message") {
+        receiveMessage(message);
+      } else if (message.event === "conversations") {
+        applyConversations(message.data);
+        updateComposer();
+      } else {
+        const pending = state.requests.get(message.id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        state.requests.delete(message.id);
+        if (message.status === 200) pending.resolve(message.data);
+        else {
+          const error = new Error(message.detail);
+          error.status = message.status;
+          pending.reject(error);
+        }
+      }
+    };
+    socket.onclose = () => {
+      clearTimeout(timer);
+      const error = new Error("Connection interrupted. Retry the send to check delivery.");
+      reject(error);
+      if (state.socket !== socket) return;
+      state.socket = null;
+      state.ready = false;
+      rejectRequests(error);
+      updateComposer();
+      updatePush();
+      $("connection").textContent = navigator.onLine ? "Reconnecting…" : "Offline";
+      scheduleReconnect();
+    };
+  });
+}
+
+function connect() {
+  state.active = true;
+  if (state.connecting) return state.connecting;
+  clearTimeout(state.retryTimer);
   $("connect-button").disabled = true;
   $("logout-button").disabled = true;
-  if (!silent) {
-    $("connect-status").textContent = "Connecting…";
-    $("error").hidden = true;
-  }
-  try {
-    const challenge = await api("/api/challenge", "POST", {device: state.device});
-    const signature = await crypto.subtle.sign(
-      {name: "ECDSA", hash: "SHA-256"}, state.keys.privateKey,
-      new TextEncoder().encode(challenge.message)
-    );
-    await api("/api/session", "POST", {
-      challenge: challenge.challenge, signature: btoa(String.fromCharCode(...new Uint8Array(signature))),
-    });
-    state.session += 1;
-    state.connected = true;
-    if (!silent) {
+  state.connecting = (async () => {
+    try {
+      const snapshot = await openSocket();
+      state.connected = true;
+      state.retryDelay = 1000;
+      applyConversations(snapshot);
       $("connect-panel").hidden = true;
       $("workspace").hidden = false;
-      await refreshConversations();
-      const initial = state.pending?.peer ?? state.peer ??
-        state.conversations.find((peer) => peer.kind === "director")?.name ?? "all";
-      await openConversation(initial);
+      reportView();
+      $("connection").textContent = "Connected";
+      $("error").hidden = true;
+      const peer = state.pending?.peer ?? state.targetPeer ?? state.peer ??
+        state.conversations.find((item) => item.kind === "director")?.name ?? "all";
+      state.targetPeer = null;
+      if (peer !== state.peer || !state.messages.length) await openConversation(peer);
+      else await syncMessages();
       if (state.pending) {
         $("message-body").value = state.pending.body;
         $("send-status").textContent = "Unconfirmed send. Retry to check delivery.";
       }
       updateComposer();
+      await refreshPush();
+    } catch (error) {
+      if (error.status === 401) sessionEnded(error.message);
+      else {
+        $("connection").textContent = navigator.onLine ? "Reconnecting…" : "Offline";
+        $("connect-status").textContent = "Connection unavailable. Reconnecting…";
+        if (navigator.onLine && document.visibilityState === "visible") showError(error);
+        scheduleReconnect();
+      }
+    } finally {
+      state.connecting = null;
+      $("connect-button").disabled = false;
+      $("logout-button").disabled = false;
     }
-    $("connection").textContent = "Connected";
-    listen();
-  } catch (error) {
-    sessionEnded(error.status === 401 ? error.message : "Could not connect. Check your connection and retry.");
-    showError(error);
-  } finally {
-    state.connecting = false;
-    $("connect-button").disabled = false;
-    $("logout-button").disabled = false;
+  })();
+  return state.connecting;
+}
+
+function applyConversations(data) {
+  state.owner = data.owner;
+  state.conversations = data.conversations;
+  renderConversations();
+}
+
+function mergeMessages(rows) {
+  const messages = new Map(state.messages.map((message) => [message.id, message]));
+  for (const message of rows) messages.set(message.id, message);
+  state.messages = [...messages.values()].sort((a, b) => a.id - b.id);
+}
+
+function receiveMessage(event) {
+  const index = state.conversations.findIndex((peer) => peer.name === event.conversation.name);
+  if (index < 0) state.conversations.push(event.conversation);
+  else state.conversations[index] = event.conversation;
+  state.conversations.sort((a, b) => (a.kind !== "director") - (b.kind !== "director") || b.last_id - a.last_id);
+  renderConversations();
+  if (event.conversation.name !== state.peer) return;
+  const scroll = $("message-scroll");
+  const stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
+  mergeMessages([event.message]);
+  if (!state.loading) {
+    renderMessages(stick);
+    markSeen().catch(showError);
   }
 }
 
@@ -166,13 +291,6 @@ function renderConversations() {
   $("conversations").replaceChildren(fragment);
 }
 
-async function refreshConversations() {
-  const data = await api("/api/conversations");
-  state.owner = data.owner;
-  state.conversations = data.conversations;
-  renderConversations();
-}
-
 function renderMessages(stick) {
   const fragment = document.createDocumentFragment();
   for (const message of state.messages) {
@@ -203,11 +321,15 @@ function updateComposer() {
   const peer = state.conversations.find((item) => item.name === state.peer);
   $("composer").hidden = !peer?.can_send && !state.pending;
   $("message-body").readOnly = Boolean(state.pending);
-  $("send-button").disabled = state.sending;
+  $("send-button").disabled = state.sending || !state.ready;
   $("send-button").textContent = state.sending ? "Sending…" : state.pending ? "Retry send" : "Send";
 }
 
 async function openConversation(peer) {
+  if (state.pending && state.pending.peer !== peer) {
+    showError(new Error("Retry the pending send before opening another conversation."));
+    return;
+  }
   const view = ++state.view;
   const changed = state.peer !== peer;
   state.peer = peer;
@@ -218,6 +340,7 @@ async function openConversation(peer) {
   $("empty-chat").hidden = true;
   if (changed) $("message-body").value = "";
   $("workspace").classList.add("show-chat");
+  reportView();
   const item = state.conversations.find((entry) => entry.name === peer);
   $("chat-title").textContent = peer === "all" ? "Common chat" : peer;
   $("chat-subtitle").textContent = peer === "all" ? "Everyone in the office" :
@@ -225,99 +348,69 @@ async function openConversation(peer) {
   renderConversations();
   updateComposer();
   try {
-    const data = await api("/api/messages?" + new URLSearchParams({peer}));
+    const data = await request("messages", {peer});
     if (view !== state.view) return;
-    state.messages = data.messages;
+    mergeMessages(data.messages);
     $("older-button").hidden = !data.has_older;
     renderMessages(true);
-    await markSeen();
   } finally {
     if (view === state.view) state.loading = false;
   }
-  if (state.refreshAgain) refresh();
+  await markSeen();
+}
+
+async function syncMessages() {
+  const view = state.view;
+  const peer = state.peer;
+  const scroll = $("message-scroll");
+  const stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
+  let after = state.messages.at(-1)?.id ?? 0;
+  let more;
+  do {
+    const data = await request("messages", {peer, after_id: after});
+    if (view !== state.view) return;
+    mergeMessages(data.messages);
+    more = data.has_newer;
+    if (more) after = data.messages.at(-1).id;
+  } while (more);
+  renderMessages(stick);
+  await markSeen();
 }
 
 async function markSeen() {
-  if (!state.connected || document.visibilityState !== "visible" || !state.messages.length) return;
-  if (matchMedia("(max-width: 700px)").matches && !$("workspace").classList.contains("show-chat")) return;
+  if (!state.ready || state.loading || !state.messages.length || visiblePeer() !== state.peer) return;
   const scroll = $("message-scroll");
   if (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 80) return;
   const peer = state.peer;
   const message = state.messages.at(-1);
   if (state.seen.get(peer) === message.id) return;
-  await api("/api/seen", "POST", {peer, message_id: message.id});
+  await request("seen", {peer, message_id: message.id});
   state.seen.set(peer, message.id);
   const item = state.conversations.find((entry) => entry.name === peer);
   if (item) item.unread = 0;
   renderConversations();
 }
 
-async function refresh() {
-  if (!state.connected || document.visibilityState !== "visible") return;
-  if (state.loading) { state.refreshAgain = true; return; }
-  if (state.refreshing) { state.refreshAgain = true; return; }
-  state.refreshing = true;
-  try {
-    do {
-      state.refreshAgain = false;
-      const view = state.view;
-      const peer = state.peer;
-      await refreshConversations();
-      if (view !== state.view || state.loading || !state.connected) continue;
-      if (peer) {
-        const scroll = $("message-scroll");
-        const stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
-        let more;
-        do {
-          const data = await api("/api/messages?" + new URLSearchParams({
-            peer, after_id: state.messages.at(-1)?.id ?? 0,
-          }));
-          if (view !== state.view) break;
-          state.messages.push(...data.messages);
-          more = data.has_newer;
-        } while (more);
-        if (view === state.view) {
-          renderMessages(stick);
-          updateComposer();
-          await markSeen();
-        }
-      }
-    } while (state.refreshAgain && state.connected);
-    if (state.connected) {
-      $("connection").textContent = "Connected";
-      $("error").hidden = true;
-    }
-  } catch (error) {
-    if (state.connected && error.status !== 401) {
-      $("connection").textContent = "Reconnecting…";
-      showError(error);
-    }
-  } finally {
-    state.refreshing = false;
-  }
+function updatePush() {
+  const supported = "PushManager" in window && "Notification" in window;
+  $("push-button").hidden = !supported;
+  $("push-button").disabled = !state.ready || !state.registration || !state.push || state.pushBusy;
+  $("push-button").textContent = state.push?.endpoint ? "Disable notifications" : "Enable notifications";
+  $("push-status").textContent = !supported ? "Notifications require a browser with Web Push support." :
+    Notification.permission === "denied" ? "Notifications are blocked in browser settings." :
+    state.push?.endpoint ? "Direct-message notifications are enabled." : "Enable notifications for incoming direct messages.";
 }
 
-function listen() {
-  state.source?.close();
-  const source = new EventSource("/api/events");
-  const session = state.session;
-  state.source = source;
-  source.addEventListener("refresh", () => {
-    clearTimeout(state.refreshTimer);
-    state.refreshTimer = setTimeout(refresh, 100);
-  });
-  source.addEventListener("revoked", () => reSignIn(session));
-  source.onopen = () => { $("connection").textContent = "Connected"; };
-  source.onerror = async () => {
-    if (!state.connected || state.source !== source) return;
-    $("connection").textContent = "Reconnecting…";
-    try {
-      await api("/api/conversations");
-    } catch (error) { showError(error); }
-    if (state.connected && state.source === source && source.readyState === EventSource.CLOSED) {
-      setTimeout(() => { if (state.connected && state.source === source) listen(); }, 3000);
+async function refreshPush() {
+  state.push = await request("push");
+  if (state.registration && state.push.endpoint) {
+    const subscription = await state.registration.pushManager.getSubscription();
+    if (!subscription) state.push = await request("push_unsubscribe");
+    else if (subscription.endpoint !== state.push.endpoint) {
+      state.push = await request("push_subscribe", subscription.toJSON());
     }
-  };
+  }
+  updatePush();
 }
 
 async function sendMessage(event) {
@@ -325,29 +418,31 @@ async function sendMessage(event) {
   if (state.sending) return;
   const body = $("message-body").value.trim();
   if (!body) return;
+  const newSend = !state.pending;
+  if (newSend) state.pending = {request_id: crypto.randomUUID(), peer: state.peer, body};
   state.sending = true;
+  updateComposer();
+  renderConversations();
   try {
-    if (!state.pending) {
-      state.pending = {request_id: crypto.randomUUID(), peer: state.peer, body};
+    if (newSend) {
       await stored("readwrite", (store) => store.put(state.pending, "pending"));
     }
-    updateComposer();
-    renderConversations();
     $("send-status").textContent = "Sending…";
-    await api("/api/messages", "POST", state.pending);
+    const message = await request("send", state.pending);
+    mergeMessages([message]);
+    renderMessages(true);
     await stored("readwrite", (store) => store.delete("pending"));
     state.pending = null;
     $("message-body").value = "";
     $("send-status").textContent = "Sent";
-    await refresh();
+    $("error").hidden = true;
+    await markSeen();
   } catch (error) {
     if (error.status === 409) {
       await stored("readwrite", (store) => store.delete("pending"));
       state.pending = null;
       $("send-status").textContent = "Send refused. Choose a conversation and send again.";
-    } else {
-      $("send-status").textContent = "Delivery unconfirmed. Retry uses the same send ID.";
-    }
+    } else $("send-status").textContent = "Delivery unconfirmed. Retry uses the same send ID.";
     showError(error);
   } finally {
     state.sending = false;
@@ -358,9 +453,16 @@ async function sendMessage(event) {
 
 $("connect-button").addEventListener("click", connect);
 $("composer").addEventListener("submit", sendMessage);
-$("back-button").addEventListener("click", () => $("workspace").classList.remove("show-chat"));
-$("device-button").addEventListener("click", () => $("device-dialog").showModal());
+$("back-button").addEventListener("click", () => {
+  $("workspace").classList.remove("show-chat");
+  reportView();
+});
+$("device-button").addEventListener("click", () => {
+  $("device-dialog").showModal();
+  reportView();
+});
 $("close-device").addEventListener("click", () => $("device-dialog").close());
+$("device-dialog").addEventListener("close", () => reportView());
 for (const button of document.querySelectorAll(".copy-key")) {
   button.addEventListener("click", async () => {
     try {
@@ -370,12 +472,30 @@ for (const button of document.querySelectorAll(".copy-key")) {
     } catch (error) { showError(error); }
   });
 }
-$("logout-button").addEventListener("click", async () => {
+$("logout-button").addEventListener("click", () => {
   $("device-dialog").close();
   sessionEnded("Signed out. Connect to use this phone again.");
+});
+$("push-button").addEventListener("click", async () => {
+  state.pushBusy = true;
+  updatePush();
   try {
-    await api("/api/session", "DELETE");
+    if (state.push.endpoint) {
+      state.push = await request("push_unsubscribe");
+      const subscription = await state.registration.pushManager.getSubscription();
+      if (subscription) await subscription.unsubscribe();
+    } else {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") return;
+      const existing = await state.registration.pushManager.getSubscription();
+      if (existing) await existing.unsubscribe();
+      const encoded = state.push.public_key.replace(/-/g, "+").replace(/_/g, "/");
+      const key = Uint8Array.from(atob(encoded + "=".repeat((4 - encoded.length % 4) % 4)), (char) => char.charCodeAt(0));
+      const subscription = await state.registration.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: key});
+      state.push = await request("push_subscribe", subscription.toJSON());
+    }
   } catch (error) { showError(error); }
+  finally { state.pushBusy = false; updatePush(); }
 });
 $("older-button").addEventListener("click", async () => {
   const view = state.view;
@@ -383,42 +503,63 @@ $("older-button").addEventListener("click", async () => {
   const height = scroll.scrollHeight;
   $("older-button").disabled = true;
   try {
-    const data = await api("/api/messages?" + new URLSearchParams({
-      peer: state.peer, before_id: state.messages[0].id,
-    }));
+    const data = await request("messages", {peer: state.peer, before_id: state.messages[0].id});
     if (view !== state.view) return;
-    state.messages.unshift(...data.messages);
+    mergeMessages(data.messages);
     $("older-button").hidden = !data.has_older;
     renderMessages(false);
     scroll.scrollTop += scroll.scrollHeight - height;
   } catch (error) { showError(error); }
   finally { $("older-button").disabled = false; }
 });
+let seenTimer;
 $("message-scroll").addEventListener("scroll", () => {
-  clearTimeout(state.seenTimer);
-  state.seenTimer = setTimeout(() => markSeen().catch(showError), 200);
+  clearTimeout(seenTimer);
+  seenTimer = setTimeout(() => markSeen().catch(showError), 200);
 });
+
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && state.connected) {
-    listen();
-    refresh();
+  if (document.visibilityState === "hidden") {
+    clearTimeout(state.retryTimer);
+    stopSocket();
+  } else {
+    reportView();
+    if (state.active) connect();
   }
 });
+window.addEventListener("resize", () => reportView());
 window.addEventListener("online", () => {
-  if (state.connected) { listen(); refresh(); }
+  if (state.active && document.visibilityState === "visible") connect();
 });
-window.addEventListener("offline", () => { $("connection").textContent = "Offline"; });
+window.addEventListener("offline", () => {
+  clearTimeout(state.retryTimer);
+  stopSocket();
+  $("connection").textContent = "Offline";
+});
 
 (async () => {
   $("connect-button").disabled = true;
+  updatePush();
   try {
     await prepareKey();
     $("connect-button").disabled = false;
     $("connect-status").textContent = "Ready to register.";
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(showError);
+      navigator.serviceWorker.register("/sw.js").then(() => navigator.serviceWorker.ready).then((registration) => {
+        state.registration = registration;
+        if (state.ready) refreshPush().catch(showError);
+        else updatePush();
+      }).catch(showError);
+      navigator.serviceWorker.addEventListener("message", (event) => {
+        if (event.data.type !== "open-conversation") return;
+        state.targetPeer = event.data.peer;
+        if (state.ready) {
+          state.targetPeer = null;
+          openConversation(event.data.peer).catch(showError);
+        } else if (state.active && document.visibilityState === "visible") connect();
+      });
     }
-    await connect();
+    if (document.visibilityState === "visible") await connect();
   } catch (error) {
     $("connect-status").textContent = "Could not prepare this phone's key. Allow site storage and reload.";
     showError(error);

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#162d27">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Office.AI</title>
-  <link rel="manifest" href="/assets/manifest.webmanifest">
+  <link rel="manifest" href="/assets/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="apple-touch-icon" href="/assets/icon-192.png">
   <link rel="stylesheet" href="/assets/mobile.css">
   <script src="/assets/mobile.js" defer></script>
@@ -58,6 +58,8 @@
     <textarea id="device-key" class="public-key" rows="4" readonly spellcheck="false" aria-label="Phone public key"></textarea>
     <p id="fingerprint" class="fingerprint"></p>
     <button type="button" class="copy-key secondary">Copy public key</button>
+    <p id="push-status" role="status"></p>
+    <button id="push-button" class="secondary" type="button" disabled>Enable notifications</button>
     <p>Revoke this device from your computer to end its access.</p>
     <button id="logout-button" class="secondary" type="button">Sign out</button>
   </dialog>
