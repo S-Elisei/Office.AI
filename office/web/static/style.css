@@ -55,7 +55,7 @@
 }
 
 html, body {
-  height: 100%;
+  min-height: 100%;
 }
 
 body {
@@ -77,6 +77,11 @@ code, pre, .mono {
 /* ---------- layout ---------- */
 
 .sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  align-self: flex-start;
   flex: 0 0 208px;
   background: var(--bg-sidebar);
   color: var(--sidebar-fg);
@@ -902,6 +907,8 @@ tr:last-child td { border-bottom: none; }
 .tail-view:empty {
   min-height: 42px;
 }
+.tail-view > .tail-row { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tail-view > .tail-row.error { color: var(--danger); }
 
 .tail-row {
   display: flex;
@@ -1216,6 +1223,11 @@ textarea {
   text-decoration: underline;
 }
 
+.ticket-alert > .ticket-alert-list { --ticket-row-height: 46px; max-height: calc(3 * var(--ticket-row-height)); overflow-y: auto; padding: 0 16px; }
+.ticket-alert-list .ticket-alert-row { height: var(--ticket-row-height); flex-wrap: nowrap; align-items: center; }
+.ticket-alert-list .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ticket-alert-list .from { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .ticket-alert-row .title {
   font-weight: 600;
   font-size: 13.5px;
@@ -1493,17 +1505,6 @@ button:disabled {
   opacity: 1;
 }
 
-/* Bus.health()'s warnings on the main page. Warn, not danger. */
-.health-warnings {
-  background: var(--warn-bg);
-  color: var(--warn);
-  border-radius: 6px;
-  padding: 10px 14px;
-  font-size: 13px;
-  line-height: 1.55;
-  margin-bottom: 14px;
-}
-
 .inline-form {
   display: flex;
   flex-wrap: wrap;
@@ -1673,40 +1674,30 @@ button:disabled {
 
 /* ---------- the office's switch, at the head of every page ---------- */
 
-.office-switch {
-  flex: 0 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 16px;
-  font-size: 12.5px;
-}
-
-.office-switch form,
-.office-switch-timer {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-}
-
-.office-switch-timer {
-  margin-left: auto;
-}
-
-.office-switch input[type="time"] {
-  font-family: inherit;
-  font-size: 12.5px;
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  padding: 3px 6px;
-}
+.sidebar > * { flex-shrink: 0; }
+.sidebar .spacer { flex: 1 0 0; }
+.menu-switch { margin: 16px 4px 8px; font-size: 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.menu-switch > *, #office-switch > * { grid-column: 1 / -1; }
+#office-switch { display: contents; }
+.menu-switch .conn-status { padding: 4px 0; grid-column: 1; grid-row: 1; }
+#office-switch > [data-office-running] { grid-column: 2; grid-row: 1; align-self: center; }
+.menu-switch form { margin: 8px 0; }
+.menu-switch button { width: 100%; background: var(--sidebar-active-bg); color: var(--sidebar-fg); border: 1px solid var(--sidebar-fg-dim); }
+.switch-status { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+[data-office-running] { margin-left: auto; }
+[data-conn-label] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#office-timer-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px; }
+#office-timer-form label { grid-column: 1 / -1; color: var(--sidebar-fg-dim); }
+#office-timer-form input[type="time"] { min-width: 0; width: 100%; padding: 4px; color: var(--sidebar-fg); background: var(--bg-sidebar); border: 1px solid var(--sidebar-fg-dim); color-scheme: dark; }
+#office-timer-pending { color: var(--sidebar-fg-dim); }
+.monitor-quota-panel { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; }
+.work-card [data-work-field="live"] form { margin-left: auto; }
+.thread [data-feed-empty] { margin: 6px 0; }
+[hidden] { display: none !important; }
 
 /* ---------- narrow windows ---------- */
 @media (max-width: 1100px) {
+  .monitor-quota-panel { position: static; max-height: none; overflow: visible; }
   .grid-2,
   .dm-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -1758,6 +1749,8 @@ main.page-kanban .kanban {
 main.page-main {
   overflow-y: auto;
 }
+
+main.page-main > #main-tickets { flex: 0 0 auto; }
 
 main.page-main > .grid-2 {
   min-height: 360px;
@@ -1811,6 +1804,10 @@ main.page-kanban .kanban-cards {
   min-height: 0;
   overflow-y: auto;
   padding-right: 3px;
+}
+
+@media (max-width: 1100px) {
+  main.page-main > .grid-2 { grid-template-rows: minmax(360px, 1fr) auto; }
 }
 
 /* The collapsed "New task" form on the board: a panel whose header is the

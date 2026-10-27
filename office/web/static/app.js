@@ -4,7 +4,7 @@
   // Must match the kinds office/core.py emits.
   const KINDS = [
     "agents", "works", "tasks", "messages", "prs", "quota", "wiki", "rules", "settings",
-    "tickets", "notices", "stages",
+    "tickets", "notices", "stages", "activity", "switch",
   ];
 
   document.addEventListener("htmx:beforeSwap", function (evt) {
@@ -53,6 +53,7 @@
     }
 
     source.addEventListener("open", () => {
+      window.officeRefreshLive();
       setConnIndicator(true);
       if (streamWasDown) {
         report(`stream back after ${secondsSince(downSince)}s down`);
@@ -135,11 +136,7 @@
     if (label) label.textContent = live ? "live" : "reconnecting…";
   }
 
-  const FOOT_SLACK_PX = 24;
-
-  function atFoot(box) {
-    return box.scrollHeight - box.scrollTop - box.clientHeight < FOOT_SLACK_PX;
-  }
+  const atFoot = window.officeAtFoot;
 
   // A region is a draft while a field differs from its value or an editor's rows were
   // added, deleted or moved.
@@ -180,18 +177,14 @@
   function refreshCleanRegions() {
     const regions = document.querySelectorAll('[hx-get][hx-trigger*="office:"]');
     for (const region of regions) {
+      if (region.hasAttribute("hx-disable")) continue;
       if (window.officeShouldSkip(region)) continue;
       refreshRegion(region);
     }
   }
 
-  // ---- collapsed blocks, and the output tails that live inside them --------
+  // ---- collapsed blocks --------------------------------------------------
   const detailsOpen = new Map();
-
-  function loadLazy(details) {
-    const lazy = details.querySelector("[data-office-lazy]");
-    if (lazy && details.open) refreshRegion(lazy);
-  }
 
   document.addEventListener(
     "toggle",
@@ -199,14 +192,13 @@
       const el = e.target;
       if (!el.dataset || el.dataset.officeDetails === undefined) return;
       detailsOpen.set(el.dataset.officeDetails, el.open);
-      if (el.open) loadLazy(el);
     },
     true
   );
 
   // ---- keeping the reader's place across a swap ---------------------------
   const SCROLL_BOXES =
-    "[data-office-lazy], .thread[data-office-stick], .kanban-scroll, .kanban-cards, #main-chat, .editor-scroll";
+    ".thread[data-office-stick], .ticket-alert-list, .kanban-scroll, .kanban-cards, #main-chat, .editor-scroll";
   const scrollPlace = new Map();
 
   function scrollKey(box) {
@@ -237,7 +229,7 @@
   }
 
   function placeScroll(box) {
-    const follows = box.matches("[data-office-lazy]") || stickOf(box) === "newest";
+    const follows = stickOf(box) === "newest";
     const was = scrollPlace.get(scrollKey(box));
     if (!was) {
       if (follows) box.scrollTop = box.scrollHeight;
@@ -499,6 +491,7 @@
       validateEmulatedWindow(form);
     }
   });
+  document.addEventListener("office:forms-added", () => syncAllRequired(document));
 
   // ---- audio and 3D previews of files -----------------------------------------
   const MODEL_VIEWER_SRC = "/static/vendor/model-viewer-umd.min.js";
@@ -576,6 +569,7 @@
     if (recentSwaps.length > 50) recentSwaps.shift();
   });
 
+  window.officeReportSeen = reportSeen;
   if (document.body) {
     connect();
     placeScrollIn(document);

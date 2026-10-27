@@ -1,4 +1,4 @@
-const SHELL = ["/", "/assets/mobile.js", "/assets/mobile.css",
+const SHELL = ["/", "/assets/mobile.js", "/assets/transcript.js", "/assets/mobile.css",
   "/assets/manifest.webmanifest", "/assets/icon-192.png", "/assets/icon-512.png"];
 
 self.addEventListener("install", (event) => {

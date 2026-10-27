@@ -4,7 +4,19 @@
   <h1><a href="/tickets" class="text-dim" style="text-decoration: none;">Tickets</a> / {{ ticket.title }}</h1>
   <p class="subtitle">Who it's addressed to, the decision, and the discussion.</p>
 
-  <div id="ticket-detail" hx-get="/fragments/tickets/{{ ticket_id }}" hx-trigger="office:tickets[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+  <div id="ticket-detail" data-ticket-id="{{ ticket_id }}" hx-get="/fragments/tickets/{{ ticket_id }}" hx-trigger="office:tickets[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
     {% include "partials/ticket_detail.html" %}
   </div>
+  {% include "partials/ticket_resolution_form.html" %}
+  <section class="panel"><header>Comments</header><div class="body">
+    <div class="thread" data-office-feed="/live/thread/ticket/{{ ticket_id }}" data-last-id="{{ comments[-1].id if comments else 0 }}">
+      {% for m in comments %}{% include "partials/message.html" %}{% endfor %}
+      <div class="empty" data-feed-empty{{ ' hidden' if comments }}>No comments yet.</div>
+    </div>
+    <form method="post" action="/tickets/{{ ticket_id }}/comments" hx-post="/tickets/{{ ticket_id }}/comments" hx-swap="none"
+          data-office-required="body" data-office-send="ticket-comments">
+      <label for="tc-body">Add a comment</label><textarea id="tc-body" name="body" required></textarea>
+      <button type="submit" disabled>Comment</button>
+    </form>
+  </div></section>
 {% endblock %}

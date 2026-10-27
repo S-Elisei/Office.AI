@@ -1,5 +1,5 @@
-<div id="main-chat" hx-get="/fragments/main-chat{{ '?before_id=' ~ before_id if before_id else '' }}"
-     hx-trigger="office:messages[!officeShouldSkip(this)] from:body" hx-swap="outerHTML">
+<div id="main-chat"{% if director and project_state == 'ready' %} data-director-id="{{ director.id }}" data-director-name="{{ director.name }}"{% else %}
+     hx-get="/fragments/main-chat" hx-trigger="office:messages[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="outerHTML"{% endif %}>
 {% include "partials/notice.html" %}
 {% if project_state != 'ready' %}
 {% if project_state == 'empty' %}
@@ -64,18 +64,7 @@
 </p>
 {% elif director %}
 {% include "partials/thread_nav.html" %}
-{% include "partials/thread.html" %}
-<div class="composer-row">
-  <form class="composer" method="post" action="/messages/main-chat" hx-post="/messages/main-chat" hx-target="#main-chat" hx-swap="outerHTML"
-        data-office-required="body">
-    <textarea name="body" placeholder="Message {{ director.name }}…" required></textarea>
-    <button type="submit" class="primary" disabled>Send</button>
-  </form>
-  <div id="main-context" class="composer-side" hx-get="/fragments/main-context"
-       hx-trigger="office:agents[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
-    {% include "partials/main_context.html" %}
-  </div>
-</div>
+{% include "partials/thread_rows.html" %}
 {% else %}
 <p class="text-dim" style="margin-top: 0; font-size: 13px;">
   No director yet. Hiring the director is the one staffing decision that is yours — everyone
@@ -116,3 +105,14 @@
 </p>
 {% endif %}
 </div>
+
+        {% if director and project_state == 'ready' %}
+        <div class="composer-row">
+          {% set send_url = "/messages/main-chat" %}{% set placeholder = "Message " ~ director.name ~ "…" %}
+          {% include "partials/composer.html" %}
+          <div id="main-context" class="composer-side" hx-get="/fragments/main-context"
+               hx-trigger="office:agents[officeConcerns(this, event)] from:body" hx-swap="innerHTML">
+            {% include "partials/main_context.html" %}
+          </div>
+        </div>
+        {% endif %}

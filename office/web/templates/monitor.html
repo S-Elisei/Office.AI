@@ -5,18 +5,16 @@
 
   <div class="grid-2">
     <div>
-      <div id="monitor-list" hx-get="/fragments/monitor" hx-trigger="office:works[!officeShouldSkip(this)] from:body, office:agents[!officeShouldSkip(this)] from:body, every 10s" hx-swap="innerHTML">
-        {% include "partials/monitor_list.html" %}
-      </div>
+      <div id="monitor-list"><div class="empty" data-works-empty>Loading works…</div></div>
 
-      <div id="monitor-wakes" hx-get="/fragments/monitor/wakes" hx-trigger="office:messages[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+      <div id="monitor-wakes" hx-get="/fragments/monitor/wakes" hx-trigger="office:messages[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
         {% include "partials/monitor_wakes.html" %}
       </div>
     </div>
 
-    <section class="panel">
+    <section class="panel monitor-quota-panel">
       <header>Quota left</header>
-      <div class="body" id="monitor-quota" hx-get="/fragments/main-quota" hx-trigger="office:quota[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+      <div class="body" id="monitor-quota" hx-get="/fragments/main-quota" hx-trigger="office:quota[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
         {% include "partials/quota.html" %}
       </div>
     </section>

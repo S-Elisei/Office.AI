@@ -28,8 +28,8 @@ def _row(event) -> dict | None:
     return None
 
 
-def rows(lines: list[str], adapter) -> list[dict]:
-    """A stretch of an agent's output stream, as something a person can read."""
+def line_rows(lines: list[str], adapter) -> list[dict]:
+    """One display row per parsed output line, without merging text rows."""
     out: list[dict] = []
     for line in lines:
         if line.startswith(STDERR_PREFIX):
@@ -44,10 +44,18 @@ def rows(lines: list[str], adapter) -> list[dict]:
         parsed = _row(event)
         if parsed is None:
             continue
+        out.append(parsed)
+    return out
+
+
+def rows(lines: list[str], adapter) -> list[dict]:
+    """A readable transcript with adjacent text rows merged."""
+    out = []
+    for parsed in line_rows(lines, adapter):
         if parsed["kind"] == "text" and out and out[-1]["kind"] == "text":
             out[-1]["text"] += parsed["text"]
-            continue
-        out.append(parsed)
+        else:
+            out.append(parsed)
     return out
 
 

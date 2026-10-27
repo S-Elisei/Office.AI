@@ -1,25 +1,21 @@
-"""Main page: director chat, the plate under it, the stop control for the director's turn, quota bars, director context fill, the owner's open tickets, and the one line that shows Bus.health()'s warnings when there are any."""
+"""Main page: director chat and stop control, critical notices, quota, context and owner tickets."""
 
 from __future__ import annotations
 
 import sqlite3
 
 from fastapi import APIRouter, Request
+from fastapi.responses import Response
 from fastapi.concurrency import run_in_threadpool
 
-from office import core, db, git
-from office.adapters import adapter_for
-from office.web import transcript
+from office import core, db, git, monitor
+from office.adapters import RUNTIMES, adapter_for
+from office.web import threads, transcript
 from office.web.deps import get_bus, get_config, get_db, get_owner_name, read_form
 from office.web.templating import templates
 
 router = APIRouter()
 
-RUNTIMES = ["claude", "codex", "agy"]
-
-PAGE_SIZE = 200
-
-PAGE_URL = "/fragments/main-chat"
 REGION_ID = "main-chat"
 
 
@@ -31,26 +27,12 @@ def _messages(
     conn: sqlite3.Connection,
     director: sqlite3.Row | None,
     owner_name: str,
-    before_id: int | None = None,
-    limit: int = PAGE_SIZE,
+    limit: int = threads.PAGE_SIZE,
 ) -> tuple[list[sqlite3.Row], bool]:
-    """One page of the owner-director thread, oldest-first for display.
-
-    Newest page by default; with `before_id` the page immediately older than
-    that id. Returns the rows and whether anything older exists.
-    """
+    """The newest page of the owner-director thread and its older-page flag."""
     if director is None:
         return [], False
-    return core.dm_history(conn, director["name"], owner_name, before_id, limit=limit)
-
-
-def _quota(conn: sqlite3.Connection) -> list[tuple[str, list[dict]]]:
-    """Stored buckets, grouped by runtime, in the vendors' own words."""
-    rows = core.quota_buckets(conn)
-    grouped: dict[str, list[dict]] = {runtime: [] for runtime in RUNTIMES}
-    for row in rows:
-        grouped.setdefault(row["runtime"], []).append(row)
-    return [(runtime, grouped[runtime]) for runtime in grouped]
+    return core.dm_history(conn, director["name"], owner_name, limit=limit)
 
 
 def _compact_blocker(request: Request, director: sqlite3.Row | None) -> str | None:
@@ -68,7 +50,6 @@ def _chat_context(
     *,
     error: str | None = None,
     form: dict | None = None,
-    before_id: int | None = None,
 ) -> dict:
     """The director-chat panel: a page of the thread, or the form that has to
     come first.
@@ -76,7 +57,7 @@ def _chat_context(
     conn = get_db(request)
     director = _director(conn)
     owner_name = get_owner_name(conn)
-    messages, has_older = _messages(conn, director, owner_name, before_id)
+    messages, has_older = _messages(conn, director, owner_name)
     return {
         "request": request,
         "director": director,
@@ -86,13 +67,10 @@ def _chat_context(
         "owner_repo": str(git.owner_repo(get_config(request))),
         "owner_state": git.owner_state(get_config(request)),
         "messages": messages,
-        "before_id": before_id,
         "has_older": has_older,
-        "oldest_id": messages[0]["id"] if messages else None,
         "conv_channel": "dm",
         "conv_peer": director["name"] if director is not None else "",
         "newest_id": messages[-1]["id"] if messages else None,
-        "page_url": PAGE_URL,
         "region_id": REGION_ID,
         "runtimes": RUNTIMES,
         "notice_error": error,
@@ -120,10 +98,7 @@ def _activity(request: Request, director: sqlite3.Row | None, turn: dict | None)
     lines = get_bus(request).turn_tail(director["name"])
     if not lines:
         return None
-    try:
-        adapter = adapter_for(director["runtime"], get_config(request))
-    except RuntimeError:
-        return None
+    adapter = adapter_for(director["runtime"], get_config(request))
     return transcript.last_activity(lines, adapter)
 
 
@@ -134,7 +109,7 @@ def _plate_context(request: Request) -> dict:
 
 
 def quota_context(request: Request) -> dict:
-    return {"request": request, "quota": _quota(get_db(request))}
+    return {"request": request, "quota": monitor.quota(get_db(request))}
 
 
 def _context_panel_context(request: Request, *, applied_note: str | None = None) -> dict:
@@ -146,15 +121,6 @@ def _context_panel_context(request: Request, *, applied_note: str | None = None)
         "compact_blocker": _compact_blocker(request, director),
         "applied_note": applied_note,
     }
-
-
-def _health_warnings(request: Request) -> list[str]:
-    """Bus.health() — environment problems the office can see and cannot fix."""
-    return get_bus(request).health()
-
-
-def _health_context(request: Request) -> dict:
-    return {"request": request, "health_warnings": _health_warnings(request)}
 
 
 def _intake_context(
@@ -191,7 +157,6 @@ def _page_context(request: Request) -> dict:
     """The whole page: every region's collector, merged."""
     return {
         **_tickets_context(request),
-        **_health_context(request),
         **_intake_context(request),
         **_chat_context(request),
         **_stop_context(request),
@@ -208,10 +173,10 @@ def main_page(request: Request):
 
 
 @router.get("/fragments/main-chat")
-def main_chat_fragment(request: Request, before_id: int | None = None):
-    """The panel itself, wrapper included — the region swaps its own outerHTML."""
+def main_chat_fragment(request: Request):
+    """The setup or director panel, wrapper included."""
     return templates.TemplateResponse(
-        request, "partials/main_chat_panel.html", _chat_context(request, before_id=before_id)
+        request, "partials/main_chat_panel.html", _chat_context(request)
     )
 
 
@@ -223,8 +188,7 @@ async def send_to_director(request: Request):
     director = _director(conn)
     owner_name = get_owner_name(conn)
     core.send_message(conn, sender=owner_name, recipient=director["name"], body=body, actor=owner_name)
-    return templates.TemplateResponse(request, "partials/main_chat_panel.html", _chat_context(request))
-
+    return Response(status_code=204)
 
 @router.post("/project/init")
 async def init_project(request: Request):
@@ -301,6 +265,11 @@ def main_stop_fragment(request: Request):
     return templates.TemplateResponse(request, "partials/main_stop.html", _stop_context(request))
 
 
+@router.get("/fragments/main-activity")
+def main_activity_fragment(request: Request):
+    return templates.TemplateResponse(request, "partials/main_activity.html", _stop_context(request))
+
+
 @router.post("/agents/director/stop")
 async def stop_director(request: Request):
     """Kill the director's running turn, on purpose."""
@@ -338,12 +307,6 @@ def dismiss_notices(request: Request):
     conn = get_db(request)
     core.dismiss_notices(conn, actor=get_owner_name(conn))
     return templates.TemplateResponse(request, "partials/main_plate.html", _plate_context(request))
-
-
-@router.get("/fragments/main-health")
-def main_health_fragment(request: Request):
-    """The health-warnings line."""
-    return templates.TemplateResponse(request, "partials/main_health.html", _health_context(request))
 
 
 @router.post("/agents/director/compact")

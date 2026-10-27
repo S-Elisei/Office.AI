@@ -1,57 +1,9 @@
 {% include "partials/notice.html" %}
 
-<nav class="kanban-crumbs">
-  {% if flat %}
-  <a href="/kanban">Top level</a> <span class="text-faint">›</span> <span>All tasks, flat</span>
-  {% else %}
-  {% if chain %}
-  <a href="/kanban">Top level</a>
-  {% for c in chain %}
-  <span class="text-faint">›</span>
-  {% if loop.last %}<span>#{{ c.id }} {{ c.title }}</span>{% else %}<a href="/kanban?parent={{ c.id }}">#{{ c.id }} {{ c.title }}</a>{% endif %}
-  {% endfor %}
-  {% else %}
-  <span>Top level</span>
-  {% endif %}
-  <span class="text-faint">·</span> <a href="/kanban?flat=1">All tasks, flat</a>
-  {% endif %}
-</nav>
 
-{# `data-office-details` keeps it open across a refresh. #}
-<details class="panel collapse-panel" data-office-details="kanban-new-task" style="margin-bottom: 14px;"{% if form %} open{% endif %}>
-  <summary>New task</summary>
-  <div class="body">
-    {# data-office-required: the button is dead and grey until the title has
-       something in it. #}
-    <form method="post" action="/kanban/tasks?{{ view_query }}" hx-post="/kanban/tasks?{{ view_query }}"
-          hx-target="#kanban-board" hx-swap="innerHTML" data-office-required="title">
-      <div class="form-row">
-        <label for="kt-title">Title</label>
-        <input id="kt-title" name="title" type="text" value="{{ form.title if form else '' }}" required>
-      </div>
-      <div class="form-row">
-        <label for="kt-body">Body</label>
-        <textarea id="kt-body" name="body" style="min-height: 70px;">{{ form.body if form else '' }}</textarea>
-      </div>
-      <div class="form-row">
-        <label for="kt-parent">Parent task</label>
-        <input id="kt-parent" name="parent" type="number" min="1" step="1" placeholder="none — top level"
-               value="{{ form.parent if form else (parent or '') }}">
-      </div>
-      <div class="form-row">
-        <span class="hint">New tasks land in <strong>Idea</strong>, under the parent task when one is given.
-          Nobody is notified: the board is not an inbox. If it should be looked at now, say so to the director
-          in chat.</span>
-      </div>
-      <div class="form-actions">
-        <button type="submit" class="primary" disabled>Create task</button>
-      </div>
-    </form>
-  </div>
-</details>
 
 <div class="kanban-scroll">
-<div class="kanban">
+<div class="kanban" data-watched-tasks="{{ watched_task_ids | join(',') }}" data-parent="{{ parent or 0 }}" data-flat="{{ '1' if flat else '0' }}">
   {% for status, label in columns %}
   <div class="kanban-col">
     <header>

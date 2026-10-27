@@ -1,0 +1,15 @@
+<article class="panel pr-card" data-pr-id="{{ p.id }}">
+  <div data-pr-display>{% include "partials/pr_display.html" %}</div>
+  <div class="thread" data-office-feed="/live/thread/pr/{{ p.id }}" data-last-id="0" style="max-height:none;">
+    <div class="empty" data-feed-empty>No comments yet.</div>
+  </div>
+    <form method="post" action="/prs/{{ p.id }}/comments" hx-post="/prs/{{ p.id }}/comments" hx-swap="none" style="margin-top: 10px;"
+          data-office-required="body" data-office-send="pr-{{ p.id }}" data-pr-form>
+      <div class="form-row mb-0">
+        <textarea name="body" placeholder="Comment on this PR&hellip;" style="min-height: 54px;" required></textarea>
+      </div>
+      <div class="form-actions">
+        <button type="submit" disabled>Comment</button>
+      </div>
+    </form>
+</article>

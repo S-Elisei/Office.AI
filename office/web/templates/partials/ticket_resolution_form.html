@@ -1,0 +1,42 @@
+{% set resolve_hint = "Write the decision for this ticket." %}
+{% if can_resolve %}
+<section class="panel resolve-panel">
+  <header>Resolve this ticket</header>
+  <div class="body">
+    <form method="post" action="/tickets/{{ ticket.id }}/resolve" hx-post="/tickets/{{ ticket.id }}/resolve" hx-target="#ticket-detail" hx-swap="innerHTML"
+          data-office-required="resolution" data-office-send="ticket-detail" data-ticket-form>
+      <div class="form-row mb-0">
+        <label for="t-resolution">Resolution</label>
+        <textarea id="t-resolution" name="resolution" required placeholder="Write the decision the team should act on..."></textarea>
+        <span class="hint">{{ resolve_hint }}</span>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="primary" disabled>Resolve ticket</button>
+      </div>
+    </form>
+  </div>
+</section>
+{% elif can_override_resolve %}
+<details class="panel resolve-panel-override">
+  <summary>Resolve on {{ ticket.addressee }}'s behalf</summary>
+  <div class="body">
+    <p class="text-dim" style="margin-top: 0; font-size: 12.5px;">
+      This ticket is addressed to <strong>{{ ticket.addressee }}</strong>, not you. As owner you can still
+      resolve it yourself — e.g. if they're no longer around — but this bypasses the normal path, so use it
+      deliberately.
+    </p>
+    <form method="post" action="/tickets/{{ ticket.id }}/resolve" hx-post="/tickets/{{ ticket.id }}/resolve" hx-target="#ticket-detail" hx-swap="innerHTML"
+          data-office-required="resolution" data-office-send="ticket-detail" data-ticket-form>
+      <div class="form-row mb-0">
+        <label for="t-resolution-override">Resolution</label>
+        <textarea id="t-resolution-override" name="resolution" required placeholder="Write the decision the team should act on..."></textarea>
+        <span class="hint">{{ resolve_hint }}</span>
+      </div>
+      <div class="form-actions">
+        <button type="submit" disabled>Resolve as owner</button>
+      </div>
+    </form>
+  </div>
+</details>
+{% endif %}
+

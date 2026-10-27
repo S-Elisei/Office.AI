@@ -7,11 +7,11 @@
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js"></script>
 </head>
-<body>
+<body data-owner="{{ office_owner(request) }}">
   {% set counts = nav_counts(request) %}
   {%- macro nav_count(counts, name) -%}
     {%- set c = counts[name] -%}
-    <span class="nav-count" hx-get="/fragments/nav-count/{{ name }}" hx-trigger="{{ c.trigger }}" hx-swap="innerHTML">{{ c.value or '' }}</span>
+    <span class="nav-count" data-counter="{{ name }}" hx-get="/fragments/nav-count/{{ name }}" hx-trigger="{{ c.trigger }}" hx-swap="innerHTML">{{ c.value or '' }}</span>
   {%- endmacro -%}
   <nav class="sidebar">
     <div class="brand">Office.AI</div>
@@ -28,13 +28,19 @@
     <a href="/notices" class="{{ 'active' if active == 'notices' }}"><svg class="nav-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 11.4V7.2a3.8 3.8 0 0 1 7.6 0v4.2z"/><path d="M2.8 11.4h10.4M6.6 13.2a1.6 1.6 0 0 0 2.8 0"/></svg><span class="nav-label">System notices</span></a>
     <a href="/settings" class="{{ 'active' if active == 'settings' }}"><svg class="nav-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.4 4.6h11.2M2.4 11.4h11.2"/><circle cx="6" cy="4.6" r="1.6"/><circle cx="10.4" cy="11.4" r="1.6"/></svg><span class="nav-label">Settings</span></a>
     <div class="spacer"></div>
-    <div class="conn-status">
-      <span class="dot" data-conn-dot></span>
-      <span data-conn-label>connecting…</span>
-    </div>
+    <section class="menu-switch">
+      <div class="conn-status"><span class="dot" data-conn-dot></span><span data-conn-label>connecting…</span></div>
+      {% include "partials/office_switch.html" %}
+      {% set sw = office_switch(request) %}
+      <form id="office-timer-form" method="post" action="/office/timer" hx-post="/office/timer" hx-target="#office-switch" hx-swap="outerHTML" data-office-required="at" data-office-timer>
+        <input type="hidden" name="to" value="{{ 'pause' if sw.running else 'run' }}">
+        <label for="office-switch-at">{{ 'Pause' if sw.running else 'Run' }} at</label>
+        <input type="time" id="office-switch-at" name="at" required>
+        <button type="submit" class="small" disabled>Set</button>
+      </form>
+    </section>
   </nav>
   <main class="page-{{ active }}">
-    {% include "partials/office_switch.html" %}
     {% block content %}{% endblock %}
   </main>
   <div id="office-notices" class="notice-area" aria-live="polite"></div>
@@ -45,6 +51,8 @@
     </header>
     <div data-file-body></div>
   </dialog>
+  <script src="/live/transcript.js"></script>
+  <script src="/static/live.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

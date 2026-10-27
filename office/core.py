@@ -72,6 +72,9 @@ def _emit(
     `actor` is the participant who caused this. Leave it None only when nothing
     participant-shaped caused the write.
     """
+    if kind == "tasks":
+        task = db.query_one(conn, "SELECT parent_task_id FROM tasks WHERE id = ?", (subject_id,))
+        payload = {**(payload or {}), "parent_task_id": task["parent_task_id"]}
     db.execute(
         conn,
         "INSERT INTO events (kind, subject_type, subject_id, payload, actor) VALUES (?, ?, ?, ?, ?)",
@@ -307,31 +310,39 @@ def _check_participant(conn, recipient: str) -> None:
 CHAT_PAGE_SIZE = 30
 
 
-def chat_history(conn, before_id: int | None = None, limit: int = CHAT_PAGE_SIZE) -> tuple[list[dict], bool]:
-    """One page of the COMMON chat, oldest-first for reading, and whether anything
-    older exists.
+def conversation_history(
+    conn, peer: str, owner_name: str | None = None, *, before_id: int | None = None,
+    after_id: int | None = None, limit: int = CHAT_PAGE_SIZE,
+) -> tuple[list[sqlite3.Row], bool]:
+    """A cursor page, oldest first. Direct peers require the owner's name; 'all' is common chat."""
+    if peer == "all":
+        where, params = "channel = 'all' AND recipient IS NULL", []
+    else:
+        where = "channel = 'dm' AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))"
+        params = [owner_name, peer, peer, owner_name]
+    if after_id is not None:
+        where += " AND id > ?"
+        params.append(after_id)
+        order = "ASC"
+    else:
+        if before_id is not None:
+            where += " AND id < ?"
+            params.append(before_id)
+        order = "DESC"
+    rows = db.query(conn, f"SELECT * FROM messages WHERE {where} ORDER BY id {order} LIMIT ?", (*params, limit + 1))
+    more = len(rows) > limit
+    rows = rows[:limit]
+    if order == "DESC":
+        rows.reverse()
+    return rows, more
 
-    Newest page by default; with `before_id`, the page immediately older than
-    that id. Common chat only.
 
-    Taken by id, not created_at. One row more than the page is fetched and
-    thrown away, which is how "is there anything older" is answered.
-    """
-    # `recipient IS NULL` is what keeps the room the room: a common-channel row
-    # WITH a recipient is one person's quiet line (tell_quietly).
-    where = "channel = 'all' AND recipient IS NULL"
-    params: list = []
-    if before_id is not None:
-        where += " AND id < ?"
-        params.append(before_id)
-    params.append(limit + 1)
-    rows = db.query(
-        conn,
-        f"SELECT * FROM (SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?) ORDER BY id ASC",
-        tuple(params),
-    )
-    has_older = len(rows) > limit
-    return [dict(r) for r in (rows[1:] if has_older else rows)], has_older
+def chat_history(
+    conn, before_id: int | None = None, limit: int = CHAT_PAGE_SIZE,
+) -> tuple[list[dict], bool]:
+    """A common-chat cursor page, oldest first, and whether more rows exist."""
+    rows, more = conversation_history(conn, "all", before_id=before_id, limit=limit)
+    return [dict(row) for row in rows], more
 
 
 def dm_threads(conn, owner_name: str) -> list[dict]:
@@ -360,20 +371,8 @@ def dm_threads(conn, owner_name: str) -> list[dict]:
 def dm_history(
     conn, peer: str, owner_name: str, before_id: int | None = None, limit: int = CHAT_PAGE_SIZE,
 ) -> tuple[list[sqlite3.Row], bool]:
-    """One page of the owner's direct messages with a peer, oldest first."""
-    where = "channel = 'dm' AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))"
-    params: list = [peer, owner_name, owner_name, peer]
-    if before_id is not None:
-        where += " AND id < ?"
-        params.append(before_id)
-    params.append(limit + 1)
-    rows = db.query(
-        conn,
-        f"SELECT * FROM (SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?) ORDER BY id ASC",
-        tuple(params),
-    )
-    has_older = len(rows) > limit
-    return (rows[1:] if has_older else rows), has_older
+    """A direct-message cursor page, oldest first, and whether more rows exist."""
+    return conversation_history(conn, peer, owner_name, before_id=before_id, limit=limit)
 
 
 def see_conversation(conn, *, channel: str, peer: str, up_to_message_id: int) -> None:
@@ -1908,7 +1907,8 @@ def update_task(
     actor: str | None = None,
 ) -> dict:
     """`parent` None leaves the parent as it is; 0 makes the task top-level."""
-    if _row(conn, "tasks", "id", task_id) is None:
+    task = _row(conn, "tasks", "id", task_id)
+    if task is None:
         raise ValueError(f"no such task {task_id} — task(op=list) shows the board")
     fields, params = [], []
     if title is not None:
@@ -1927,7 +1927,8 @@ def update_task(
         if parent:
             _check_parent(conn, task_id, parent)
         db.execute(conn, f"UPDATE tasks SET {', '.join(fields)} WHERE id = ?", (*params, task_id))
-        _emit(conn, "tasks", "task", task_id, {"title": title} if title is not None else {}, actor=actor)
+        _emit(conn, "tasks", "task", task_id,
+              {"previous_parent_task_id": task["parent_task_id"], **({"title": title} if title is not None else {})}, actor=actor)
     return _row(conn, "tasks", "id", task_id)
 
 

@@ -1,13 +1,4 @@
-{# Paging controls for a thread panel. #}
-{% if has_older or before_id %}
 <div class="thread-nav">
-  {% if has_older %}
-  <button type="button" hx-get="{{ page_url }}?before_id={{ oldest_id }}"
-          hx-target="#{{ region_id }}" hx-swap="outerHTML">Show older</button>
-  {% endif %}
-  {% if before_id %}
-  <button type="button" hx-get="{{ page_url }}"
-          hx-target="#{{ region_id }}" hx-swap="outerHTML">Back to latest</button>
-  {% endif %}
+  <button type="button" data-office-older="{{ region_id }}"{{ ' hidden' if not has_older }}>Show older</button>
+  <button type="button" data-office-latest="{{ region_id }}" hidden>Back to latest</button>
 </div>
-{% endif %}

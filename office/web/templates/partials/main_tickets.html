@@ -4,9 +4,9 @@
   <header>
     <span>Waiting on you ({{ tickets | length }})</span>
   </header>
-  <div class="body">
+  <div class="body ticket-alert-list">
     {% for t in tickets %}
-    <a class="ticket-alert-row" href="/tickets/{{ t.id }}">
+    <a class="ticket-alert-row" href="/tickets/{{ t.id }}" title="{{ t.title }}">
       {{ m.kind_badge(t.kind) }}
       <span class="title">{{ t.title }}</span>
       <span class="from">from {{ t.author }} &middot; {{ t.created_at | fmt_time }}</span>

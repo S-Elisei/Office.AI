@@ -1,0 +1,6 @@
+{% import "macros.html" as m %}
+    <div class="pr-title">{{ p.title }} {{ m.status_badge(p.status) }}</div>
+    <div class="pr-branches">{{ p.source_branch }} &rarr; {{ p.target_branch }}</div>
+    {% if p.body %}<div class="md-body text-dim" style="margin-top:6px; font-size:12.5px;">{{ p.body | markdown | safe }}</div>{% endif %}
+    <div class="pr-meta">opened by {{ p.author_name }} &middot; {{ p.created_at | fmt_time }} &middot; {{ p.comment_count }} comment{{ '' if p.comment_count == 1 else 's' }}</div>
+

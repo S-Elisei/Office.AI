@@ -5,7 +5,8 @@
 
   <section class="panel">
     <header>Rules</header>
-    <div class="body" id="rules-list" hx-get="/fragments/rules" hx-trigger="office:rules[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+    {% include "partials/rule_create.html" %}
+  <div class="body" id="rules-list" hx-get="/fragments/rules" hx-trigger="office:rules[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
       {% include "partials/rules_list.html" %}
     </div>
   </section>

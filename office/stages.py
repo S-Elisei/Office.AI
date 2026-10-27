@@ -58,6 +58,7 @@ class _Preparation:
         self.mark = marks.preparation_mark(stage)
         self.started_at = time.monotonic()
         self.last_output_at = self.started_at
+        self.started_wall_at = self.last_activity_wall_at = time.time()
         self.proc = None
         self.cancelled = threading.Event()
         self.thread: threading.Thread | None = None
@@ -319,10 +320,14 @@ def overview(conn) -> list[dict]:
                 "prepare": row["prepare"],
                 "preparing_for": now - prep.started_at if prep else None,
                 "preparing_quiet_for": now - prep.last_output_at if prep else None,
+                "preparing_started_wall_at": prep.started_wall_at if prep else None,
+                "preparing_activity_wall_at": prep.last_activity_wall_at if prep else None,
                 "running": {
                     "agent": run.agent,
                     "running_for": now - run.took_at,
                     "quiet_for": run.quiet_for,
+                    "started_wall_at": run.took_wall_at,
+                    "last_activity_wall_at": run.last_activity_wall_at,
                 } if run else None,
                 "waiting": [r.agent for r in live.queue],
                 "pending": live.pending,
@@ -380,6 +385,7 @@ def _prepare(conn, config: Config, name: str, command: str, fresh: bool,
     def note(text: str) -> None:
         with log_lock:
             prep.last_output_at = time.monotonic()
+            prep.last_activity_wall_at = time.time()
             if not text or log.closed:
                 return
             log.write(text if text.endswith("\n") else text + "\n")
@@ -643,6 +649,7 @@ def _take(live: _Live, run: "StageRun") -> None:
     """Give the stage to `run` and start it. Call with _lock held."""
     live.running = run
     run.took_at = time.monotonic()
+    run.took_wall_at = time.time()
     threading.Thread(target=run._go, daemon=True, name=f"office-stage-{run.handle}").start()
 
 
@@ -664,6 +671,7 @@ class StageRun(commands.Command):
         self.workspace_id = workspace["id"]
         self.mark = marks.run_mark(agent, handle)
         self.took_at: float | None = None
+        self.took_wall_at: float | None = None
         self.snapshot: str | None = None
         #: Why the command never ran: a refusal after the snapshot, a turn-away
         #: from the queue, or a step before the command that failed.
@@ -684,6 +692,7 @@ class StageRun(commands.Command):
         """Output of a step before the command: it counts for quiet_for and goes nowhere."""
         with self._lock:
             self.last_output_at = time.monotonic()
+            self.last_activity_wall_at = time.time()
 
     # -- ending ------------------------------------------------------------
 

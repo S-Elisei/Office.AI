@@ -92,6 +92,7 @@ _WAKING_KINDS = frozenset({"messages"})
 class _AgentState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     turn = None  # the AgentTurn currently running, if any
+    tail_source: str | None = None
     wake_times: list[float] = field(default_factory=list)
     drain_at: float | None = None
     # Set when the hook cache has advanced the watermark past a queue no turn
@@ -526,6 +527,7 @@ class Bus:
         if self.running == running:
             return
         self.running = running
+        core._notify("switch", {"running": running})
         if running:
             self._stalls.clear()
             self._progress_due = time.monotonic() + PROGRESS_CHECK_SECONDS
@@ -1148,6 +1150,7 @@ class Bus:
                 self._codex_turn_launched()
             state.launched_prompt = system
             state.turn = turn
+            state.tail_source = turn.turn_id
             state.pinging = ping
             state.retry_at = None
             # Cleared here, under the same lock that installs the turn.
@@ -1522,6 +1525,10 @@ class Bus:
             "quiet_for": turn.quiet_for,
             "context_used": turn.context_used,
             "context_limit": turn.context_limit,
+            "calls": turn.open_calls(),
+            "started_wall_at": turn.started_wall_at,
+            "last_activity_wall_at": turn.last_activity_wall_at,
+            "call_instants": turn.call_instants(),
         }
 
     def turn_tail(self, agent_name: str) -> list[str] | None:
@@ -1533,6 +1540,10 @@ class Bus:
         if turn is None or not turn.alive:
             return None
         return turn.tail()
+
+    def turn_tail_source(self, agent_name: str) -> str | None:
+        """The turn identity of this agent's current or saved tail in this hub."""
+        return self._state(agent_name).tail_source
 
     def live_turns(self) -> dict[str, dict]:
         """turn_status() for every agent that has one. What the monitor reads."""

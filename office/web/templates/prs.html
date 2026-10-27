@@ -3,7 +3,7 @@
 {% block content %}
   <p class="subtitle">Open only. Merged and closed PRs live in git history, not here.</p>
 
-  <div id="prs-list" hx-get="/fragments/prs" hx-trigger="office:prs[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+  <div id="prs-list" data-office-prs>
     {% include "partials/prs_list.html" %}
   </div>
 {% endblock %}

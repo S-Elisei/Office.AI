@@ -3,38 +3,24 @@
 {% block title %}Main — Office.AI{% endblock %}
 {% block content %}
 
-  <div id="main-tickets" hx-get="/fragments/main-tickets" hx-trigger="office:tickets[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+  <div id="main-tickets" hx-get="/fragments/main-tickets" hx-trigger="office:tickets[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
     {% include "partials/main_tickets.html" %}
-  </div>
-
-  {# Bus.health()'s warnings.
-     agents and settings cover a hire, a runtime being pointed somewhere else, a codex session that starts reporting its occupancy.
-     "no quota reading yet for [...]" is the one warning whose condition clears on a reading arriving and on nothing else.
-     `office:project` is not an SSE kind. That route answers with an HX-Trigger header instead. #}
-  <div id="main-health" hx-get="/fragments/main-health"
-       hx-trigger="office:agents[!officeShouldSkip(this)] from:body, office:settings[!officeShouldSkip(this)] from:body, office:quota[!officeShouldSkip(this)] from:body, office:project[!officeShouldSkip(this)] from:body"
-       hx-swap="innerHTML">
-    {% include "partials/main_health.html" %}
   </div>
 
   <div class="grid-2">
     <section class="panel">
       <header>
-        <span>{{ director.name if director else 'Director' }}</span>
+        <span{% if director %} data-director-id="{{ director.id }}" data-director-name="{{ director.name }}"{% endif %}>{{ director.name if director else 'Director' }}</span>
         {% if director %}{{ m.status_badge(director.status) }}{% endif %}
       </header>
       <div class="body">
-        {# The panel brings its own #main-chat wrapper (hx-get, hx-trigger and
-           the page cursor together) — see partials/main_chat_panel.html. Every
-           other element on this page is its own region with its own hx-get and
-           its own collector. #}
         {% include "partials/main_chat_panel.html" %}
 
         {% include "partials/main_stop.html" %}
 
         {# Renders to nothing at all when there is nothing critical standing. #}
         <div id="main-plate" hx-get="/fragments/main-plate"
-             hx-trigger="office:notices[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+             hx-trigger="office:notices[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
           {% include "partials/main_plate.html" %}
         </div>
       </div>
@@ -44,7 +30,7 @@
       <section class="panel">
         {# Every number below is remaining_fraction. #}
         <header>Quota left</header>
-        <div class="body" id="main-quota" hx-get="/fragments/main-quota" hx-trigger="office:quota[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+        <div class="body" id="main-quota" hx-get="/fragments/main-quota" hx-trigger="office:quota[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
           {% include "partials/quota.html" %}
         </div>
       </section>

@@ -1,0 +1,18 @@
+{% import "macros.html" as m %}
+{% if field == 'head' %}
+<div class="work-head"><span class="agent">{{ w.agent_name }}</span><span class="text-faint work-runtime">{{ w.agent_runtime }}/{{ w.agent_model }}{% if w.agent_effort %}/{{ w.agent_effort }}{% endif %}{% if w.log_role %} · {{ w.log_role }} · {{ w.log_complexity }}{% endif %}</span>
+{{ m.status_badge(w.derived_status) }}<span class="branch">{{ w.branch }}</span>{% if w.task_title %}<span>{{ w.task_title }}</span>{% endif %}<span class="text-faint work-started">started {{ w.started_at | fmt_time }}</span></div>
+{% elif field == 'live' %}
+<div class="work-live">{% if turn %}<span class="badge ok">turn in flight</span>{{ m.timers(turn.started_wall_at, turn.started_wall_at, 'agent:' ~ w.agent_name) }}
+<form method="post" action="/monitor/stop/{{ w.agent_name }}" hx-post="/monitor/stop/{{ w.agent_name }}" hx-swap="none"><button type="submit" class="danger">Stop turn</button></form>
+{% elif w.derived_status == 'reported' %}<span class="badge warn">waiting on {{ w.assigner_name }} to close it</span>{% elif w.derived_status == 'waiting' %}<span class="text-faint">No turn. {{ w.agent_name }} is {{ w.agent_status }}.</span>{% endif %}</div>
+{% elif field == 'context' %}
+<div class="bar-row"><div class="bar-label">Context fill</div>{% if turn and turn.context_used is not none %}{{ m.context_bar(turn.context_used, turn.context_limit) }}{% else %}{{ m.context_bar(w.context_used, w.context_limit) }}{% endif %}</div>
+{% elif field == 'brief' %}
+<details class="work-brief" data-office-details="work-{{ w.id }}-brief"><summary><span class="work-brief-label">brief</span> {{ w.brief.strip().split('\n')[0].lstrip('#*->+ ') }}</summary><div class="md-body work-brief-body">{{ w.brief | markdown | safe }}</div></details>
+{% elif field == 'reason' %}
+{% if w.status == 'paused' and w.pause_reason %}<div class="badge warn">{{ w.pause_reason | replace('_', ' ') }}</div>{% if w.resume_after %}<div class="hint">Earliest resume {{ w.resume_after | fmt_time }}</div>{% endif %}{% endif %}
+{% if w.status == 'failed' and w.fail_reason %}<div class="badge danger">{{ w.fail_reason | replace('_', ' ') }}</div>{% endif %}
+{% elif field == 'calls' and turn %}
+{% for call in turn.call_instants %}<div class="tail-row tool" data-call-id="{{ call.id }}">{{ call.summary or 'Tool call' }} · <span data-office-instant="{{ call.started_at }}"></span></div>{% endfor %}
+{% endif %}

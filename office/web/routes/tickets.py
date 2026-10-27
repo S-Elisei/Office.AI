@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from fastapi import APIRouter, Request
+from fastapi.responses import Response
 
 from office import core, db
 from office.web.deps import get_db, get_owner_name, read_form
@@ -110,7 +111,7 @@ async def comment_ticket(request: Request, ticket_id: int):
     data = await read_form(request)
     body = data.get("body", "").strip()
     core.comment_ticket(conn, ticket_id, get_owner_name(conn), body)
-    return templates.TemplateResponse(request, "partials/ticket_detail.html", _detail_context(request, ticket_id))
+    return Response(status_code=204)
 
 
 @router.post("/tickets/{ticket_id}/resolve")

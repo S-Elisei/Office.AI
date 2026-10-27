@@ -26,9 +26,9 @@
 {% endmacro %}
 
 {# The running and silent counters, side by side. #}
-{% macro timers(running_for, quiet_for) %}
-  <span class="text-faint">running {{ running_for | fmt_duration }}</span>
-  <span class="{{ 'badge warn' if quiet_for >= 300 else 'text-faint' }}">silent {{ quiet_for | fmt_duration }}</span>
+{% macro timers(started_at, activity_at, clock='') %}
+  <span class="text-faint" data-office-instant="{{ started_at }}" data-prefix="running "></span>
+  <span data-office-instant="{{ activity_at }}" data-prefix="silent " data-office-quiet data-clock-key="{{ clock }}"></span>
 {%- endmacro %}
 
 {% macro kind_badge(kind) %}

@@ -1,0 +1,5 @@
+<form class="composer" method="post" action="{{ send_url }}" hx-post="{{ send_url }}" hx-swap="none"
+      data-office-required="body" data-office-send="{{ region_id }}">
+  <textarea name="body" placeholder="{{ placeholder }}" required></textarea>
+  <button type="submit" class="primary" disabled>Send</button>
+</form>

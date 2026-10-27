@@ -17,7 +17,7 @@
           <button type="submit">Open</button>
         </form>
       </div>
-      <div id="dm-threads" hx-get="/fragments/dm-threads" hx-trigger="office:messages[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+      <div id="dm-threads" hx-get="/fragments/dm-threads" hx-trigger="office:messages[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
         {% include "partials/dm_thread_list.html" %}
       </div>
     </section>
@@ -27,6 +27,8 @@
       <div class="body">
         {% if peer %}
           {% include "partials/dm_thread_panel.html" %}
+          {% set send_url = "/dm/" ~ peer ~ "/messages" %}{% set placeholder = "Message " ~ peer ~ "…" %}
+          {% include "partials/composer.html" %}
         {% else %}
           <div class="empty">
             {{ "No direct messages yet." if not threads else "Pick a thread on the left." }}

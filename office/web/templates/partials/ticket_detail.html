@@ -3,7 +3,7 @@
 {% set resolve_hint = ("Resolving sends nothing — and this ticket is your own, so there is nobody to tell.")
    if ticket.author == owner_name
    else ("Resolving sends nothing — " ~ ticket.author ~ " learns the decision when you write to them.") %}
-<section class="panel ticket-detail">
+<section class="panel ticket-detail" data-ticket-status="{{ ticket.status }}">
   <header>
     <span>{{ ticket.title }}</span>
     <span>{{ m.kind_badge(ticket.kind) }} {{ m.status_badge(ticket.status) }}</span>
@@ -26,77 +26,5 @@
     {% elif ticket.addressee != owner_name %}
     <div class="waiting-note">Waiting on {{ ticket.addressee }} to resolve.</div>
     {% endif %}
-  </div>
-</section>
-
-{% if can_resolve %}
-<section class="panel resolve-panel">
-  <header>Resolve this ticket</header>
-  <div class="body">
-    <form method="post" action="/tickets/{{ ticket.id }}/resolve" hx-post="/tickets/{{ ticket.id }}/resolve" hx-target="#ticket-detail" hx-swap="innerHTML"
-          data-office-required="resolution">
-      <div class="form-row mb-0">
-        <label for="t-resolution">Resolution</label>
-        <textarea id="t-resolution" name="resolution" required placeholder="Write the decision the team should act on..."></textarea>
-        <span class="hint">{{ resolve_hint }}</span>
-      </div>
-      <div class="form-actions">
-        <button type="submit" class="primary" disabled>Resolve ticket</button>
-      </div>
-    </form>
-  </div>
-</section>
-{% elif can_override_resolve %}
-<details class="panel resolve-panel-override">
-  <summary>Resolve on {{ ticket.addressee }}'s behalf</summary>
-  <div class="body">
-    <p class="text-dim" style="margin-top: 0; font-size: 12.5px;">
-      This ticket is addressed to <strong>{{ ticket.addressee }}</strong>, not you. As owner you can still
-      resolve it yourself — e.g. if they're no longer around — but this bypasses the normal path, so use it
-      deliberately.
-    </p>
-    <form method="post" action="/tickets/{{ ticket.id }}/resolve" hx-post="/tickets/{{ ticket.id }}/resolve" hx-target="#ticket-detail" hx-swap="innerHTML"
-          data-office-required="resolution">
-      <div class="form-row mb-0">
-        <label for="t-resolution-override">Resolution</label>
-        <textarea id="t-resolution-override" name="resolution" required placeholder="Write the decision the team should act on..."></textarea>
-        <span class="hint">{{ resolve_hint }}</span>
-      </div>
-      <div class="form-actions">
-        <button type="submit" disabled>Resolve as owner</button>
-      </div>
-    </form>
-  </div>
-</details>
-{% endif %}
-
-<section class="panel">
-  <header>Comments</header>
-  <div class="body">
-    {% if comments %}
-    <div class="thread">
-      {% for c in comments %}
-      <div class="msg {{ 'from-human' if c.author == owner_name }}">
-        <div class="meta">
-          <span>{{ c.author }}</span>
-          <span>{{ c.created_at | fmt_time }}</span>
-        </div>
-        <div class="body md-body">{{ c.body | markdown | safe }}</div>
-      </div>
-      {% endfor %}
-    </div>
-    {% else %}
-    <div class="empty">No comments yet.</div>
-    {% endif %}
-    <form method="post" action="/tickets/{{ ticket.id }}/comments" hx-post="/tickets/{{ ticket.id }}/comments" hx-target="#ticket-detail" hx-swap="innerHTML" style="margin-top: 12px;"
-          data-office-required="body">
-      <div class="form-row mb-0">
-        <label for="tc-body">Add a comment</label>
-        <textarea id="tc-body" name="body" required style="min-height: 60px;"></textarea>
-      </div>
-      <div class="form-actions">
-        <button type="submit" disabled>Comment</button>
-      </div>
-    </form>
   </div>
 </section>

@@ -1,0 +1,6 @@
+<div class="thread" data-office-feed="/live/thread/{{ 'chat' if conv_channel == 'all' else 'dm' }}/{{ (conv_peer or 'all') | urlencode }}"
+     data-last-id="{{ newest_id or 0 }}" data-office-stick="newest"
+     data-office-seen-id="{{ newest_id or '' }}" data-office-seen-channel="{{ conv_channel }}" data-office-seen-peer="{{ conv_peer }}">
+  {% for m in messages %}{% include "partials/message.html" %}{% endfor %}
+  <div class="empty" data-feed-empty{{ ' hidden' if messages }}>No messages yet.</div>
+</div>

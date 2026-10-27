@@ -5,7 +5,7 @@
 
   <section class="panel">
     <header>Wiki</header>
-    <div class="body" id="knowledge-wiki" hx-get="/fragments/knowledge-wiki?path={{ selected_path or '' }}" hx-trigger="office:wiki[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+    <div class="body" id="knowledge-wiki" hx-get="/fragments/knowledge-wiki?path={{ selected_path or '' }}" hx-trigger="office:wiki[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
       {% include "partials/knowledge_wiki.html" %}
     </div>
   </section>

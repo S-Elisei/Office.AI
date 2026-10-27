@@ -172,6 +172,7 @@ class Command:
 
         self.started_at = time.monotonic()
         self.last_output_at = time.monotonic()
+        self.last_activity_wall_at = time.time()
         self.exit_code: int | None = None
         # Somebody asked for this to die — op=stop, or the end of the agent's
         # turn. Distinct from an exit code of its own.
@@ -246,6 +247,7 @@ class Command:
         """One line of output: into the tail ring and the log file."""
         with self._lock:
             self.last_output_at = time.monotonic()
+            self.last_activity_wall_at = time.time()
             self._tail.append(line)
             self._tail_chars += len(line)
             while self._tail_chars > RESULT_TAIL_CHARS and len(self._tail) > 1:

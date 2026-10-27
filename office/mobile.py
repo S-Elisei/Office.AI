@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from office import core, db
+from office import core, db, monitor, office_switch
 from office.mobile_push import PushDelivery
 
 ASSETS = Path(__file__).parent / "web" / "mobile"
@@ -69,6 +69,25 @@ class SeenRequest(Protocol):
 
 class ViewRequest(Protocol):
     peer: str | None
+    works: bool = False
+    quota: bool = False
+    outputs: list[int] = Field(default_factory=list)
+
+
+class SwitchRequest(Protocol):
+    to: Literal["run", "pause"]
+
+
+class TimerRequest(SwitchRequest):
+    at: str
+
+
+class StopRequest(Protocol):
+    agent: str
+
+
+class WakeRequest(Protocol):
+    wake_id: int
 
 
 class HistoryRequest(Protocol):
@@ -85,7 +104,10 @@ class PushSubscription(Protocol):
 
 class SocketRequest(Protocol):
     id: int
-    op: Literal["messages", "send", "seen", "view", "push", "push_subscribe", "push_unsubscribe"]
+    op: Literal[
+        "messages", "send", "seen", "view", "push", "push_subscribe", "push_unsubscribe",
+        "switch", "timer", "timer_cancel", "work_stop", "wake_cancel",
+    ]
     data: dict = Field(default_factory=dict)
 
 
@@ -242,22 +264,10 @@ def create_app(state, origin: str) -> FastAPI:
         return {"owner": owner, "conversations": peers}
 
     def messages(peer: str, before_id: int | None = None, after_id: int | None = None):
-        if after_id is not None:
-            owner = core.get_owner_name(state.db)
-            where = "channel = 'all' AND recipient IS NULL" if peer == "all" else (
-                "channel = 'dm' AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))"
-            )
-            params = () if peer == "all" else (owner, peer, peer, owner)
-            rows = db.query(
-                state.db, f"SELECT * FROM messages WHERE {where} AND id > ? ORDER BY id LIMIT 101",
-                params + (after_id,),
-            )
-            return {"messages": [dict(r) for r in rows[:100]], "has_newer": len(rows) > 100}
-        if peer == "all":
-            rows, older = core.chat_history(state.db, before_id, limit=100)
-        else:
-            rows, older = core.dm_history(state.db, peer, core.get_owner_name(state.db), before_id, limit=100)
-        return {"messages": [dict(r) for r in rows], "has_older": older}
+        rows, more = core.conversation_history(
+            state.db, peer, core.get_owner_name(state.db), before_id=before_id, after_id=after_id, limit=100,
+        )
+        return {"messages": [dict(row) for row in rows], "has_newer" if after_id is not None else "has_older": more}
 
     def send_message(data: SendRequest, device: str):
         try:
@@ -299,10 +309,59 @@ def create_app(state, origin: str) -> FastAPI:
         queue = state.broadcaster.subscribe()
         receive = asyncio.create_task(websocket.receive_text())
         update = asyncio.create_task(queue.get())
+        watching_works = False
+        watching_quota = False
+        quota_snapshot = None
+        output_ids = []
+        works_snapshot = None
+        output_snapshots = {}
+        refresh_at = 0.0
+        refresh_due = None
+
+        def schedule_works():
+            nonlocal refresh_due
+            if watching_works and refresh_due is None:
+                refresh_due = asyncio.get_running_loop().time() + 0.1
+
+        async def send_works():
+            nonlocal refresh_at, refresh_due, works_snapshot
+            snapshot = await asyncio.to_thread(monitor.snapshot, state.db, state.config, state.bus)
+            if works_snapshot is not None:
+                for name, at in monitor.new_clock_activity(works_snapshot["works"], snapshot["works"]).items():
+                    await websocket.send_json({"event": "activity", "data": {"subject_type": "agent", "name": name, "at": at}})
+            changes = snapshot if works_snapshot is None else monitor.works_delta(works_snapshot, snapshot)
+            if changes:
+                await websocket.send_json({
+                    "event": "works", "kind": "snapshot" if works_snapshot is None else "delta",
+                    "server_time": time.time(), "data": changes,
+                })
+            works_snapshot = snapshot
+            for work_id in output_ids:
+                output = await asyncio.to_thread(monitor.output, state.db, state.config, state.bus, work_id)
+                changes = monitor.output_delta(output_snapshots.get(work_id), output)
+                if changes:
+                    await websocket.send_json({
+                        "event": "work_output", "work_id": work_id, "server_time": time.time(), "data": changes,
+                    })
+                output_snapshots[work_id] = output
+            refresh_at = asyncio.get_running_loop().time() + 10
+            refresh_due = None
+
+        async def send_quota():
+            nonlocal quota_snapshot
+            current = monitor.quota(state.db)
+            if current != quota_snapshot:
+                await websocket.send_json({"event": "quota", "data": current})
+                quota_snapshot = current
+
         try:
-            await websocket.send_json({"event": "ready", "data": conversations()})
+            await websocket.send_json({
+                "event": "ready", "data": conversations(), "office": office_switch.snapshot(state.bus),
+            })
             while True:
-                done, _ = await asyncio.wait({receive, update}, timeout=15, return_when=asyncio.FIRST_COMPLETED)
+                deadline = min(refresh_at, refresh_due) if refresh_due is not None else refresh_at
+                timeout = max(0, deadline - asyncio.get_running_loop().time()) if watching_works else 15
+                done, _ = await asyncio.wait({receive, update}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
                 device = auth.current(token)
                 if device is None:
                     await websocket.send_json({"event": "unauthorized", "detail": "Session ended. Reconnect."})
@@ -325,6 +384,43 @@ def create_app(state, origin: str) -> FastAPI:
                         elif request.op == "view":
                             view = ViewRequest.model_validate(request.data)
                             state.mobile_push.views[token] = (device, view.peer)
+                            if not view.works or not watching_works:
+                                works_snapshot = None
+                                output_snapshots.clear()
+                            refresh_due = None
+                            watching_works = view.works
+                            if not view.quota or not watching_quota:
+                                quota_snapshot = None
+                            watching_quota = view.quota
+                            output_ids = view.outputs if watching_works else []
+                            output_snapshots = {key: value for key, value in output_snapshots.items() if key in output_ids}
+                            if watching_works:
+                                await send_works()
+                            if watching_quota:
+                                await send_quota()
+                            result = None
+                        elif request.op == "switch":
+                            data = SwitchRequest.model_validate(request.data)
+                            state.bus.set_running(data.to == "run", "by hand", actor=core.get_owner_name(state.db))
+                            result = office_switch.snapshot(state.bus)
+                        elif request.op == "timer":
+                            data = TimerRequest.model_validate(request.data)
+                            office_switch.set_timer(state.bus, data.to, data.at, core.get_owner_name(state.db))
+                            result = office_switch.snapshot(state.bus)
+                        elif request.op == "timer_cancel":
+                            state.bus.cancel_switch_timer(core.get_owner_name(state.db))
+                            result = office_switch.snapshot(state.bus)
+                        elif request.op == "work_stop":
+                            data = StopRequest.model_validate(request.data)
+                            result = await asyncio.to_thread(state.bus.stop_agent, data.agent, core.get_owner_name(state.db))
+                            if not result["ok"]:
+                                raise HTTPException(409, result["reason"])
+                            schedule_works()
+                            result = None
+                        elif request.op == "wake_cancel":
+                            data = WakeRequest.model_validate(request.data)
+                            core.cancel_scheduled_message(state.db, data.wake_id, sender=None, actor=core.get_owner_name(state.db))
+                            schedule_works()
                             result = None
                         elif request.op == "push":
                             result = state.mobile_push.status(device)
@@ -334,7 +430,7 @@ def create_app(state, origin: str) -> FastAPI:
                                 raise HTTPException(400, "Push endpoint requires HTTPS. Enable notifications again.")
                             state.mobile_push.subscribe(device, subscription.model_dump())
                             result = state.mobile_push.status(device)
-                        else:
+                        elif request.op == "push_unsubscribe":
                             state.mobile_push.unsubscribe(device)
                             result = state.mobile_push.status(device)
                     except ValidationError:
@@ -350,17 +446,32 @@ def create_app(state, origin: str) -> FastAPI:
                     if kind == "event: messages":
                         payload = json.loads(encoded)
                         if payload["subject_type"] != "message":
-                            continue
-                        row = db.query_one(state.db, "SELECT * FROM messages WHERE id = ?", (payload["subject_id"],))
-                        owner = core.get_owner_name(state.db)
-                        common = row["channel"] == "all" and row["recipient"] is None
-                        direct = row["channel"] == "dm" and owner in {row["sender"], row["recipient"]}
-                        if common or direct:
-                            peer = "all" if common else row["recipient"] if row["sender"] == owner else row["sender"]
-                            conversation = next(p for p in conversations()["conversations"] if p["name"] == peer)
-                            await websocket.send_json({"event": "message", "message": dict(row), "conversation": conversation})
+                            schedule_works()
+                        else:
+                            row = db.query_one(state.db, "SELECT * FROM messages WHERE id = ?", (payload["subject_id"],))
+                            owner = core.get_owner_name(state.db)
+                            common = row["channel"] == "all" and row["recipient"] is None
+                            direct = row["channel"] == "dm" and owner in {row["sender"], row["recipient"]}
+                            if common or direct:
+                                peer = "all" if common else row["recipient"] if row["sender"] == owner else row["sender"]
+                                conversation = next(p for p in conversations()["conversations"] if p["name"] == peer)
+                                await websocket.send_json({"event": "message", "message": dict(row), "conversation": conversation})
                     elif kind == "event: agents":
                         await websocket.send_json({"event": "conversations", "data": conversations()})
+                    elif watching_works and kind == "event: activity":
+                        payload = json.loads(encoded)
+                        if payload["subject_type"] == "agent":
+                            await websocket.send_json({"event": "activity", "data": payload})
+                    if kind in {"event: notices", "event: settings", "event: agents"}:
+                        await websocket.send_json({"event": "office", "data": office_switch.snapshot(state.bus)})
+                    if watching_works and kind in {"event: works", "event: agents", "event: tasks"}:
+                        schedule_works()
+                    if watching_quota and kind == "event: quota":
+                        await send_quota()
+                if watching_works and asyncio.get_running_loop().time() >= (
+                    min(refresh_at, refresh_due) if refresh_due is not None else refresh_at
+                ):
+                    await send_works()
         except WebSocketDisconnect:
             pass
         finally:

@@ -6,6 +6,8 @@
   <section class="panel">
     <div class="body">
       {% include "partials/chat_panel.html" %}
+          {% set send_url = "/chat/messages" %}{% set placeholder = "Say something to everyone…" %}
+          {% include "partials/composer.html" %}
     </div>
   </section>
 {% endblock %}

@@ -161,11 +161,39 @@ name here, which is how agents will address you.
 After that the director is in charge. It hires the rest of the team itself.
 You change its model and its standing instructions later on the settings page.
 
+### Desktop interface
+
+The menu stays at the left while document pages scroll. It scrolls separately
+only when its contents exceed the window. Main and Kanban keep their screen
+layout, with scrolling conversations and board columns. Main shows three ticket
+rows at a time, with the remaining tickets in the same scrolling list.
+
+The office switch at the bottom of the menu contains its live status, connection
+indicator, finishing turns, Pause/Run and pending timer with Cancel. The separate
+time form sits below that region. Status updates preserve a time being entered.
+The time uses the office computer's local clock.
+
+New messages and ticket or PR comments append while you type. Show older prepends
+history. Stream reconnection catches up from the last loaded message id. Active
+composer drafts, carets and selections stay in place. Create forms are separate
+from live lists. Settings, wiki and existing-rule editors keep their draft guard. A closed PR drops
+its comment draft; a resolved ticket drops its resolution draft.
+
+Works updates changed cards and fields through its local connection. Expanded
+Output panels receive appended rows and head removals from the same turn;
+a replacement tail starts with full rows. Consecutive text rows merge on screen. Unchanged briefs are not resent. Live-output and call checks run every ten
+seconds; unchanged checks send nothing. Turn and stage clocks advance in the
+browser from recorded instants. Quiet clocks receive activity events on a one-second tick
+per agent or stage; output alone does not update Works cards or
+recreate Stop turn buttons. Above 1100px the Works quota panel stays 16px from
+the top while the document scrolls; at 1100px and narrower the columns stack.
+
 ---
 
-## Mobile chat
+## Mobile app
 
-The mobile app provides direct messages with the team and the common chat.
+The mobile app provides direct messages with the team, the common chat, Works, Quota
+and the office's run/pause controls.
 It installs from the phone's browser as a PWA. The computer runs the office and
 an HTTPS tunnel. The phone needs no VPN, password, or screen lock.
 
@@ -220,16 +248,49 @@ checks delivery using that identifier, including after a page reload or hub
 restart. Nothing sends pending messages automatically. Chat history is fetched
 from the office and is not stored in the PWA cache.
 
+### Works, quota and office controls
+
+Open **Menu → Works** to see open assignments, statuses, briefs, branches, tasks,
+context usage and turn timers. Expand **Output** to read an agent's transcript.
+Use **Stop turn** to stop a running turn. Pending wakes have a **Cancel** button.
+Open **Menu → Quota** to see stored quota readings and reset times. Quota
+updates over the same socket while that page is visible, on opening and when
+readings change. Returning to the page or reconnecting loads current readings.
+
+The menu contains **Pause** / **Run**, a time field and **Cancel timer**. These
+controls share the main office interface's state. Pause lets current turns finish;
+owner direct messages and owed cut turns can still start turns. The timer uses
+the office computer's local time, with its UTC offset shown in the menu. A time
+that has passed selects its next occurrence tomorrow.
+
+Opening Works or reconnecting receives a full snapshot through the existing
+socket. While Works is visible, subsequent messages contain only changes:
+new and removed works, changed fields and changed wakes. Unchanged
+briefs are not resent. Events are coalesced, with a refresh every ten seconds;
+unchanged refreshes send nothing. Opening and closing Menu over Works retains
+its subscription and baseline. A reported work remains until its manager
+closes it.
+
+Turn and tool-call timers use recorded event instants and the phone's offset to
+the server clock. They count between messages and resynchronize after sleep and
+reconnection. Output is sent only for expanded panels, with head removal and
+appended rows from the same tail; a replacement tail sends full rows. Adjacent
+text rows merge on screen. Quiet clocks update through activity events, on a one-second tick
+per agent, without updating work cards. Collapsing and
+expanding Output starts with full rows. Updates preserve expanded panels and
+output scrolling. Opening Works or the menu preserves the conversation and
+composer text.
+
 ### Direct-message notifications
 
-Open **Device → Enable notifications** on the phone and allow notifications in
-the browser's permission dialog. Incoming personal messages show the sender
+Open **Menu → Device → Enable notifications** on the phone and allow notifications
+in the browser's permission dialog. Incoming personal messages show the sender
 and an invitation to open Office.AI. Tapping a notification opens that chat.
 Notifications from the same sender share one notification slot.
 Messages in the conversation currently visible on that phone produce no push
-notification. Other conversations still notify. The conversation list, Device
-dialog, hidden page and closed app suppress no notifications. Each open window
-reports its own visible conversation.
+notification. Other conversations still notify. The conversation list, Works, Quota,
+Menu, Device dialog, hidden page and closed app suppress no notifications. Each
+open window reports its own visible conversation.
 
 On Android, enable notifications for Chrome or the installed app in system
 settings. On iPhone and iPad, Web Push requires iOS/iPadOS 16.4 or newer and a
@@ -240,15 +301,16 @@ The office sends Web Push directly to the browser's push service. Push delivery
 uses no ngrok requests. Subscription endpoints must start with `https://`;
 other endpoints are refused without saving them or closing the chat connection.
 Failed deliveries stay queued; pending notifications
-and subscriptions belong to the registered device. **Device → Disable
+and subscriptions belong to the registered device. **Menu → Device → Disable
 notifications** stops new pushes. **Sign out** closes the chat; notifications
 remain enabled until disabled or the device is revoked in local Settings.
 
 ### Connections and traffic
 
-One WebSocket carries sign-in, messages, history, reading marks and subscription
-changes. Individual messages create no extra HTTP requests. The socket closes
-in the background and catches up from message IDs when the app returns.
+One WebSocket carries sign-in, messages, history, reading marks, subscription
+changes, Works, Quota and office controls. These operations create no extra HTTP
+requests. The socket closes in the background and catches up from message IDs
+when the app returns to chat.
 Reconnection uses increasing delays. The app shell uses a cache-first fetch
 handler. Each `/sw.js` request derives its cache name from the content of
 `index.html` and every file under the mobile assets directory. Changes to those
@@ -301,7 +363,7 @@ a stale copy.
 **Conversation.** You have a chat with the director on the main page, private
 threads with every agent, and a common room they can all read.
 
-**A task board.** Six columns, from idea to done. You can add a task and edit its
+**A task board.** Seven columns, from idea to done. You can add a task and edit its
 text; moving cards is the job of the director and the leads.
 
 **Tickets.** A question or a bug addressed to one participant. Only that

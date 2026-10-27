@@ -1,0 +1,4 @@
+<div class="msg {{ 'from-human' if (m.sender if m.sender is defined else m.author) == owner_name }}" data-row-id="{{ m.id }}">
+  <div class="meta"><span>{{ m.sender if m.sender is defined else m.author }}</span><span>{{ m.created_at | fmt_time }}</span></div>
+  <div class="body md-body">{{ m.body | markdown | safe }}</div>
+</div>

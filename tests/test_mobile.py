@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+from copy import deepcopy
 from contextlib import contextmanager
 from uuid import uuid4
 
@@ -13,9 +15,12 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from office import core, db
+from office import core, db, monitor
+from office.adapters.claude import ClaudeAdapter
+from office.bus import Bus
 from office.hub import Broadcaster, app
 from office.mobile import Entrypoints, create_app, device_id
+from office.web import transcript
 
 ORIGIN = "https://office.example"
 SOCKET = "wss://office.example/api/socket"
@@ -27,6 +32,7 @@ def phones(conn, config, monkeypatch):
     monkeypatch.setattr(app.state, "db", conn, raising=False)
     monkeypatch.setattr(app.state, "config", config, raising=False)
     monkeypatch.setattr(app.state, "broadcaster", Broadcaster(), raising=False)
+    monkeypatch.setattr(app.state, "bus", Bus(conn, config), raising=False)
     mobile = create_app(app.state, ORIGIN)
     local = TestClient(app, base_url="http://localhost:7777")
     client = TestClient(mobile, base_url=ORIGIN)
@@ -250,3 +256,57 @@ def test_visible_conversation_suppresses_push_and_views_belong_to_sockets(phones
         rpc(first, "view", {"peer": None})
         assert list(push.views.values()) == [(device, None)]
     assert push.views == {}
+
+
+def test_work_deltas_omit_unchanged_briefs_and_patch_nested_turn_fields():
+    # Invented work snapshots with stable instants and an open call.
+    before = {
+        "project_state": "ready", "wakes": [],
+        "works": [{"id": 7, "brief": "Keep this brief", "turn": {
+            "started_wall_at": 1000, "last_activity_wall_at": 1005, "context_used": None,
+            "call_instants": [{"id": "call-a", "summary": "Read", "started_at": 1004}],
+        }}],
+    }
+    assert monitor.works_delta(before, deepcopy(before)) == {}
+    after = deepcopy(before)
+    after["works"][0]["turn"]["last_activity_wall_at"] = 1010
+    assert monitor.works_delta(before, after) == {}
+    after["works"][0]["turn"]["context_used"] = 17
+    assert monitor.works_delta(before, after) == {
+        "works": {"changed": [{"id": 7, "turn": {"context_used": 17}}]},
+    }
+    new = {"id": 8, "brief": "Next brief", "turn": None}
+    after["works"] = [new]
+    assert monitor.works_delta(before, after) == {
+        "works": {"added": [new], "removed": [7], "order": [8]},
+    }
+    after = deepcopy(before)
+    after["works"].insert(0, new)
+    reordered = deepcopy(after)
+    reordered["works"].reverse()
+    assert monitor.works_delta(after, reordered) == {"works": {"order": [7, 8]}}
+
+
+def test_output_deltas_trim_append_replace_and_update_notes():
+    # Constructed Claude assistant fields; invented text fragments and source identities.
+    chunks = ["first", "second", "third"]
+    lines = [json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}) for text in chunks]
+    adapter = ClaudeAdapter("claude")
+    rows = transcript.line_rows(lines, adapter)
+    assert [row["text"] for row in rows] == chunks
+    assert [row["text"] for row in transcript.rows(lines, adapter)] == ["".join(chunks)]
+    before = {"source": "turn-a", "rows": rows[:2], "note": None}
+    assert monitor.output_delta(None, before) == {"rows": rows[:2], "note": None}
+    grown = {**before, "rows": rows}
+    assert monitor.output_delta(before, grown) == {"drop": 0, "append": rows[2:]}
+    after = {**before, "rows": rows[1:]}
+    assert monitor.output_delta(before, after) == {"drop": 1, "append": rows[2:]}
+    assert monitor.output_delta(after, deepcopy(after)) == {}
+    shifted = {**before, "rows": rows[2:]}
+    assert monitor.output_delta(before, shifted) == {"drop": 2, "append": rows[2:]}
+    replaced = {"source": "turn-b", "rows": rows[2:], "note": None}
+    assert monitor.output_delta(before, replaced) == {"rows": rows[2:], "note": None}
+    assert monitor.output_delta(before, {**before, "rows": [], "note": "Waiting"}) == {
+        "drop": 2, "append": [], "note": "Waiting",
+    }
+    assert monitor.output_delta(before, {**before, "note": "Ready"}) == {"note": "Ready"}

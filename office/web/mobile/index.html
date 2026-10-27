@@ -9,13 +9,14 @@
   <link rel="manifest" href="/assets/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="apple-touch-icon" href="/assets/icon-192.png">
   <link rel="stylesheet" href="/assets/mobile.css">
+  <script src="/assets/transcript.js" defer></script>
   <script src="/assets/mobile.js" defer></script>
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/">Office<span>.AI</span></a>
     <span id="connection" role="status">Connecting</span>
-    <button id="device-button" type="button" class="quiet">Device</button>
+    <button id="menu-button" type="button" class="quiet">Menu</button>
   </header>
   <main>
     <section id="connect-panel" class="connect-panel">
@@ -50,8 +51,42 @@
         </form>
       </section>
     </section>
+    <section id="works-page" class="works-page" hidden>
+      <header class="works-heading"><div><span class="eyebrow">YOUR OFFICE</span><h1>Works</h1></div><span id="works-office-status" class="state-badge"></span></header>
+      <p class="page-note">Open works. Closed works leave this page.</p>
+      <div id="works-list"><p class="empty">Loading works…</p></div>
+      <section id="wakes-section" class="works-panel" hidden>
+        <h2>Pending wakes</h2>
+        <div id="works-wakes"></div>
+      </section>
+    </section>
+    <section id="quota-page" class="works-page" hidden>
+      <header class="works-heading"><div><span class="eyebrow">YOUR OFFICE</span><h1>Quota</h1></div></header>
+      <section class="works-panel"><h2>Quota left</h2><div id="quota-list"><p class="empty">Loading quota…</p></div></section>
+    </section>
     <p id="error" class="error" role="alert" hidden></p>
   </main>
+  <dialog id="menu-dialog">
+    <div class="dialog-heading"><h2>Office menu</h2><button id="close-menu" class="quiet" type="button">Close</button></div>
+    <nav class="menu-pages" aria-label="Pages">
+      <button id="nav-chat" class="secondary" type="button" disabled>Conversations</button>
+      <button id="nav-works" class="secondary" type="button" disabled>Works</button>
+      <button id="nav-quota" class="secondary" type="button" disabled>Quota</button>
+      <button id="device-button" class="secondary" type="button">Device</button>
+    </nav>
+    <section id="office-controls" class="office-controls" hidden>
+      <div class="switch-heading"><span id="office-status" class="state-badge"></span><button id="office-toggle" type="button" disabled>Pause</button></div>
+      <p id="office-finishing" class="page-note" hidden></p>
+      <p id="office-zone" class="page-note"></p>
+      <p id="office-error" class="control-error" role="alert" hidden></p>
+      <form id="office-timer-form" class="timer-form">
+        <label id="office-timer-label" for="office-timer-at">Pause at</label>
+        <input id="office-timer-at" type="time" required>
+        <button id="office-timer-set" class="secondary" type="submit" disabled>Set</button>
+      </form>
+      <div id="office-timer-pending" class="pending-timer" hidden><span id="office-timer-description"></span><button id="office-timer-cancel" class="secondary" type="button" disabled>Cancel timer</button></div>
+    </section>
+  </dialog>
   <dialog id="device-dialog">
     <div class="dialog-heading"><h2>This phone</h2><button id="close-device" class="quiet" type="button">Close</button></div>
     <p>Register this public key in the office's local Settings.</p>

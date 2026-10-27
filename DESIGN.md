@@ -360,21 +360,21 @@ separate way of not seeing:
   person rather than the window.
 
 The third is the same calculation that decides whether to scroll a panel to a new
-message or leave the reader where they stand (`app.js`, `atFoot`): one definition
+message or leave the reader where they stand (`live.js`, `officeAtFoot`): one definition
 for both questions. Scrolling does not count as input: the panel scrolls itself
 to new messages, and activity the office generates for itself would keep the desk
 occupied forever.
 
 A report is sent on every occasion when one of the four could just have become
 true, and on the one occasion when the bottom line changes under someone already
-looking: panel swap, tab return, focus return, scroll to bottom, first input after
+looking: appended rows, panel swap, tab return, focus return, scroll to bottom, first input after
 idle, page load. A repeat with the same id is not sent; a report rejected by the
 server or lost to a broken connection is retried at most once every five seconds
 per conversation. A 4xx is never retried.
 
-The panel carries the id of the newest **displayed** line: on a page scrolled back
-that is the end of that page, not the end of the conversation. The write is
-monotonic and idempotent in a single statement.
+The panel carries the id of its newest loaded line. Older rows prepend without
+changing it; new rows advance it. A scrolled-up panel reports nothing. The write
+is monotonic and idempotent in a single statement.
 
 The mark emits no events. The only thing that depends on it is the menu counters,
 and they re-read themselves immediately after a successful report.
@@ -2436,23 +2436,27 @@ Each counter is its own region listening for the event kinds that can change it.
 list of kinds is declared in one place (`office/web/routes/nav.py`) and the markup
 takes its trigger from there.
 
-The head of every page carries the office's switch (section 4): its state, "Running" or
-"Paused"; a button that flips it; while it is paused and turns are still running, how many
-are still finishing; a pending timer as "pause at 10:00" or "run at 23:00" with a button
-that cancels it; and a time field that sets the timer, labelled with the flip it would
-make. The region refreshes on the events of the journal, of settings and of agents, and
-its time field counts as a draft.
+The bottom of the sticky left menu carries one live office-switch region. It
+contains the connection indicator with Running/Paused, the still-finishing
+count, Pause/Run and the pending timer with Cancel. The time form is a separate
+sibling below it. No switch content is cloned elsewhere in the menu. A typed
+time retains its action, value, caret and selection during switch updates. The
+switch uses the menu's light- and dark-scheme colors and fits its 150px layout.
 
-Two pages are **screens** rather than documents: the main page and the board. They
-take the window's height, and what scrolls inside them is what grows — the
-conversation and the board's columns. The rest are documents and scroll whole.
+The body grows with document content. The document scrolls; the menu is
+`position: sticky; top: 0; height: 100vh` and scrolls only on overflow. Main and
+Kanban occupy the viewport and keep their internal scrolling conversation and
+board columns. Works scrolls as a document. Above 1100px its quota panel is
+sticky at 16px with `max-height: calc(100vh - 32px)` and overflow scrolling.
+At 1100px and below its columns stack and quota has normal document flow.
 
 All times are shown local and stored UTC.
 
 1. **Main** — the director's chat (pages of 200 messages, cursor backwards), a stop
    button for its turn with `running_for` and `quiet_for` counters (only while a turn
    runs), the plate of critical notices, quota by bucket, the director's context fill
-   with a compact button, and open tickets addressed to the owner. Until the project
+   with a compact button, and open tickets addressed to the owner. The ticket
+   block shows three rows at a time and scrolls; its header counts all tickets. Until the project
    is `ready` the setup panel stands here; until the director exists, the form that
    hires it — which also asks for the owner's name, since the first run bypasses the
    settings page and renaming without losing one's own correspondence is only
@@ -2481,11 +2485,10 @@ All times are shown local and stored UTC.
    collapsed block, parsed by the same parser the office listens to the turn with:
    speech, tool calls with their start and end, errors. A call with a start and no end
    is marked. A failed work shows the tail stored when it failed; any other shows the
-   live turn's output, or else the assignee's tail file. The transcript is served from
-   its own endpoint, so it is parsed only when somebody opens it, and it lives exactly
-   as long as the tail file does. Under the
-   works are the deferred messages the office is holding, and the owner can cancel
-   any of them.
+   live turn's output, or else the assignee's tail file. Expanded Output panels
+   receive parsed rows over the Works connection. Output uses head removal and
+   appended rows, or full rows for other edits. Under the works are pending wakes
+   with Cancel controls. The quota panel occupies the second column.
 5. **Common chat** — paginated.
 6. **Team** — the team as a tree, each agent under its manager with its title; on
    what, how much context, and under each agent what it awaits from a service,
@@ -2510,9 +2513,8 @@ All times are shown local and stored UTC.
 Every element of the main page collects its own data and nobody else's; the full
 page render is the merge of those collectors.
 
-`Bus.health()` warnings — conditions the office can see and cannot fix — are printed
-as a line on the main page when the list is not empty. `/health` returns the same
-plus `project_state` and whether the database answers. Today they are: codex being
+`/health` returns `Bus.health()` warnings, `project_state` and whether the
+database answers. Its warnings include: codex being
 reachable only through a batch shim, which truncates the inline hook config and
 leaves its agents without mid-turn delivery; the office's own tick failing over a
 named agent; a marked process that survived being killed; the project repository not
@@ -2570,27 +2572,71 @@ nothing and says nothing.
 
 ### Live updates
 
-`Broadcaster.publish(kind, payload)`, where `kind` is one of a closed list:
+The event stream carries domain kinds `agents`, `works`, `tasks`, `messages`,
+`prs`, `quota`, `wiki`, `rules`, `settings`, `tickets`, `notices` and `stages`.
+Transient `activity` events carry agent or stage identity and the recorded last
+activity instant. The hub publishes changed instants on a one-second tick
+per subject. Writers record every instant; output between publications is folded
+into the next event. Works sockets send the current instant when a new live turn appears. The
+director's activity line refreshes separately from its stop control.
+Transient `switch` events carry the office's running state.
+`app.js` dispatches them as `office:<kind>` on the body.
 
-```
-agents · works · tasks · messages · prs · quota · wiki · rules · settings ·
-tickets · notices · stages
-```
+Read-only regions filter the payload through `officeConcerns` before requesting
+an HTMX fragment. The director chat accepts only owner/director direct messages;
+DM lists accept direct messages involving the owner, each thread accepts its own
+pair, and common chat accepts common messages without a recipient. Pending wakes
+accept scheduled-message events. Ticket status and comments use their ticket id;
+PR comments use their PR id. Task events include their parent, and reparenting
+includes the previous parent. Kanban filters against its parent and watched task
+ids. The critical-notice plate accepts critical notices and dismissals.
 
-`app.js` subscribes to all of them and re-dispatches each as the DOM event
-`office:<kind>` on `<body>`; a region re-requests its own fragment through
-`hx-trigger`. A region containing an unsaved draft (a text, time, number or range input
-or a `textarea` whose value differs from the one the server rendered, outside a closed
-`<details>`, or a table editor whose rows were added, deleted or moved) skips the update and catches itself up the moment the draft is gone. Each
-region uses its own `hx-swap`.
+A refreshing display region contains no typed form. Chat composers, ticket
+comment and resolution forms, PR comment forms, and create forms for tickets,
+rules and tasks are outside their display regions. Mutation responses clear only
+the submitted values that remain unchanged on the client. Closing a PR removes
+its card and comment draft; resolving a ticket removes its obsolete resolution
+form. Settings, existing rule edits and the wiki editor keep
+`officeShouldSkip`: a changed draft defers that editor's refresh and catches up
+when the draft is cleared or closed. The task editor remains in its dialog,
+outside the refreshing board.
 
-After the connection drops — and only after a drop, not on the first connect — every
-region in which nobody is editing is re-requested by that same catch-up mechanism,
-each request carrying its own region as the source.
+Growing threads use `/live/thread/{kind}/{peer}` with `after` or `before` ids and
+pages of 200 rows. Conversation selection and both cursors are defined in
+`core.conversation_history` and shared with mobile history. Responses contain rendered rows with stable ids and a `more`
+flag. The browser appends unseen new rows and prepends older rows without replacing
+loaded messages or composers. Requests are serialized per thread and rows are
+deduplicated by id. Every stream open catches up threads from their last loaded
+id; reconnect also refreshes clean HTMX regions. Reading marks keep their visible,
+focused, recently active, bottom-of-thread conditions and refresh menu counters.
 
-Scroll position is remembered per scrollable box across swaps in one place. A box that
-follows the newest line returns to the bottom if it was at the bottom, and otherwise
-stays where the reader left it.
+Works uses a local same-origin WebSocket at `/live/works`. Each connection keeps
+its last work data, rendered field fragments and expanded-output rows. Work,
+agent and task events concerning those cards are coalesced over 100ms. A
+10-second refresh reads live output and open calls. The server sends additions,
+removals, changed order and changed head, turn, context, brief, reason or call
+fields. Unchanged refreshes send nothing, and unchanged briefs are omitted.
+Existing card and Output nodes retain expansion and scrolling. Output uses
+`drop` plus `append` rows within one tail source and full rows on source
+replacement or a new panel subscription. Source identities stay on the server.
+Rows correspond to parsed output lines; the shared browser renderer merges
+adjacent text rows. Notes update separately. The browser reports expanded panels
+only on socket opening and panel toggles. A report refreshes outputs only.
+Reconnection establishes a new baseline.
+
+One browser ticker computes all running times from recorded wall-clock instants.
+Works and the director stop control use the live turn's start and activity
+instants; Team uses recorded preparation and stage-run instants. Activity events
+update quiet-time instants. Last activity is excluded from Works card comparison
+and deltas; it arrives through activity events and the initial socket snapshot.
+Stop controls retain their DOM nodes while output arrives. Clock advancement
+sends no requests. Works messages
+carry server time for the browser clock offset. No region replaces itself on a
+clock timer.
+
+Scroll position is retained across display swaps. A thread at its foot follows
+new rows; a scrolled-up thread retains its position. Older rows preserve the
+reader's anchor. Output head removal adjusts its scroll position.
 
 ### settings keys
 
@@ -2674,7 +2720,7 @@ Challenges and sessions live in memory. The session ends with the connection.
 Revocation drops the device's sessions and challenges and wakes its connections.
 Access is checked before each operation and while idle. Expiry triggers a new
 connection and signature; a refused sign-in opens the connection screen.
-Sign-out stops reconnection. Reconnection preserves the open conversation,
+Sign-out stops reconnection. Reconnection preserves the open page, conversation,
 composer text and unconfirmed send.
 
 The mobile chat contains the owner's direct messages and public common messages.
@@ -2686,7 +2732,8 @@ Sending and recording its receipt happen in one SQLite transaction;
 receipt returns the stored message. A changed payload with that receipt is refused.
 The PWA retries sends only on an explicit tap and catches up from message IDs
 after a connection interruption. Messages, history, sends, reading marks and
-push subscriptions travel over the WebSocket. Each connection also reports its
+push subscriptions travel over the WebSocket. Works and office switch operations
+use that connection too. Each connection also reports its
 visible conversation: the peer only when the document and its chat panel are
 visible. The conversation list on the narrow layout, connection screen and
 other visible root sections or dialogs report none. Opening a conversation,
@@ -2695,12 +2742,76 @@ a dialog, and a ready socket update the report. Closing a socket removes its
 report. Each socket keeps its own report; a device may have several sockets.
 Live events carry the message
 and its conversation summary. Agent-to-agent messages and reminder scheduling
-events are not forwarded. The socket closes while the page is hidden and
-reopens on return. Network reconnection uses increasing delays.
+events are not forwarded as chat messages. The socket closes while the page is
+hidden and reopens on return. Network reconnection uses increasing delays.
+
+The Menu opens Conversations, Works, Quota and Device. Works shows open assignments,
+their derived status, brief, branch, task, context fill, live turn timers and open
+tool calls, captured output and pending wakes. Work lists,
+output parsing, quota grouping and switch state share collectors with the local
+interface. The phone subscribes while the document is visible and Works is the
+selected page, including beneath Menu. Opening or closing Menu retains the
+subscription and delta baseline. Leaving Works ends it. A new
+subscription or connection receives one full snapshot. Each socket keeps its own
+last-sent state. Subsequent messages contain added works, removed ids and sparse
+changed fields, recursively within a turn. Work order, wakes and project
+state are included only on change. Unchanged briefs are omitted from deltas.
+Work, agent, task and wake events share a 100 ms coalescing window. A
+ten-second refresh also reads output and open calls. An unchanged refresh sends
+nothing. Stop turn and Cancel wake schedule the resulting delta.
+
+The Works envelope is `{event: "works", kind: "snapshot" | "delta", server_time,
+data}`. A snapshot's data contains `works` (ordered full work objects), `wakes`,
+`project_state`. A delta's optional `works` object contains optional
+`added`, `removed`, `changed` and `order` arrays. Empty added, removed and changed
+arrays are omitted. Order is included only on change, including an empty array
+when the last work is removed. Each changed work has `id` and changed fields.
+Arrays replace their field; nested objects merge, and null replaces an object.
+Other changed snapshot fields replace their value.
+
+Mobile turn fields are `started_wall_at`, `context_used`, `context_limit` and
+`call_instants`. Only the initial Works snapshot includes `last_activity_wall_at`.
+Later quiet-time updates use `{event: "activity", data: {subject_type, name, at}}`.
+Card deltas omit last activity, including added works and replacement turns. Each open call has `id`, `summary` and
+`started_at`. Process start, stream activity, reasoning activity and call starts
+record wall-clock instants at the event. Instants and `server_time` are Unix
+seconds. The phone measures its clock offset from each Works or output message's
+server time and calculates durations from its wall clock. Local turn fields keep
+their monotonic durations and `(summary, age)` calls alongside the added fields.
+
+Only expanded output panels subscribe to transcripts. Each socket remembers the
+rows and note for those panels. Output envelopes contain `{event: "work_output",
+work_id, server_time, data}`. Initial data has `rows` and `note`. Incremental data
+has `drop` and `append` for head removal and appended rows from the same tail,
+including a window with no overlap. A replacement tail sends full `rows` and
+`note`. Each row is one parsed output line; the phone merges adjacent text rows
+with the desktop's shared renderer. A changed `note` is included, including
+null. A note-only change contains just `note`. Collapse forgets that panel's
+baseline. Expansion sends full rows and note. Brief and Output expansion state
+and output scrolling stay on the phone during updates and reconnection.
+
+Works, Quota and Menu report no visible conversation. Work output and Works state remain
+outside the PWA cache. The phone can stop a live turn and cancel a pending wake
+through the bus and core. A reported work remains until its manager closes it;
+closing removes it from Works.
+
+The Quota page uses the view report's `quota` flag and a separate
+`{event: "quota", data}` message with the runtime-grouped quota buckets. Opening
+that page or reconnecting sends current readings. While the page is visible,
+quota events send changed readings only. Leaving the page clears its baseline.
+Works snapshots contain no quota data. Quota changes do not refresh Works.
+
+Menu contains the office's run/pause switch and one-shot timer with cancellation.
+Both interfaces use the same bus state and timer calculation. The timer selects
+the next occurrence of HH:MM in the office computer's local time. Its UTC offset
+is displayed on the phone. Pause lets live turns finish; owner direct messages
+and owed cut turns retain the bus's pause exceptions. Switch and timer changes
+from either interface update the phone over the socket. A typed timer keeps its
+selected action during incoming state updates.
 
 ### Mobile notifications
 
-The phone enables Web Push from its Device dialog. Its subscription belongs to
+The phone enables Web Push from Menu → Device. Its subscription belongs to
 the registered device in `mobile_push_subscriptions`. `mobile_push_identity`
 stores the office's VAPID private key; its public key is derived from it.
 `push_subscribe` refuses endpoints that do not start with `https://`, returns

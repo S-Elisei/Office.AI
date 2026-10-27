@@ -185,6 +185,7 @@ class AgentTurn:
         # time.monotonic() of the last byte from either stream.
         self.last_output_at: float = time.monotonic()
         self.started_at: float = time.monotonic()
+        self.started_wall_at = self.last_activity_wall_at = time.time()
 
         self._proc: subprocess.Popen | None = None
         # _tail and _tail_dirty are touched by four threads: the two stream
@@ -211,9 +212,8 @@ class AgentTurn:
         self._context_limit: int | None = context_limit or context_limit_for(adapter.runtime)
         self._last_error: str | None = None
         # Tool calls started and not yet ended: call id -> (summary, time.monotonic()
-        # at its start), oldest first. Written by the stdout reader, read through
-        # open_calls().
-        self._open_calls: dict[str, tuple[str | None, float]] = {}
+        # at its start, wall time at its start), oldest first.
+        self._open_calls: dict[str, tuple[str | None, float, float]] = {}
         self._calls_lock = threading.Lock()
         # An adapter whose occupancy does not ride its own stream. Absent on the
         # other two, and this stays None for them.
@@ -269,6 +269,7 @@ class AgentTurn:
             raise ProcessGone(str(exc)) from exc
 
         self.started_at = self.last_output_at = time.monotonic()
+        self.started_wall_at = self.last_activity_wall_at = time.time()
         if self._context_poller is not None:
             threading.Thread(target=self._context_loop, daemon=True,
                              name="office-context-poll").start()
@@ -340,7 +341,15 @@ class AgentTurn:
         as (summary, seconds since it started)."""
         now = time.monotonic()
         with self._calls_lock:
-            return [(summary, now - since) for summary, since in self._open_calls.values()]
+            return [(summary, now - since) for summary, since, _ in self._open_calls.values()]
+
+    def call_instants(self) -> list[dict]:
+        """Open call identities, summaries and recorded wall-clock start times."""
+        with self._calls_lock:
+            return [
+                {"id": call_id, "summary": summary, "started_at": wall}
+                for call_id, (summary, _, wall) in self._open_calls.items()
+            ]
 
     def tail(self) -> list[str]:
         # Same lock the two reader threads append under and _flush_tail() reads
@@ -370,7 +379,7 @@ class AgentTurn:
 
     def _read_stdout(self) -> None:
         for line in iter(self._proc.stdout.readline, ""):
-            self.last_output_at = time.monotonic()
+            self._activity()
             with self._tail_lock:
                 self._tail.append(line.rstrip("\r\n"))
                 self._tail_dirty = True
@@ -386,7 +395,7 @@ class AgentTurn:
 
     def _read_stderr(self) -> None:
         for line in iter(self._proc.stderr.readline, ""):
-            self.last_output_at = time.monotonic()
+            self._activity()
             stripped = line.rstrip("\r\n")
             with self._tail_lock:
                 self._tail.append("stderr: " + stripped)
@@ -397,6 +406,10 @@ class AgentTurn:
             elif _VENDOR_MARKS.search(stripped):
                 # Not _last_error: a warning is not the cause of a death.
                 self.events.put(Event(kind="error", error=stripped))
+
+    def _activity(self) -> None:
+        self.last_output_at = time.monotonic()
+        self.last_activity_wall_at = time.time()
 
     def _poll_context_once(self) -> None:
         """Ask the adapter for an out-of-band context reading, if it has one.
@@ -434,7 +447,7 @@ class AgentTurn:
             self.quota = event.quota
         if event.reasoning:
             # Counts as output: quiet_for and the tail see the model thinking.
-            self.last_output_at = time.monotonic()
+            self._activity()
             with self._tail_lock:
                 self._tail.extend([REASONING_LINE] * event.reasoning)
                 self._tail_dirty = True
@@ -442,7 +455,7 @@ class AgentTurn:
             with self._calls_lock:
                 for call_id, summary in event.calls:
                     if event.phase == "started":
-                        self._open_calls.setdefault(call_id, (summary, time.monotonic()))
+                        self._open_calls.setdefault(call_id, (summary, time.monotonic(), time.time()))
                     elif event.phase == "finished":
                         self._open_calls.pop(call_id, None)
         if event.kind == "turn_end":

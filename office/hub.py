@@ -102,6 +102,30 @@ class Broadcaster:
             await queue.put(message)
 
 
+async def activity_loop(state) -> None:
+    """Publish changed activity instants on a one-second tick."""
+    previous = {}
+    while True:
+        await asyncio.sleep(1)
+        current = {
+            ("agent", name): turn["last_activity_wall_at"]
+            for name, turn in state.bus.live_turns().items()
+        }
+        for stage in stages.overview(state.db):
+            if stage["running"]:
+                at = stage["running"]["last_activity_wall_at"]
+            elif stage["state"] == "preparing":
+                at = stage["preparing_activity_wall_at"]
+            else:
+                continue
+            if at is not None:
+                current["stage", stage["name"]] = at
+        for (kind, name), at in current.items():
+            if previous.get((kind, name)) != at:
+                await state.broadcaster.publish("activity", {"subject_type": kind, "name": name, "at": at})
+        previous = current
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Before anything the hub spawns. The hub must not carry the mark itself.
@@ -147,10 +171,14 @@ async def lifespan(app: FastAPI):
     async with mcp.session_manager.run():
         bus.recover_after_restart()
         bus.start()
+        activity_task = asyncio.create_task(activity_loop(app.state))
         push_task = asyncio.create_task(app.state.mobile_push.run()) if config.mobile_origin else None
 
         yield
 
+        activity_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await activity_task
         bus.stop()
         if push_task is not None:
             push_task.cancel()

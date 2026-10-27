@@ -2,7 +2,9 @@
 {% block title %}Kanban — Office.AI{% endblock %}
 {% block content %}
 
-  <div id="kanban-board" hx-get="/fragments/kanban?{{ view_query }}" hx-trigger="office:tasks[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+  <div id="kanban-crumbs" hx-get="/fragments/kanban/crumbs?{{ view_query }}" hx-trigger="office:tasks[officeConcerns(this, event)] from:body" hx-swap="innerHTML">{% include "partials/kanban_crumbs.html" %}</div>
+  {% include "partials/task_create.html" %}
+  <div id="kanban-board" hx-get="/fragments/kanban?{{ view_query }}" hx-trigger="office:tasks[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
     {% include "partials/kanban_board.html" %}
   </div>
 

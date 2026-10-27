@@ -8,6 +8,8 @@ const state = {
   view: 0, loading: false, seen: new Map(), retryTimer: null, retryDelay: 1000,
   registration: null, push: null, pushBusy: false,
   targetPeer: new URLSearchParams(location.hash.slice(1)).get("peer"),
+  office: null, officeBusy: false, works: null, serverOffset: 0, worksClock: null,
+  workBusy: new Set(), reportedView: null, activities: new Map(),
 };
 let storage;
 
@@ -59,18 +61,31 @@ function rejectRequests(error) {
   state.requests.clear();
 }
 
-function visiblePeer() {
+function visiblePanel() {
   if (document.visibilityState !== "visible") return null;
   const panels = [...document.querySelectorAll("main > section, dialog[open]")]
     .filter((panel) => panel.getClientRects().length);
+  return panels.length === 1 ? panels[0] : null;
+}
+
+function visiblePeer() {
   const workspace = $("workspace");
-  return panels.length === 1 && panels[0] === workspace &&
+  return visiblePanel() === workspace &&
     workspace.querySelector(".chat").getClientRects().length ? state.peer : null;
 }
 
 function reportView(peer = visiblePeer()) {
   if (!state.ready || state.socket.readyState !== WebSocket.OPEN) return;
-  state.socket.send(JSON.stringify({id: ++state.sequence, op: "view", data: {peer}}));
+  const works = document.visibilityState === "visible" && !$("works-page").hidden;
+  const outputs = works ? [...$("works-list").querySelectorAll("details[data-output][open]")]
+    .map((details) => Number(details.dataset.output)) : [];
+  const data = {peer, works, quota: visiblePanel() === $("quota-page"), outputs};
+  const encoded = JSON.stringify(data);
+  if (state.reportedView === encoded) return;
+  state.reportedView = encoded;
+  state.socket.send(JSON.stringify({id: ++state.sequence, op: "view", data}));
+  clearInterval(state.worksClock);
+  state.worksClock = works ? setInterval(updateWorkTimers, 1000) : null;
 }
 
 function stopSocket() {
@@ -78,10 +93,14 @@ function stopSocket() {
   const socket = state.socket;
   state.socket = null;
   state.ready = false;
+  state.reportedView = null;
+  clearInterval(state.worksClock);
+  state.worksClock = null;
   socket?.close();
   rejectRequests(new Error("Connection interrupted. Retry the send to check delivery."));
   updateComposer();
   updatePush();
+  updateOffice();
 }
 
 function sessionEnded(message) {
@@ -90,6 +109,8 @@ function sessionEnded(message) {
   clearTimeout(state.retryTimer);
   stopSocket();
   $("workspace").hidden = true;
+  $("works-page").hidden = true;
+  $("quota-page").hidden = true;
   $("connect-panel").hidden = false;
   $("connection").textContent = "Disconnected";
   $("connect-status").textContent = message;
@@ -141,6 +162,8 @@ function openSocket() {
       } else if (message.event === "ready") {
         clearTimeout(timer);
         state.ready = true;
+        state.activities.clear();
+        applyOffice(message.office);
         reportView();
         resolve(message.data);
       } else if (message.event === "error" || message.event === "unauthorized") {
@@ -156,6 +179,24 @@ function openSocket() {
       } else if (message.event === "conversations") {
         applyConversations(message.data);
         updateComposer();
+      } else if (message.event === "office") {
+        applyOffice(message.data);
+      } else if (message.event === "works") {
+        state.serverOffset = message.server_time * 1000 - Date.now();
+        applyWorks(message);
+      } else if (message.event === "quota") {
+        renderQuota(message.data);
+      } else if (message.event === "activity") {
+        const {name, at} = message.data;
+        state.activities.set(name, at);
+        for (const node of $("works-list").querySelectorAll("[data-quiet-agent]")) {
+          if (node.dataset.quietAgent === name) node.dataset.instant = Math.max(Number(node.dataset.started), at);
+        }
+        updateWorkTimers();
+      } else if (message.event === "work_output") {
+        state.serverOffset = message.server_time * 1000 - Date.now();
+        renderWorkOutput(message.work_id, message.data);
+        updateWorkTimers();
       } else {
         const pending = state.requests.get(message.id);
         if (!pending) return;
@@ -176,9 +217,13 @@ function openSocket() {
       if (state.socket !== socket) return;
       state.socket = null;
       state.ready = false;
+      state.reportedView = null;
+      clearInterval(state.worksClock);
+      state.worksClock = null;
       rejectRequests(error);
       updateComposer();
       updatePush();
+      updateOffice();
       $("connection").textContent = navigator.onLine ? "Reconnecting…" : "Offline";
       scheduleReconnect();
     };
@@ -198,15 +243,22 @@ function connect() {
       state.retryDelay = 1000;
       applyConversations(snapshot);
       $("connect-panel").hidden = true;
-      $("workspace").hidden = false;
+      if (state.targetPeer !== null) {
+        $("works-page").hidden = true;
+        $("quota-page").hidden = true;
+      }
+      $("workspace").hidden = !($("works-page").hidden && $("quota-page").hidden);
+      updateOffice();
       reportView();
       $("connection").textContent = "Connected";
       $("error").hidden = true;
       const peer = state.pending?.peer ?? state.targetPeer ?? state.peer ??
         state.conversations.find((item) => item.kind === "director")?.name ?? "all";
       state.targetPeer = null;
-      if (peer !== state.peer || !state.messages.length) await openConversation(peer);
-      else await syncMessages();
+      if (!$("workspace").hidden) {
+        if (peer !== state.peer || !state.messages.length) await openConversation(peer);
+        else await syncMessages();
+      }
       if (state.pending) {
         $("message-body").value = state.pending.body;
         $("send-status").textContent = "Unconfirmed send. Retry to check delivery.";
@@ -234,6 +286,260 @@ function applyConversations(data) {
   state.owner = data.owner;
   state.conversations = data.conversations;
   renderConversations();
+}
+
+function showPage(page) {
+  $("workspace").hidden = page !== "chat";
+  $("works-page").hidden = page !== "works";
+  $("quota-page").hidden = page !== "quota";
+  $("menu-dialog").close();
+  reportView();
+}
+
+function applyOffice(data) {
+  state.office = data;
+  updateOffice();
+}
+
+function updateOffice() {
+  $("nav-chat").disabled = $("nav-works").disabled = $("nav-quota").disabled = !state.ready;
+  $("office-controls").hidden = !state.connected || !state.office;
+  const disabled = !state.ready || state.officeBusy;
+  $("office-toggle").disabled = disabled;
+  $("office-timer-cancel").disabled = disabled;
+  const input = $("office-timer-at");
+  $("office-timer-set").disabled = disabled || !input.value || !input.validity.valid;
+  for (const button of document.querySelectorAll("button[data-work-action]")) {
+    button.disabled = !state.ready || state.workBusy.has(button.dataset.workAction);
+  }
+  if (!state.office) return;
+  const {running, timer, finishing, zone} = state.office;
+  for (const id of ["office-status", "works-office-status"]) {
+    $(id).textContent = running ? "Running" : "Paused";
+    $(id).classList.toggle("paused", !running);
+  }
+  $("office-toggle").textContent = running ? "Pause" : "Run";
+  $("office-toggle").dataset.to = running ? "pause" : "run";
+  $("office-finishing").hidden = !finishing;
+  $("office-finishing").textContent = `${finishing} turn${finishing === 1 ? "" : "s"} still finishing`;
+  $("office-zone").textContent = `Timer uses office computer time (UTC${zone}).`;
+  if (!input.value) {
+    $("office-timer-form").dataset.to = running ? "pause" : "run";
+    $("office-timer-label").textContent = running ? "Pause at" : "Run at";
+  }
+  $("office-timer-pending").hidden = !timer;
+  $("office-timer-description").textContent = timer ? `${timer.to === "run" ? "Run" : "Pause"} at ${timer.at}` : "";
+}
+
+async function officeAction(op, data = {}) {
+  state.officeBusy = true;
+  $("office-error").hidden = true;
+  updateOffice();
+  try {
+    const office = await request(op, data);
+    if (op === "timer") $("office-timer-at").value = "";
+    applyOffice(office);
+  } catch (error) {
+    $("office-error").textContent = error.message;
+    $("office-error").hidden = false;
+  } finally {
+    state.officeBusy = false;
+    updateOffice();
+  }
+}
+
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function dateLabel(date) {
+  return date.toLocaleString("en", {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+}
+
+function duration(seconds) {
+  seconds = Math.floor(seconds);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function timerLabel(label, instant) {
+  const node = element("span", "");
+  node.dataset.instant = instant;
+  node.dataset.label = label;
+  return node;
+}
+
+function updateWorkTimers() {
+  const now = (Date.now() + state.serverOffset) / 1000;
+  for (const node of $("works-list").querySelectorAll("[data-instant]")) {
+    node.textContent = node.dataset.label + duration(Math.max(0, now - Number(node.dataset.instant)));
+  }
+}
+
+function mergeFields(target, patch) {
+  for (const [key, value] of Object.entries(patch)) {
+    if (value !== null && !Array.isArray(value) && typeof value === "object" && target[key] !== null && typeof target[key] === "object") {
+      mergeFields(target[key], value);
+    } else target[key] = value;
+  }
+}
+
+function applyWorks(message) {
+  const data = message.data;
+  if (message.kind === "snapshot") {
+    state.works = data;
+    for (const work of data.works) if (work.turn) state.activities.set(work.agent_name, Math.max(state.activities.get(work.agent_name) ?? work.turn.last_activity_wall_at, work.turn.last_activity_wall_at));
+  }
+  else {
+    if (data.works) {
+      const cards = new Map(state.works.works.map((work) => [work.id, work]));
+      for (const work of data.works.added ?? []) cards.set(work.id, work);
+      for (const patch of data.works.changed ?? []) mergeFields(cards.get(patch.id), patch);
+      for (const id of data.works.removed ?? []) cards.delete(id);
+      state.works.works = data.works.order ? data.works.order.map((id) => cards.get(id)) : [...cards.values()];
+    }
+    for (const key of ["wakes", "project_state"]) {
+      if (key in data) state.works[key] = data[key];
+    }
+  }
+  renderWorks();
+}
+
+function workButton(label, key, op, data) {
+  const button = element("button", "danger", label);
+  button.type = "button";
+  button.dataset.workAction = key;
+  button.disabled = !state.ready || state.workBusy.has(key);
+  button.addEventListener("click", async () => {
+    state.workBusy.add(key);
+    updateOffice();
+    try { await request(op, data); }
+    catch (error) { showError(error); }
+    finally { state.workBusy.delete(key); updateOffice(); }
+  });
+  return button;
+}
+
+function renderWorks() {
+  const snapshot = state.works;
+  const previous = new Map([...$("works-list").children].map((card) => [Number(card.dataset.work), card]));
+  const outputScroll = new Map([...$("works-list").querySelectorAll("[data-output] .work-tail")]
+    .map((output) => [output, output.scrollTop]));
+  const fragment = document.createDocumentFragment();
+  if (snapshot.project_state !== "ready") {
+    fragment.append(element("p", "empty", `Project setup: ${snapshot.project_state}. Set it up on the computer.`));
+  } else if (!snapshot.works.length) {
+    fragment.append(element("p", "empty", "No open works."));
+  } else for (const work of snapshot.works) {
+    const card = element("article", "work-card");
+    card.dataset.work = work.id;
+    const header = element("header", "");
+    header.append(element("h2", "", work.agent_name),
+      element("span", `work-status ${work.derived_status}`, work.derived_status));
+    card.append(header, element("p", "work-meta", [
+      `${work.agent_runtime}/${work.agent_model}`, work.agent_effort, work.log_role, work.log_complexity,
+    ].filter(Boolean).join(" · ")));
+    if (work.task_title) card.append(element("p", "work-task", work.task_title));
+    card.append(element("code", "", work.branch));
+    card.append(element("p", "work-meta", `Started ${dateLabel(new Date(work.started_at))}`));
+    const turn = work.turn;
+    if (turn) {
+      const live = element("div", "work-live");
+      const quiet = timerLabel("Quiet ", Math.max(turn.started_wall_at, state.activities.get(work.agent_name) ?? turn.started_wall_at));
+      quiet.dataset.quietAgent = work.agent_name;
+      quiet.dataset.started = turn.started_wall_at;
+      const previousStop = previous.get(work.id)?.querySelector("button[data-work-action]");
+      const stop = previousStop?.dataset.workAction === `stop:${work.agent_name}` ? previousStop :
+        workButton("Stop turn", `stop:${work.agent_name}`, "work_stop", {agent: work.agent_name});
+      live.append(timerLabel("Running ", turn.started_wall_at), quiet,
+        stop);
+      card.append(live);
+      for (const {id, summary, started_at} of turn.call_instants) {
+        const call = element("div", "work-call");
+        call.dataset.call = id;
+        call.append(element("span", "", summary || "Tool call"), document.createTextNode(" · "), timerLabel("", started_at));
+        card.append(call);
+      }
+    } else if (work.derived_status === "reported") {
+      card.append(element("p", "page-note", `Waiting on ${work.assigner_name} to close it.`));
+    } else if (work.derived_status === "waiting") {
+      card.append(element("p", "page-note", `No turn. ${work.agent_name} is ${work.agent_status}.`));
+    }
+    const used = turn?.context_used ?? work.context_used;
+    const limit = turn?.context_used != null ? turn.context_limit : work.context_limit;
+    const context = element("div", "work-context", used == null || limit == null ? "Context fill: unknown" :
+      `Context fill: ${Math.floor(100 * used / limit)}% · ${used.toLocaleString("en")} / ${limit.toLocaleString("en")}`);
+    if (used != null && limit != null) {
+      const bar = element("progress", "");
+      bar.max = limit;
+      bar.value = used;
+      bar.setAttribute("aria-label", "Context fill");
+      context.append(bar);
+    }
+    card.append(context);
+    const brief = element("details", "");
+    brief.dataset.brief = "";
+    brief.open = previous.get(work.id)?.querySelector("[data-brief]").open ?? false;
+    brief.append(element("summary", "", "Brief"), element("div", "work-brief", work.brief));
+    card.append(brief);
+    if (work.status === "paused" && work.pause_reason) {
+      card.append(element("p", "page-note", work.pause_reason.replaceAll("_", " ")));
+      if (work.resume_after) card.append(element("p", "page-note", `Earliest resume ${dateLabel(new Date(Number(work.resume_after) * 1000))}`));
+    }
+    if (work.status === "failed" && work.fail_reason) card.append(element("p", "control-error", work.fail_reason.replaceAll("_", " ")));
+    let output = previous.get(work.id)?.querySelector("[data-output]");
+    if (!output) {
+      output = element("details", "");
+      output.dataset.output = work.id;
+      output.append(element("summary", "", "Output"), element("div", "work-tail", "Loading output…"));
+      output.addEventListener("toggle", () => reportView());
+    }
+    card.append(output);
+    fragment.append(card);
+  }
+  $("works-list").replaceChildren(fragment);
+  for (const [output, top] of outputScroll) output.scrollTop = top;
+  const wakes = document.createDocumentFragment();
+  for (const wake of snapshot.wakes) {
+    const row = element("div", "wake-item");
+    const description = element("div", "");
+    description.append(element("strong", "", `${wake.sender} → ${wake.recipient}`),
+      element("p", "work-meta", dateLabel(new Date(wake.due_at))), element("p", "", wake.body));
+    row.append(description, workButton("Cancel", `wake:${wake.id}`, "wake_cancel", {wake_id: wake.id}));
+    wakes.append(row);
+  }
+  $("works-wakes").replaceChildren(wakes);
+  $("wakes-section").hidden = !snapshot.wakes.length;
+  updateWorkTimers();
+  reportView();
+}
+
+function renderQuota(data) {
+  const quota = document.createDocumentFragment();
+  for (const [runtime, buckets] of data) {
+    if (!buckets.length) quota.append(element("p", "page-note", `${runtime}: no data`));
+    for (const bucket of buckets) {
+      const item = element("div", "quota-item");
+      item.append(element("strong", "", `${runtime} · ${bucket.label} · ${Math.floor(bucket.remaining_fraction * 100)}%`));
+      const bar = element("progress", "");
+      bar.max = 1;
+      bar.value = bucket.remaining_fraction;
+      bar.setAttribute("aria-label", `${runtime} ${bucket.label} quota left`);
+      item.append(bar, element("small", "", bucket.reset_time ?
+        `Resets ${dateLabel(new Date(Number(bucket.reset_time) * 1000))}` : "Reset time unknown"));
+      quota.append(item);
+    }
+  }
+  $("quota-list").replaceChildren(quota);
+}
+
+function renderWorkOutput(workId, data) {
+  const output = $("works-list").querySelector(`[data-output="${workId}"] .work-tail`);
+  if (output) officeRenderTranscript(output, data, "page-note");
 }
 
 function mergeMessages(rows) {
@@ -330,6 +636,7 @@ async function openConversation(peer) {
     showError(new Error("Retry the pending send before opening another conversation."));
     return;
   }
+  showPage("chat");
   const view = ++state.view;
   const changed = state.peer !== peer;
   state.peer = peer;
@@ -457,7 +764,24 @@ $("back-button").addEventListener("click", () => {
   $("workspace").classList.remove("show-chat");
   reportView();
 });
+$("menu-button").addEventListener("click", () => {
+  $("menu-dialog").showModal();
+  reportView();
+});
+$("close-menu").addEventListener("click", () => $("menu-dialog").close());
+$("menu-dialog").addEventListener("close", () => reportView());
+$("nav-chat").addEventListener("click", () => { showPage("chat"); syncMessages().catch(showError); });
+$("nav-works").addEventListener("click", () => showPage("works"));
+$("nav-quota").addEventListener("click", () => showPage("quota"));
+$("office-toggle").addEventListener("click", () => officeAction("switch", {to: $("office-toggle").dataset.to}));
+$("office-timer-at").addEventListener("input", updateOffice);
+$("office-timer-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  officeAction("timer", {to: event.currentTarget.dataset.to, at: $("office-timer-at").value});
+});
+$("office-timer-cancel").addEventListener("click", () => officeAction("timer_cancel"));
 $("device-button").addEventListener("click", () => {
+  $("menu-dialog").close();
   $("device-dialog").showModal();
   reportView();
 });

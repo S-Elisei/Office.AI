@@ -8,7 +8,7 @@
 
   <section class="panel">
     <div class="body" id="notices-list" hx-get="/fragments/notices"
-         hx-trigger="office:notices[!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
+         hx-trigger="office:notices[officeConcerns(this, event)&&!officeShouldSkip(this)] from:body" hx-swap="innerHTML">
       {% include "partials/notices_list.html" %}
     </div>
   </section>

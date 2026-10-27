@@ -86,6 +86,7 @@ def _context(
         "view_query": _view_query(parent, flat, all_done),
         "all_done_query": _view_query(parent, flat, not all_done),
         "signals": _signals(conn),
+        "watched_task_ids": sorted({value for task in shown for value in [task["id"], *task["children"], *task["blockers"]]}),
         **extra,
     }
 
@@ -100,6 +101,11 @@ def kanban_fragment(request: Request, parent: int | None = None, flat: bool = Fa
     return templates.TemplateResponse(
         request, "partials/kanban_board.html", _context(request, parent, flat, all_done)
     )
+
+
+@router.get("/fragments/kanban/crumbs")
+def crumbs_fragment(request: Request, parent: int | None = None, flat: bool = False, all_done: bool = False):
+    return templates.TemplateResponse(request, "partials/kanban_crumbs.html", _context(request, parent, flat, all_done))
 
 
 @router.get("/fragments/kanban/task/{task_id}")

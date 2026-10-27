@@ -1,0 +1,16 @@
+<nav class="kanban-crumbs" data-chain-ids="{{ chain | map(attribute='id') | join(',') }}">
+  {% if flat %}
+  <a href="/kanban">Top level</a> <span class="text-faint">›</span> <span>All tasks, flat</span>
+  {% else %}
+  {% if chain %}
+  <a href="/kanban">Top level</a>
+  {% for c in chain %}
+  <span class="text-faint">›</span>
+  {% if loop.last %}<span>#{{ c.id }} {{ c.title }}</span>{% else %}<a href="/kanban?parent={{ c.id }}">#{{ c.id }} {{ c.title }}</a>{% endif %}
+  {% endfor %}
+  {% else %}
+  <span>Top level</span>
+  {% endif %}
+  <span class="text-faint">·</span> <a href="/kanban?flat=1">All tasks, flat</a>
+  {% endif %}
+</nav>

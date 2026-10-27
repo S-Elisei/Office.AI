@@ -204,6 +204,8 @@ from office.web.routes.nav import office_switch as _office_switch  # noqa: E402
 
 templates.env.globals["nav_counts"] = _nav_counts
 templates.env.globals["office_switch"] = _office_switch
+from office.web.deps import get_db as _get_db, get_owner_name as _get_owner_name
+templates.env.globals["office_owner"] = lambda request: _get_owner_name(_get_db(request))
 templates.env.filters["fmt_time"] = fmt_time
 templates.env.filters["fmt_duration"] = fmt_duration
 templates.env.filters["pct"] = pct
